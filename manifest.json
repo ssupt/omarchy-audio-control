@@ -4,7 +4,7 @@
   "name": "Advanced Audio Control",
   "version": "0.1.0",
   "author": "Lorenzo Golluscio",
-  "description": "Per-application routing and advanced PipeWire device controls",
+  "description": "Route application audio and manage PipeWire device profiles and Bluetooth codecs",
   "kinds": [
     "bar-widget",
     "panel"
@@ -15,7 +15,7 @@
   },
   "barWidget": {
     "displayName": "Advanced Audio Control",
-    "description": "Per-application routing and advanced PipeWire device controls",
+    "description": "Route application audio and manage PipeWire device profiles and Bluetooth codecs",
     "category": "Audio",
     "allowMultiple": false
   },

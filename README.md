@@ -12,7 +12,7 @@ instead of introducing a separate mixer application.
 - Configure device profiles and Bluetooth codecs in separate keyboard-navigable tabs.
 - Control when Bluetooth headsets switch into communication mode.
 
-The optional [Bluetooth Audio](https://github.com/ssupt/omarchy-bluetooth-audio)
+The optional [Advanced Bluetooth Audio](https://github.com/ssupt/omarchy-bluetooth-audio)
 companion brings the same codec controls into Omarchy's Bluetooth panel while
 preserving its native pairing, discovery, and connection behavior.
 
