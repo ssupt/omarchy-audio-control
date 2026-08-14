@@ -1,0 +1,91 @@
+#!/bin/bash
+
+# Add or remove Setup > Audio in Omarchy's supported user menu extension.
+# Omarchy plugins deliberately have no install hooks, so this helper is an
+# explicit, reversible integration step rather than a hidden config mutation.
+
+set -euo pipefail
+
+action=${1:-install}
+menu_file=${AUDIO_CONTROL_MENU_FILE:-$HOME/.config/omarchy/extensions/omarchy-menu.jsonc}
+marker="  // Added by ssupt.audio-control"
+entry='  "setup.audio": {"icon":"","label":"Audio","action":"omarchy-shell shell summon ssupt.audio-control"}'
+
+usage() {
+  echo "Usage: audio-menu-entry [install|remove]" >&2
+  exit 1
+}
+
+refresh_menu() {
+  [[ ${AUDIO_CONTROL_SKIP_MENU_REFRESH:-0} == 1 ]] && return
+  command -v omarchy-shell >/dev/null 2>&1 || return
+  omarchy-shell shell call omarchy.menu refresh "" >/dev/null 2>&1 || true
+}
+
+install_entry() {
+  mkdir -p "$(dirname -- "$menu_file")"
+  if [[ ! -f $menu_file ]]; then
+    printf '{\n%s\n%s\n}\n' "$marker" "$entry" >"$menu_file"
+    refresh_menu
+    return
+  fi
+
+  grep -Eq '^[[:space:]]*"setup\.audio"[[:space:]]*:' "$menu_file" && return
+
+  mapfile -t lines <"$menu_file"
+  closing=-1
+  for (( i = ${#lines[@]} - 1; i >= 0; i-- )); do
+    if [[ ${lines[$i]} =~ ^[[:space:]]*\}[[:space:]]*$ ]]; then
+      closing=$i
+      break
+    fi
+  done
+  (( closing >= 0 )) || { echo "Could not find the menu object's closing brace" >&2; exit 1; }
+
+  for (( i = closing - 1; i >= 0; i-- )); do
+    line=${lines[$i]}
+    [[ $line =~ ^[[:space:]]*$ || $line =~ ^[[:space:]]*// ]] && continue
+    if [[ ! $line =~ \{[[:space:]]*$ && ! $line =~ ,[[:space:]]*$ ]]; then
+      lines[$i]="$line,"
+    fi
+    break
+  done
+
+  tmp=$(mktemp "${menu_file}.tmp.XXXXXX")
+  for (( i = 0; i < ${#lines[@]}; i++ )); do
+    if (( i == closing )); then
+      printf '%s\n%s\n' "$marker" "$entry"
+    fi
+    printf '%s\n' "${lines[$i]}"
+  done >"$tmp"
+  mv "$tmp" "$menu_file"
+  refresh_menu
+}
+
+remove_entry() {
+  [[ -f $menu_file ]] || return
+  mapfile -t lines <"$menu_file"
+  tmp=$(mktemp "${menu_file}.tmp.XXXXXX")
+  entry_pattern='^[[:space:]]*"setup\.audio"[[:space:]]*:'
+  skip_entry=0
+  for line in "${lines[@]}"; do
+    if [[ $line == "$marker" ]]; then
+      skip_entry=1
+      continue
+    fi
+    if (( skip_entry )) && [[ $line =~ $entry_pattern ]]; then
+      skip_entry=0
+      continue
+    fi
+    skip_entry=0
+    printf '%s\n' "$line"
+  done >"$tmp"
+  mv "$tmp" "$menu_file"
+  refresh_menu
+}
+
+case "$action" in
+  install) install_entry ;;
+  remove) remove_entry ;;
+  *) usage ;;
+esac

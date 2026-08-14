@@ -1,0 +1,49 @@
+#!/bin/bash
+
+# omarchy:summary=List available audio card profiles as JSON
+# omarchy:group=audio
+
+set -o pipefail
+
+timeout 2 pactl -f json list cards 2>/dev/null | jq -c '
+  def port_supports($card; $profile; $direction):
+    any(
+      (($card.ports // {}) | to_entries)[]?;
+      ((.value.priority // 0) > 0)
+      and ((.value.profiles // []) | index($profile) != null)
+      and (.key | test($direction))
+    );
+
+  map(. as $card | {
+    name: $card.name,
+    label: ($card.properties["device.description"] // $card.properties["device.alias"] // $card.name),
+    bluetooth: (($card.properties["device.api"] // "") == "bluez5"),
+    address: ($card.properties["api.bluez5.address"] // $card.properties["device.string"] // ""),
+    activeProfile: ($card.active_profile // "off"),
+    profiles: (
+      $card.profiles
+      | to_entries
+      | map(
+          select((.value.available != false and .value.available != "no") or .key == $card.active_profile)
+          | select(
+              .key == $card.active_profile
+              or .key == "off"
+              or (($card.properties["device.api"] // "") == "bluez5")
+              or (
+                ((.value.sinks // 0) == 0 or port_supports($card; .key; "output"))
+                and ((.value.sources // 0) == 0 or port_supports($card; .key; "input"))
+              )
+            )
+          | {
+              value: .key,
+              label: (.value.description // .key),
+              sinks: (.value.sinks // 0),
+              sources: (.value.sources // 0),
+              priority: (.value.priority // 0)
+            }
+        )
+      | sort_by(-.priority, .label)
+      | map(del(.priority))
+    )
+  })
+' || exit 1

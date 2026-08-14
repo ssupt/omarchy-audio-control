@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# omarchy:summary=Show or set automatic Bluetooth headset mode
+# omarchy:group=audio
+# omarchy:args=[on|off]
+
+setting=bluetooth.autoswitch-to-headset-profile
+action=${1:-}
+
+if (( $# > 1 )); then
+  echo "Usage: omarchy-audio-bluetooth-autoswitch [on|off]" >&2
+  exit 1
+fi
+
+case "$action" in
+  "") ;;
+  on) wpctl settings --save "$setting" true >/dev/null ;;
+  off) wpctl settings --save "$setting" false >/dev/null ;;
+  *)
+    echo "Usage: omarchy-audio-bluetooth-autoswitch [on|off]" >&2
+    exit 1
+    ;;
+esac
+
+wpctl settings "$setting" 2>/dev/null | awk '$1 == "Value:" && ($2 == "true" || $2 == "false") { print $2; found=1 } END { exit !found }'

@@ -1,0 +1,138 @@
+#!/bin/bash
+
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+TEST_DIR="$ROOT/test"
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+for script in "$ROOT"/scripts/*; do
+  bash -n "$script" || fail "bash syntax: ${script##*/}"
+done
+echo "PASS: helper syntax"
+
+node - "$ROOT/Model.js" <<'JS'
+const assert = require('node:assert/strict')
+const model = require(process.argv[2])
+
+const cards = model.parseAudioProfiles(JSON.stringify([{
+  name: 'bluez_card.test',
+  label: 'Headphones',
+  bluetooth: true,
+  activeProfile: 'a2dp-aac',
+  profiles: [
+    { value: 'a2dp-aac', label: 'High Fidelity Playback (codec AAC)', sinks: 1, sources: 0 },
+    { value: 'headset-msbc', label: 'Headset Head Unit (codec mSBC)', sinks: 1, sources: 1 }
+  ]
+}]))
+
+assert.equal(cards.length, 1)
+assert.equal(model.hasBluetoothCards(cards), true)
+assert.deepEqual(model.audioCardsByBluetooth(cards, true).map(card => card.label), ['Headphones'])
+assert.deepEqual(model.audioProfileOptions(cards[0]), [
+  { value: 'a2dp-aac', label: 'High fidelity (AAC, no microphone)' },
+  { value: 'headset-msbc', label: 'Headset (mSBC, microphone)' }
+])
+console.log('PASS: profile model')
+JS
+
+profiles=$(
+  AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
+    PATH="$TEST_DIR/mocks:$PATH" \
+    "$ROOT/scripts/audio-profiles"
+)
+
+jq -e '
+  def values($label): .[] | select(.label == $label) | [.profiles[].value];
+  (values("USB Headset") == [
+    "output:analog-stereo+input:mono-fallback",
+    "output:analog-stereo",
+    "input:mono-fallback",
+    "off"
+  ])
+  and (values("Bluetooth Headphones") | index("a2dp-sink-aac") != null)
+  and (values("Bluetooth Headphones") | index("headset-head-unit-msbc") != null)
+  and (values("HDMI Receiver") | index("output:hdmi-surround") != null)
+' <<<"$profiles" >/dev/null || fail "safe profile filtering"
+echo "PASS: safe profile filtering"
+
+profile_log=$(mktemp)
+profile_state=$(mktemp)
+trap 'rm -f "$profile_log" "$profile_state"' EXIT
+printf 'old\n' >"$profile_state"
+
+if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
+  AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
+  AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
+  PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-profile-set" \
+    alsa_card.usb-example-headset output:iec958-ac3-surround-51 >/dev/null 2>&1; then
+  fail "unsafe profile accepted"
+fi
+[[ ! -s $profile_log ]] || fail "unsafe profile changed hardware"
+
+AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
+  AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
+  AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
+  PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-profile-set" \
+    alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback
+
+expected_profile_log=$(cat <<'EOF'
+set-sink-mute 100 true
+set-sink-input-mute 300 true
+set-card-profile alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback
+set-sink-mute 101 true
+set-sink-volume 101 42%
+set-sink-mute 101 false
+set-source-volume 200 36%
+set-source-mute 200 true
+set-sink-input-mute 300 false
+EOF
+)
+[[ $(<"$profile_log") == "$expected_profile_log" ]] || fail "safe profile transition order"
+echo "PASS: safe profile transition"
+
+menu_tmp=$(mktemp -d)
+menu_file="$menu_tmp/omarchy-menu.jsonc"
+trap 'rm -f "$profile_log" "$profile_state"; rm -rf "$menu_tmp"' EXIT
+cat >"$menu_file" <<'EOF'
+{
+  // Existing customization
+  "personal.notes": {"icon":"N","label":"Notes","action":"true"}
+}
+EOF
+
+AUDIO_CONTROL_MENU_FILE="$menu_file" AUDIO_CONTROL_SKIP_MENU_REFRESH=1 \
+  "$ROOT/scripts/audio-menu-entry" install
+AUDIO_CONTROL_MENU_FILE="$menu_file" AUDIO_CONTROL_SKIP_MENU_REFRESH=1 \
+  "$ROOT/scripts/audio-menu-entry" install
+
+node - "$menu_file" <<'JS'
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const raw = fs.readFileSync(process.argv[2], 'utf8')
+const parsed = JSON.parse(raw.replace(/^\s*\/\/[^\n]*(\n|$)/gm, '').replace(/,(\s*[}\]])/g, '$1'))
+assert.equal(parsed['personal.notes'].label, 'Notes')
+assert.equal(parsed['setup.audio'].label, 'Audio')
+assert.equal((raw.match(/"setup\.audio"/g) || []).length, 1)
+JS
+
+AUDIO_CONTROL_MENU_FILE="$menu_file" AUDIO_CONTROL_SKIP_MENU_REFRESH=1 \
+  "$ROOT/scripts/audio-menu-entry" remove
+grep -q '"personal.notes"' "$menu_file" || fail "menu integration removed another entry"
+! grep -q '"setup.audio"' "$menu_file" || fail "menu integration removal"
+echo "PASS: menu integration"
+
+jq -e '
+  .schemaVersion == 1
+  and .id == "ssupt.audio-control"
+  and (.kinds | index("bar-widget") != null)
+  and (.kinds | index("panel") != null)
+  and .omarchy.clonedFrom == "omarchy.audio"
+' "$ROOT/manifest.json" >/dev/null || fail "manifest"
+echo "PASS: manifest"

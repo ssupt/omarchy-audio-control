@@ -1,0 +1,84 @@
+[
+  {
+    "index": 10,
+    "name": "alsa_card.usb-example-headset",
+    "active_profile": "output:analog-stereo",
+    "properties": {
+      "device.api": "alsa",
+      "device.description": "USB Headset"
+    },
+    "ports": {
+      "analog-output": {
+        "priority": 9900,
+        "profiles": [
+          "output:analog-stereo",
+          "output:analog-stereo+input:mono-fallback"
+        ]
+      },
+      "analog-input-headset-mic": {
+        "priority": 8800,
+        "profiles": [
+          "input:mono-fallback",
+          "output:analog-stereo+input:mono-fallback",
+          "output:iec958-stereo+input:mono-fallback"
+        ]
+      },
+      "iec958-stereo-output": {
+        "priority": 0,
+        "profiles": [
+          "output:iec958-stereo",
+          "output:iec958-stereo+input:mono-fallback"
+        ]
+      }
+    },
+    "profiles": {
+      "off": { "description": "Off", "sinks": 0, "sources": 0, "priority": 0, "available": true },
+      "output:analog-stereo+input:mono-fallback": { "description": "Analog Stereo Output + Mono Input", "sinks": 1, "sources": 1, "priority": 6501, "available": true },
+      "output:analog-stereo": { "description": "Analog Stereo Output", "sinks": 1, "sources": 0, "priority": 6500, "available": true },
+      "output:iec958-stereo+input:mono-fallback": { "description": "Digital Stereo Output + Mono Input", "sinks": 1, "sources": 1, "priority": 5501, "available": true },
+      "output:iec958-stereo": { "description": "Digital Stereo Output", "sinks": 1, "sources": 0, "priority": 5500, "available": true },
+      "output:iec958-ac3-surround-51": { "description": "Digital Surround 5.1 Output", "sinks": 1, "sources": 0, "priority": 300, "available": true },
+      "pro-audio": { "description": "Pro Audio", "sinks": 1, "sources": 1, "priority": 1, "available": true },
+      "input:mono-fallback": { "description": "Mono Input", "sinks": 0, "sources": 1, "priority": 1, "available": true }
+    }
+  },
+  {
+    "index": 20,
+    "name": "bluez_card.00_11_22_33_44_55",
+    "active_profile": "a2dp-sink-aac",
+    "properties": {
+      "device.api": "bluez5",
+      "device.description": "Bluetooth Headphones",
+      "api.bluez5.address": "00:11:22:33:44:55"
+    },
+    "ports": {},
+    "profiles": {
+      "off": { "description": "Off", "sinks": 0, "sources": 0, "priority": 0, "available": true },
+      "a2dp-sink-aac": { "description": "High Fidelity Playback (A2DP Sink, codec AAC)", "sinks": 1, "sources": 0, "priority": 20, "available": true },
+      "headset-head-unit-msbc": { "description": "Headset Head Unit (HSP/HFP, codec mSBC)", "sinks": 1, "sources": 1, "priority": 10, "available": true }
+    }
+  },
+  {
+    "index": 30,
+    "name": "alsa_card.pci-example-hdmi",
+    "active_profile": "output:hdmi-stereo",
+    "properties": {
+      "device.api": "alsa",
+      "device.description": "HDMI Receiver"
+    },
+    "ports": {
+      "hdmi-output-0": {
+        "priority": 5900,
+        "profiles": [
+          "output:hdmi-stereo",
+          "output:hdmi-surround"
+        ]
+      }
+    },
+    "profiles": {
+      "off": { "description": "Off", "sinks": 0, "sources": 0, "priority": 0, "available": true },
+      "output:hdmi-stereo": { "description": "Digital Stereo (HDMI) Output", "sinks": 1, "sources": 0, "priority": 5900, "available": true },
+      "output:hdmi-surround": { "description": "Digital Surround 5.1 (HDMI) Output", "sinks": 1, "sources": 0, "priority": 800, "available": true }
+    }
+  }
+]

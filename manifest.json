@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "ssupt.audio-control",
+  "name": "Advanced Audio Control",
+  "version": "0.1.0",
+  "author": "Lorenzo Golluscio",
+  "description": "Per-application routing and advanced PipeWire device controls",
+  "kinds": [
+    "bar-widget",
+    "panel"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml",
+    "panel": "AdvancedAudio.qml"
+  },
+  "barWidget": {
+    "displayName": "Advanced Audio Control",
+    "description": "Per-application routing and advanced PipeWire device controls",
+    "category": "Audio",
+    "allowMultiple": false
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.audio"
+  }
+}

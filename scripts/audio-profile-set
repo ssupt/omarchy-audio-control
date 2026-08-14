@@ -1,0 +1,110 @@
+#!/bin/bash
+
+# omarchy:summary=Set an audio card profile
+# omarchy:group=audio
+# omarchy:args=<card> <profile>
+# omarchy:examples=omarchy audio profile set bluez_card.00_11_22_33_44_55 a2dp-sink
+
+card=${1:-}
+profile=${2:-}
+
+if (( $# != 2 )) || [[ -z $card || -z $profile ]]; then
+  echo "Usage: omarchy-audio-profile-set <card> <profile>" >&2
+  exit 1
+fi
+
+set -o pipefail
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+if ! "$script_dir/audio-profiles" |
+  jq -e --arg card "$card" --arg profile "$profile" '
+    any(.[]; .name == $card and any(.profiles[]; .value == $profile))
+  ' >/dev/null; then
+  echo "Profile is not available for this device" >&2
+  exit 1
+fi
+
+card_index=$(timeout 2 pactl -f json list cards 2>/dev/null |
+  jq -r --arg card "$card" 'map(select(.name == $card))[0].index // empty') || exit 1
+[[ $card_index =~ ^[0-9]+$ ]] || exit 1
+
+sink_state=$(timeout 2 pactl -f json list sinks 2>/dev/null |
+  jq -r --argjson card "$card_index" '
+    map(select(.card == $card))[0]
+    | if . == null then empty
+      else [(.volume | to_entries[0].value.value_percent // ""), (.mute // false)] | @tsv
+      end' || true)
+source_state=$(timeout 2 pactl -f json list sources 2>/dev/null |
+  jq -r --argjson card "$card_index" '
+    map(select(.card == $card))[0]
+    | if . == null then empty
+      else [(.volume | to_entries[0].value.value_percent // ""), (.mute // false)] | @tsv
+      end' || true)
+
+IFS=$'\t' read -r sink_volume sink_muted <<<"$sink_state"
+IFS=$'\t' read -r source_volume source_muted <<<"$source_state"
+
+# Profile changes recreate endpoints, and a newly exposed sink can carry a
+# previously stored 100% volume. Mute the old endpoint, create the new one,
+# restore its level first, and only then restore the original mute state.
+old_sinks=()
+while IFS= read -r sink_index; do
+  [[ $sink_index =~ ^[0-9]+$ ]] || continue
+  old_sinks+=("$sink_index")
+  timeout 2 pactl set-sink-mute "$sink_index" true >/dev/null 2>&1 || true
+done < <(timeout 2 pactl -f json list sinks 2>/dev/null |
+  jq -r --argjson card "$card_index" '.[] | select(.card == $card) | .index' || true)
+
+old_sink_inputs=()
+old_sink_input_mutes=()
+if (( ${#old_sinks[@]} > 0 )); then
+  old_sinks_json=$(printf '%s\n' "${old_sinks[@]}" | jq -Rsc 'split("\n") | map(select(length > 0) | tonumber)')
+  while IFS=$'\t' read -r input_index input_muted; do
+    [[ $input_index =~ ^[0-9]+$ ]] || continue
+    old_sink_inputs+=("$input_index")
+    old_sink_input_mutes+=("$input_muted")
+    timeout 2 pactl set-sink-input-mute "$input_index" true >/dev/null 2>&1 || true
+  done < <(timeout 2 pactl -f json list sink-inputs 2>/dev/null |
+    jq -r --argjson sinks "$old_sinks_json" '
+      .[] | select(.sink as $sink | $sinks | index($sink)) | [.index, (.mute // false)] | @tsv
+    ' || true)
+fi
+
+restore_sink_inputs() {
+  for (( input = 0; input < ${#old_sink_inputs[@]}; input++ )); do
+    timeout 2 pactl set-sink-input-mute \
+      "${old_sink_inputs[$input]}" "${old_sink_input_mutes[$input]}" >/dev/null 2>&1 || true
+  done
+}
+
+if ! timeout 2 pactl set-card-profile "$card" "$profile"; then
+  for sink_index in "${old_sinks[@]}"; do
+    timeout 2 pactl set-sink-mute "$sink_index" "${sink_muted:-false}" >/dev/null 2>&1 || true
+  done
+  restore_sink_inputs
+  exit 1
+fi
+
+for (( attempt = 0; attempt < 20; attempt++ )); do
+  mapfile -t new_sinks < <(timeout 2 pactl -f json list sinks 2>/dev/null |
+    jq -r --argjson card "$card_index" '.[] | select(.card == $card) | .index' || true)
+  mapfile -t new_sources < <(timeout 2 pactl -f json list sources 2>/dev/null |
+    jq -r --argjson card "$card_index" '.[] | select(.card == $card) | .index' || true)
+  (( ${#new_sinks[@]} > 0 || ${#new_sources[@]} > 0 )) && break
+  sleep 0.05
+done
+
+for sink_index in "${new_sinks[@]}"; do
+  [[ $sink_index =~ ^[0-9]+$ ]] || continue
+  timeout 2 pactl set-sink-mute "$sink_index" true >/dev/null 2>&1 || true
+  [[ -n $sink_volume ]] && timeout 2 pactl set-sink-volume "$sink_index" "$sink_volume" >/dev/null 2>&1 || true
+  timeout 2 pactl set-sink-mute "$sink_index" "${sink_muted:-false}" >/dev/null 2>&1 || true
+done
+
+for source_index in "${new_sources[@]}"; do
+  [[ $source_index =~ ^[0-9]+$ ]] || continue
+  [[ -n $source_volume ]] && timeout 2 pactl set-source-volume "$source_index" "$source_volume" >/dev/null 2>&1 || true
+  timeout 2 pactl set-source-mute "$source_index" "${source_muted:-false}" >/dev/null 2>&1 || true
+done
+
+restore_sink_inputs

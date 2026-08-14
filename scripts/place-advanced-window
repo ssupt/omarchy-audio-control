@@ -1,0 +1,36 @@
+#!/bin/bash
+
+set -o pipefail
+
+# Capture the caller's workspace before focusing or moving the existing
+# settings window. A second summon from another workspace should bring the
+# one settings surface to the user instead of activating it out of sight.
+target_workspace=$(hyprctl activeworkspace -j 2>/dev/null | jq -r '.id // empty') || exit 1
+[[ $target_workspace =~ ^[1-9][0-9]*$ ]] || exit 1
+
+for (( attempt = 0; attempt < 40; attempt++ )); do
+  client=$(hyprctl clients -j 2>/dev/null | jq -c '
+    [.[] | select(.class == "org.quickshell" and .title == "Advanced Audio Control")][-1] // empty
+  ') || exit 1
+
+  address=$(jq -r '.address // empty' <<<"$client")
+  floating=$(jq -r '.floating // false' <<<"$client")
+  current_workspace=$(jq -r '.workspace.id // empty' <<<"$client")
+  if [[ $address =~ ^0x[0-9a-fA-F]+$ ]]; then
+    window="address:$address"
+    if [[ $current_workspace != "$target_workspace" ]]; then
+      hyprctl dispatch "hl.dsp.window.move({ workspace = \"$target_workspace\", follow = false, window = \"$window\" })" >/dev/null || exit 1
+    fi
+    if [[ $floating != "true" ]]; then
+      hyprctl dispatch "hl.dsp.window.float({ window = \"$window\", action = \"toggle\" })" >/dev/null || exit 1
+    fi
+    hyprctl dispatch "hl.dsp.window.resize({ window = \"$window\", x = 680, y = 560 })" >/dev/null || exit 1
+    hyprctl dispatch "hl.dsp.window.center({ window = \"$window\" })" >/dev/null || exit 1
+    hyprctl dispatch "hl.dsp.focus({ window = \"$window\" })" >/dev/null || exit 1
+    exit 0
+  fi
+
+  sleep 0.05
+done
+
+exit 1

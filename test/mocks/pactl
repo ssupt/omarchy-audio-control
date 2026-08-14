@@ -1,0 +1,41 @@
+#!/bin/bash
+
+if [[ $* == "-f json list cards" && -n ${AUDIO_CONTROL_CARD_FIXTURE:-} ]]; then
+  command cat "$AUDIO_CONTROL_CARD_FIXTURE"
+  exit 0
+fi
+
+if [[ -n ${AUDIO_CONTROL_PROFILE_LOG:-} && -n ${AUDIO_CONTROL_PROFILE_STATE:-} ]]; then
+  state=$(<"$AUDIO_CONTROL_PROFILE_STATE")
+
+  case "$*" in
+    "-f json list sinks")
+      if [[ $state == old ]]; then
+        echo '[{"index":100,"card":10,"volume":{"front-left":{"value_percent":"42%"}},"mute":false}]'
+      else
+        echo '[{"index":101,"card":10,"volume":{"front-left":{"value_percent":"100%"}},"mute":false}]'
+      fi
+      exit 0
+      ;;
+    "-f json list sources")
+      echo '[{"index":200,"card":10,"volume":{"mono":{"value_percent":"36%"}},"mute":true}]'
+      exit 0
+      ;;
+    "-f json list sink-inputs")
+      echo '[{"index":300,"sink":100,"mute":false}]'
+      exit 0
+      ;;
+    set-card-profile\ *)
+      printf '%s\n' "$*" >>"$AUDIO_CONTROL_PROFILE_LOG"
+      printf 'new\n' >"$AUDIO_CONTROL_PROFILE_STATE"
+      exit 0
+      ;;
+    set-sink-*|set-source-*)
+      printf '%s\n' "$*" >>"$AUDIO_CONTROL_PROFILE_LOG"
+      exit 0
+      ;;
+  esac
+fi
+
+echo "Unexpected pactl call: $*" >&2
+exit 1
