@@ -19,7 +19,11 @@ preserving its native pairing, discovery, and connection behavior.
 ## Requirements
 
 - Omarchy Quattro
-- PipeWire with WirePlumber
+- PipeWire with WirePlumber (`pactl`, `wpctl`, and `pw-metadata`)
+- `jq`, `hyprctl`, and `timeout`
+
+These commands are present in a standard Omarchy installation. The plugin does
+not require `sudo` or install a background service.
 
 ## Installation
 
