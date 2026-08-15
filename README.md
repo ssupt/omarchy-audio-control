@@ -16,6 +16,8 @@ The optional [Advanced Bluetooth Audio](https://github.com/ssupt/omarchy-bluetoo
 companion brings the same codec controls into Omarchy's Bluetooth panel while
 preserving its native pairing, discovery, and connection behavior.
 
+More plugins by `ssupt`: [omarchy-plugins](https://github.com/ssupt/omarchy-plugins).
+
 ## Requirements
 
 - Omarchy Quattro
