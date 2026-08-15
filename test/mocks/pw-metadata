@@ -1,0 +1,8 @@
+#!/bin/bash
+
+[[ -n ${AUDIO_CONTROL_ROUTE_LOG:-} ]] || {
+  echo "Unexpected pw-metadata call: $*" >&2
+  exit 1
+}
+
+printf 'pw-metadata %s\n' "$*" >>"$AUDIO_CONTROL_ROUTE_LOG"

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# omarchy:summary=Route a live application audio stream to an output
+# omarchy:summary=Set or clear a persistent application output route
 # omarchy:group=audio
 # omarchy:args=<stream-serial> <sink-serial> [override|default]
 
@@ -15,10 +15,11 @@ if (( $# < 2 || $# > 3 )) || [[ ! $stream =~ ^[0-9]+$ || ! $sink =~ ^[0-9]+$ ]] 
 fi
 timeout 2 pactl move-sink-input "$stream" "$sink" || exit 1
 
-# Moving through Pulse normally marks a stream with an explicit target, except
-# when it is already on that sink. Write both target forms ourselves so pinning
-# to the current default is distinct from following it. Clear both when the user
-# returns to the default-following mode.
+# WirePlumber stores explicit stream targets by application identity and restores
+# them when that application creates a new stream. Moving through Pulse normally
+# writes such a target, except when the stream is already on that sink. Write both
+# target forms ourselves so choosing the current default is still persistent,
+# and clear both when the user returns to default-following mode.
 stream_object_id=$(timeout 2 pactl -f json list sink-inputs 2>/dev/null |
   jq -r --arg stream "$stream" 'map(select((.index | tostring) == $stream))[0].properties."object.id" // empty') || exit 1
 [[ $stream_object_id =~ ^[0-9]+$ ]] || exit 1

@@ -37,8 +37,53 @@ assert.deepEqual(model.audioProfileOptions(cards[0]), [
   { value: 'a2dp-aac', label: 'High fidelity (AAC, no microphone)' },
   { value: 'headset-msbc', label: 'Headset (mSBC, microphone)' }
 ])
-console.log('PASS: profile model')
+
+const defaultOutput = {
+  name: 'default-output',
+  nickname: 'Desk Speakers',
+  ready: true,
+  properties: { 'object.serial': 10 }
+}
+const headphones = {
+  name: 'headphones',
+  nickname: 'Headphones',
+  ready: true,
+  properties: { 'object.serial': 11 }
+}
+assert.deepEqual(model.streamOutputOptions([defaultOutput, headphones], defaultOutput), [
+  { value: 'default:10', label: 'Follow default output' },
+  { value: 'override:10', label: 'Always use Desk Speakers' },
+  { value: 'override:11', label: 'Always use Headphones' }
+])
+console.log('PASS: profile and routing model')
 JS
+
+route_log=$(mktemp)
+trap 'rm -f "$route_log"' EXIT
+
+AUDIO_CONTROL_ROUTE_LOG="$route_log" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-stream-route-set" 300 101 override
+
+expected_route_log=$(cat <<'EOF'
+move-sink-input 300 101
+pw-metadata -n default -- 900 target.object 101 Spa:Id
+pw-metadata -n default -- 900 target.node 1001 Spa:Id
+EOF
+)
+[[ $(<"$route_log") == "$expected_route_log" ]] || fail "persistent stream target"
+
+: >"$route_log"
+AUDIO_CONTROL_ROUTE_LOG="$route_log" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-stream-route-set" 300 101 default
+
+expected_route_log=$(cat <<'EOF'
+move-sink-input 300 101
+pw-metadata -n default -- 900 target.object -1 Spa:Id
+pw-metadata -n default -- 900 target.node -1 Spa:Id
+EOF
+)
+[[ $(<"$route_log") == "$expected_route_log" ]] || fail "default-following stream target"
+echo "PASS: persistent application routing"
 
 profiles=$(
   AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
@@ -62,7 +107,7 @@ echo "PASS: safe profile filtering"
 
 profile_log=$(mktemp)
 profile_state=$(mktemp)
-trap 'rm -f "$profile_log" "$profile_state"' EXIT
+trap 'rm -f "$route_log" "$profile_log" "$profile_state"' EXIT
 printf 'old\n' >"$profile_state"
 
 if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
@@ -99,7 +144,7 @@ echo "PASS: safe profile transition"
 
 menu_tmp=$(mktemp -d)
 menu_file="$menu_tmp/omarchy-menu.jsonc"
-trap 'rm -f "$profile_log" "$profile_state"; rm -rf "$menu_tmp"' EXIT
+trap 'rm -f "$route_log" "$profile_log" "$profile_state"; rm -rf "$menu_tmp"' EXIT
 cat >"$menu_file" <<'EOF'
 {
   // Existing customization
@@ -131,6 +176,8 @@ echo "PASS: menu integration"
 jq -e '
   .schemaVersion == 1
   and .id == "ssupt.audio-control"
+  and .version == "0.2.0"
+  and .author == "ssupt"
   and (.kinds | index("bar-widget") != null)
   and (.kinds | index("panel") != null)
   and .omarchy.clonedFrom == "omarchy.audio"

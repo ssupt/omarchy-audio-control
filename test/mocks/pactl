@@ -5,6 +5,23 @@ if [[ $* == "-f json list cards" && -n ${AUDIO_CONTROL_CARD_FIXTURE:-} ]]; then
   exit 0
 fi
 
+if [[ -n ${AUDIO_CONTROL_ROUTE_LOG:-} ]]; then
+  case "$*" in
+    "move-sink-input 300 101")
+      printf '%s\n' "$*" >>"$AUDIO_CONTROL_ROUTE_LOG"
+      exit 0
+      ;;
+    "-f json list sink-inputs")
+      echo '[{"index":300,"sink":101,"properties":{"object.id":"900"}}]'
+      exit 0
+      ;;
+    "-f json list sinks")
+      echo '[{"index":101,"properties":{"object.id":"1001"}}]'
+      exit 0
+      ;;
+  esac
+fi
+
 if [[ -n ${AUDIO_CONTROL_PROFILE_LOG:-} && -n ${AUDIO_CONTROL_PROFILE_STATE:-} ]]; then
   state=$(<"$AUDIO_CONTROL_PROFILE_STATE")
 

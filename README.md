@@ -8,7 +8,7 @@ instead of introducing a separate mixer application.
 
 ## Features
 
-- Route individual application streams to a chosen output.
+- Remember each application's chosen output across stream and application restarts.
 - Configure device profiles and Bluetooth codecs in separate keyboard-navigable tabs.
 - Control when Bluetooth headsets switch into communication mode.
 
@@ -24,6 +24,10 @@ preserving its native pairing, discovery, and connection behavior.
 
 These commands are present in a standard Omarchy installation. The plugin does
 not require `sudo` or install a background service.
+
+Application routes use WirePlumber's native stream-target restoration. Choosing
+**Follow default output** removes the remembered target; choosing **Always use**
+an output restores that choice whenever the application creates a new stream.
 
 ## Installation
 

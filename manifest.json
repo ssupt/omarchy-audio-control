@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "ssupt.audio-control",
   "name": "Advanced Audio Control",
-  "version": "0.1.0",
-  "author": "Lorenzo Golluscio",
-  "description": "Route application audio and manage PipeWire device profiles and Bluetooth codecs",
+  "version": "0.2.0",
+  "author": "ssupt",
+  "description": "Adds per-application output routing, device profiles, and Bluetooth codec controls to Omarchy's audio panel",
   "kinds": [
     "bar-widget",
     "panel"
@@ -15,7 +15,7 @@
   },
   "barWidget": {
     "displayName": "Advanced Audio Control",
-    "description": "Route application audio and manage PipeWire device profiles and Bluetooth codecs",
+    "description": "Adds per-application output routing, device profiles, and Bluetooth codec controls to Omarchy's audio panel",
     "category": "Audio",
     "allowMultiple": false
   },

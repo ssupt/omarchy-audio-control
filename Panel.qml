@@ -116,8 +116,11 @@ Panel {
   property var displayAudioStreams: []
 
   // Per-application routing is separate from the preferred default sink.
-  // pactl and Quickshell expose the same PipeWire object.serial values, so
-  // this map is exact even when several applications share a display name.
+  // WirePlumber persists explicit targets by application identity and restores
+  // them when a stream is recreated; returning to the default option clears
+  // that target. pactl and Quickshell expose the same PipeWire object.serial
+  // values, so this live-state map remains exact even when several applications
+  // share a display name.
   property var streamRoutes: ({})
   property bool streamOutputMenuOpen: false
   property string streamRouteReadError: ""
@@ -127,7 +130,7 @@ Panel {
   property var pendingStreamRoute: null
 
   // The default is ordered first and named by behavior. Applications on that
-  // option follow later default changes; all other routes stay on their device.
+  // option follow later default changes; all other choices are persistent.
   readonly property var streamOutputOptions: Model.streamOutputOptions(displayAudioSinks, sink)
 
   // A DSP sink -- a speaker tuning, or EasyEffects -- can be the selected output

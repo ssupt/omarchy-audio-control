@@ -168,7 +168,7 @@ function streamOutputOptions(outputs, defaultOutput) {
     var serial = nodeSerial(candidate)
     if (serial !== "" && serial === defaultSerial) {
       options.push({ value: "default:" + serial, label: "Follow default output" })
-      options.push({ value: "override:" + serial, label: "Pin to " + nodeLabel(candidate) })
+      options.push({ value: "override:" + serial, label: "Always use " + nodeLabel(candidate) })
       break
     }
   }
@@ -177,7 +177,7 @@ function streamOutputOptions(outputs, defaultOutput) {
     var output = values[j]
     var outputSerial = nodeSerial(output)
     if (outputSerial === "" || outputSerial === defaultSerial) continue
-    options.push({ value: "override:" + outputSerial, label: nodeLabel(output) })
+    options.push({ value: "override:" + outputSerial, label: "Always use " + nodeLabel(output) })
   }
   return options
 }
