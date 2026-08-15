@@ -80,5 +80,41 @@
       "output:hdmi-stereo": { "description": "Digital Stereo (HDMI) Output", "sinks": 1, "sources": 0, "priority": 5900, "available": true },
       "output:hdmi-surround": { "description": "Digital Surround 5.1 (HDMI) Output", "sinks": 1, "sources": 0, "priority": 800, "available": true }
     }
+  },
+  {
+    "index": 40,
+    "name": "alsa_card.pci-example-ucm",
+    "active_profile": "HiFi (Headphones, Mic1)",
+    "properties": {
+      "device.api": "alsa",
+      "device.description": "UCM Analog Codec"
+    },
+    "ports": {
+      "[Out] Headphones": {
+        "priority": 200,
+        "profiles": [
+          "HiFi (Headphones, Mic1)"
+        ]
+      },
+      "[Out] Speaker": {
+        "priority": 100,
+        "profiles": [
+          "HiFi (Mic1, Speaker)"
+        ]
+      },
+      "[In] Mic1": {
+        "priority": 100,
+        "profiles": [
+          "HiFi (Headphones, Mic1)",
+          "HiFi (Mic1, Speaker)"
+        ]
+      }
+    },
+    "profiles": {
+      "off": { "description": "Off", "sinks": 0, "sources": 0, "priority": 0, "available": true },
+      "HiFi (Headphones, Mic1)": { "description": "Play HiFi quality Music (Headphones, Mic1)", "sinks": 1, "sources": 1, "priority": 8500, "available": true },
+      "HiFi (Mic1, Speaker)": { "description": "Play HiFi quality Music (Mic1, Speaker)", "sinks": 1, "sources": 1, "priority": 8400, "available": true },
+      "pro-audio": { "description": "Pro Audio", "sinks": 1, "sources": 1, "priority": 1, "available": true }
+    }
   }
 ]

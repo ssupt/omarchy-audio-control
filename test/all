@@ -102,6 +102,11 @@ jq -e '
   and (values("Bluetooth Headphones") | index("a2dp-sink-aac") != null)
   and (values("Bluetooth Headphones") | index("headset-head-unit-msbc") != null)
   and (values("HDMI Receiver") | index("output:hdmi-surround") != null)
+  and (values("UCM Analog Codec") == [
+    "HiFi (Headphones, Mic1)",
+    "HiFi (Mic1, Speaker)",
+    "off"
+  ])
 ' <<<"$profiles" >/dev/null || fail "safe profile filtering"
 echo "PASS: safe profile filtering"
 
