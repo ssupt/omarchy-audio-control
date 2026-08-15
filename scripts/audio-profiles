@@ -6,6 +6,8 @@
 set -o pipefail
 
 timeout 2 pactl -f json list cards 2>/dev/null | jq -c '
+  # Cards that ship a UCM profile name their ports "[Out] Speaker" instead of
+  # following the classic ACP scheme ("analog-output"), so match both.
   def port_supports($card; $profile; $direction):
     any(
       (($card.ports // {}) | to_entries)[]?;
@@ -30,8 +32,8 @@ timeout 2 pactl -f json list cards 2>/dev/null | jq -c '
               or .key == "off"
               or (($card.properties["device.api"] // "") == "bluez5")
               or (
-                ((.value.sinks // 0) == 0 or port_supports($card; .key; "output"))
-                and ((.value.sources // 0) == 0 or port_supports($card; .key; "input"))
+                ((.value.sinks // 0) == 0 or port_supports($card; .key; "^\\[Out\\] |output"))
+                and ((.value.sources // 0) == 0 or port_supports($card; .key; "^\\[In\\] |input"))
               )
             )
           | {
