@@ -8,6 +8,16 @@ function isPlaybackStream(node) {
     || mediaClass.indexOf("Output") !== -1
 }
 
+function isRecordingStream(node) {
+  if (!node || !node.isStream) return false
+  if (node.isSink === false) return true
+
+  var mediaClass = String(node.type || "")
+  return mediaClass.indexOf("Stream/Input/Audio") !== -1
+    || mediaClass.indexOf("AudioInStream") !== -1
+    || mediaClass.indexOf("Input") !== -1
+}
+
 function isAudioSource(node) {
   if (!node) return false
   if (node.audio) return true
@@ -22,10 +32,47 @@ function listSnapshot(list) {
   return list && list.slice ? list.slice() : []
 }
 
+function parseAudioControlSettings(raw) {
+  var parsed
+  try {
+    parsed = JSON.parse(String(raw || "{}"))
+  } catch (e) {
+    parsed = {}
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) parsed = {}
+  return {
+    version: 1,
+    outputOverdrive: parsed.outputOverdrive === true
+  }
+}
+
+function balanceValue(left, right) {
+  var l = Math.max(0, Number(left || 0))
+  var r = Math.max(0, Number(right || 0))
+  var peak = Math.max(l, r)
+  if (peak === 0) return 0
+  return r >= l ? 1 - l / peak : -(1 - r / peak)
+}
+
+function applyBalance(volumes, leftIndex, rightIndex, balance) {
+  var values = []
+  var source = volumes && typeof volumes.length === "number" ? volumes : []
+  for (var i = 0; i < source.length; i++) values.push(Number(source[i] || 0))
+  if (leftIndex < 0 || rightIndex < 0 || leftIndex >= values.length || rightIndex >= values.length)
+    return values
+
+  var value = Math.max(-1, Math.min(1, Number(balance || 0)))
+  var peak = Math.max(values[leftIndex], values[rightIndex])
+  values[leftIndex] = peak * (value > 0 ? 1 - value : 1)
+  values[rightIndex] = peak * (value < 0 ? 1 + value : 1)
+  return values
+}
+
 function outputVolumeName(volume, muted) {
   if (muted) return "Muted"
   var p = Math.round(volume * 100)
   if (p === 0) return "Silenced"
+  if (p > 125) return "Overdrive"
   if (p >= 100) return "Concert hall"
   if (p >= 85) return "Party mode"
   if (p >= 70) return "Cranked up"
@@ -91,6 +138,38 @@ function parseAudioProfiles(raw) {
     return a.label.localeCompare(b.label)
   })
   return normalized
+}
+
+function parseAudioPorts(raw) {
+  var values
+  try {
+    values = JSON.parse(String(raw || "[]"))
+  } catch (e) {
+    return []
+  }
+  if (!Array.isArray(values)) return []
+
+  var ports = []
+  for (var i = 0; i < values.length; i++) {
+    var item = values[i]
+    if (!item || (item.direction !== "output" && item.direction !== "input")
+        || !item.endpoint || !Array.isArray(item.ports) || item.ports.length < 2) continue
+    var options = []
+    for (var j = 0; j < item.ports.length; j++) {
+      var port = item.ports[j]
+      if (!port || !port.value) continue
+      options.push({ value: String(port.value), label: String(port.label || port.value) })
+    }
+    if (options.length < 2) continue
+    ports.push({
+      direction: item.direction,
+      endpoint: String(item.endpoint),
+      label: String(item.label || item.endpoint),
+      activePort: String(item.activePort || ""),
+      ports: options
+    })
+  }
+  return ports
 }
 
 function audioProfileLabel(profile, bluetooth) {
@@ -178,6 +257,30 @@ function streamOutputOptions(outputs, defaultOutput) {
     var outputSerial = nodeSerial(output)
     if (outputSerial === "" || outputSerial === defaultSerial) continue
     options.push({ value: "override:" + outputSerial, label: "Always use " + nodeLabel(output) })
+  }
+  return options
+}
+
+function recordingInputOptions(inputs, defaultInput) {
+  var values = Array.isArray(inputs) ? inputs : []
+  var options = []
+  var defaultSerial = nodeSerial(defaultInput)
+
+  for (var i = 0; i < values.length; i++) {
+    var candidate = values[i]
+    var serial = nodeSerial(candidate)
+    if (serial !== "" && serial === defaultSerial) {
+      options.push({ value: "default:" + serial, label: "Follow default input" })
+      options.push({ value: "override:" + serial, label: "Always use " + nodeLabel(candidate) })
+      break
+    }
+  }
+
+  for (var j = 0; j < values.length; j++) {
+    var input = values[j]
+    var inputSerial = nodeSerial(input)
+    if (inputSerial === "" || inputSerial === defaultSerial) continue
+    options.push({ value: "override:" + inputSerial, label: "Always use " + nodeLabel(input) })
   }
   return options
 }
@@ -355,6 +458,48 @@ function streamLabel(node, players, streams) {
     || label) || "Stream"
 }
 
+function recordingStreamLabel(node) {
+  return friendlyStreamLabel(rawStreamLabel(node)) || "Recording application"
+}
+
+function normalizeStreamIconName(name) {
+  var value = String(name || "").trim()
+  var aliases = {
+    "chromium-browser": "chromium",
+    "spotify-client": "spotify",
+    "discord": "discord"
+  }
+  return aliases[value.toLowerCase()] || value
+}
+
+function streamIconName(node, players, streams) {
+  var p = nodeProps(node)
+  var direct = p["application.icon_name"] || p["application.icon-name"] || ""
+  if (direct) return normalizeStreamIconName(direct)
+
+  var values = Array.isArray(players) ? players : []
+  for (var i = 0; i < values.length; i++) {
+    var player = values[i]
+    if (!player || !streamRepresentsPlayer(node, player, values, streams)) continue
+    if (player.desktopEntry)
+      return normalizeStreamIconName(String(player.desktopEntry).replace(/\.desktop$/i, ""))
+  }
+
+  var applicationId = String(p["application.id"] || "")
+  if (applicationId) return normalizeStreamIconName(applicationId.replace(/\.desktop$/i, ""))
+
+  var binary = String(p["application.process.binary"] || "")
+  if (binary) return normalizeStreamIconName(binary.split("/").pop())
+
+  var labelIcons = {
+    "spotify": "spotify",
+    "chromium": "chromium"
+  }
+  var label = streamLabelKey(rawStreamLabel(node))
+  if (labelIcons[label]) return labelIcons[label]
+  return ""
+}
+
 function streamRepresentsPlayer(node, player, players, streams) {
   if (!node || !player) return false
   var playerLabel = mprisPlayerLabel(player)
@@ -368,11 +513,16 @@ function streamRepresentsPlayer(node, player, players, streams) {
 if (typeof module !== "undefined") {
   module.exports = {
     isPlaybackStream: isPlaybackStream,
+    isRecordingStream: isRecordingStream,
     isAudioSource: isAudioSource,
     listSnapshot: listSnapshot,
+    parseAudioControlSettings: parseAudioControlSettings,
+    balanceValue: balanceValue,
+    applyBalance: applyBalance,
     outputVolumeName: outputVolumeName,
     parseSinkAvailability: parseSinkAvailability,
     parseAudioProfiles: parseAudioProfiles,
+    parseAudioPorts: parseAudioPorts,
     audioProfileLabel: audioProfileLabel,
     audioProfileOptions: audioProfileOptions,
     audioCardsByBluetooth: audioCardsByBluetooth,
@@ -381,6 +531,7 @@ if (typeof module !== "undefined") {
     nodeProps: nodeProps,
     nodeSerial: nodeSerial,
     streamOutputOptions: streamOutputOptions,
+    recordingInputOptions: recordingInputOptions,
     parseStreamOutputOption: parseStreamOutputOption,
     nodeLabel: nodeLabel,
     isHeadphones: isHeadphones,
@@ -397,6 +548,8 @@ if (typeof module !== "undefined") {
     matchingMprisStreamLabel: matchingMprisStreamLabel,
     unmatchedMprisStreamLabel: unmatchedMprisStreamLabel,
     streamLabel: streamLabel,
+    recordingStreamLabel: recordingStreamLabel,
+    streamIconName: streamIconName,
     streamRepresentsPlayer: streamRepresentsPlayer
   }
 }

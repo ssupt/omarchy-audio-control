@@ -1,0 +1,38 @@
+#!/bin/bash
+
+# omarchy:summary=List live audio endpoints with multiple usable ports
+# omarchy:group=audio
+
+if (( $# != 0 )); then
+  echo "Usage: audio-ports" >&2
+  exit 1
+fi
+
+set -o pipefail
+
+timeout 2 pactl -f json list 2>/dev/null | jq -c '
+  def usable_ports($endpoint):
+    [
+      $endpoint.ports[]?
+      | select(.availability != "not available" or .name == $endpoint.active_port)
+      | { value: .name, label: (.description // .name) }
+    ];
+
+  def endpoints($direction; $values):
+    [
+      $values[]?
+      | select($direction == "output" or (.name | endswith(".monitor") | not))
+      | . as $endpoint
+      | usable_ports($endpoint) as $ports
+      | select($ports | length > 1)
+      | {
+          direction: $direction,
+          endpoint: $endpoint.name,
+          label: ($endpoint.description // $endpoint.name),
+          activePort: ($endpoint.active_port // ""),
+          ports: $ports
+        }
+    ];
+
+  endpoints("output"; (.sinks // [])) + endpoints("input"; (.sources // []))
+' || exit 1

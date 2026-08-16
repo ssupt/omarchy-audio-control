@@ -5,18 +5,59 @@ if [[ $* == "-f json list cards" && -n ${AUDIO_CONTROL_CARD_FIXTURE:-} ]]; then
   exit 0
 fi
 
+if [[ -n ${AUDIO_CONTROL_ROUTE_LIST:-} && $* == "-f json list" ]]; then
+  echo '{"sink_inputs":[{"index":300,"sink":101,"properties":{"object.id":"900"}}],"source_outputs":[{"index":400,"source":201,"properties":{"object.id":"901"}}]}'
+  exit 0
+fi
+
+if [[ -n ${AUDIO_CONTROL_PORT_LOG:-} ]]; then
+  port_sinks='[{"name":"speakers","description":"Built-in Audio","active_port":"analog-output-speaker","ports":[{"name":"analog-output-speaker","description":"Speakers","availability":"available"},{"name":"analog-output-headphones","description":"Headphones","availability":"available"},{"name":"hdmi-output","description":"HDMI","availability":"not available"}]}]'
+  port_sources='[{"name":"microphone","description":"Built-in Audio","active_port":"analog-input-internal-mic","ports":[{"name":"analog-input-internal-mic","description":"Internal Microphone","availability":"available"},{"name":"analog-input-headset-mic","description":"Headset Microphone","availability":"available"}]},{"name":"speakers.monitor","description":"Monitor","active_port":"analog-output-speaker","ports":[{"name":"one","description":"One","availability":"available"},{"name":"two","description":"Two","availability":"available"}]}]'
+  case "$*" in
+    "-f json list")
+      printf '{"sinks":%s,"sources":%s}\n' "$port_sinks" "$port_sources"
+      exit 0
+      ;;
+    "-f json list sinks")
+      printf '%s\n' "$port_sinks"
+      exit 0
+      ;;
+    "set-sink-port speakers analog-output-headphones")
+      printf '%s\n' "$*" >>"$AUDIO_CONTROL_PORT_LOG"
+      exit 0
+      ;;
+  esac
+fi
+
 if [[ -n ${AUDIO_CONTROL_ROUTE_LOG:-} ]]; then
   case "$*" in
     "move-sink-input 300 101")
       printf '%s\n' "$*" >>"$AUDIO_CONTROL_ROUTE_LOG"
       exit 0
       ;;
-    "-f json list sink-inputs")
-      echo '[{"index":300,"sink":101,"properties":{"object.id":"900"}}]'
+    "move-source-output 400 201")
+      printf '%s\n' "$*" >>"$AUDIO_CONTROL_ROUTE_LOG"
       exit 0
       ;;
-    "-f json list sinks")
-      echo '[{"index":101,"properties":{"object.id":"1001"}}]'
+    "-f json list")
+      echo '{"sink_inputs":[{"index":300,"sink":101,"properties":{"object.id":"900"}}],"source_outputs":[{"index":400,"source":201,"properties":{"object.id":"901"}}],"sinks":[{"index":101,"properties":{"object.id":"1001"}}],"sources":[{"index":201,"properties":{"object.id":"2001"}}]}'
+      exit 0
+      ;;
+  esac
+fi
+
+if [[ -n ${AUDIO_CONTROL_INPUT_DEFAULT_LOG:-} ]]; then
+  case "$*" in
+    "-f json list sources")
+      echo '[{"index":200,"name":"old-microphone"},{"index":201,"name":"new-microphone"}]'
+      exit 0
+      ;;
+    "-f json list source-outputs")
+      echo '[{"index":400,"source":200,"properties":{"object.id":"901"}},{"index":401,"source":200,"properties":{"object.id":"902"}}]'
+      exit 0
+      ;;
+    "set-default-source new-microphone"|"move-source-output 400 new-microphone")
+      printf 'pactl %s\n' "$*" >>"$AUDIO_CONTROL_INPUT_DEFAULT_LOG"
       exit 0
       ;;
   esac

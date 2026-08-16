@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# omarchy:summary=Show or set Bluetooth profile quality preference
+# omarchy:group=audio
+# omarchy:args=[quality|latency]
+
+setting=bluetooth.profile-preference
+preference=${1:-}
+
+if (( $# > 1 )) || [[ -n $preference && $preference != "quality" && $preference != "latency" ]]; then
+  echo "Usage: audio-bluetooth-profile-preference [quality|latency]" >&2
+  exit 1
+fi
+
+if [[ -n $preference ]]; then
+  wpctl settings --save "$setting" "$preference" >/dev/null || exit 1
+fi
+
+wpctl settings "$setting" 2>/dev/null | awk '
+  $1 == "Value:" {
+    gsub(/^"|"$/, "", $2)
+    if ($2 == "quality" || $2 == "latency") { print $2; found=1 }
+  }
+  END { exit !found }
+'

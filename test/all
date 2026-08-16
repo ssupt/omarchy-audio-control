@@ -30,6 +30,30 @@ const cards = model.parseAudioProfiles(JSON.stringify([{
   ]
 }]))
 
+assert.deepEqual(model.parseAudioControlSettings('{"outputOverdrive":true}'), {
+  version: 1,
+  outputOverdrive: true
+})
+assert.deepEqual(model.parseAudioControlSettings('not json'), {
+  version: 1,
+  outputOverdrive: false
+})
+assert.equal(model.balanceValue(1, 1), 0)
+assert.equal(model.balanceValue(1, 0.25), -0.75)
+assert.equal(model.balanceValue(0.5, 1), 0.5)
+assert.deepEqual(model.applyBalance([0.8, 0.8], 0, 1, 0.25), [0.6000000000000001, 0.8])
+assert.deepEqual(model.applyBalance([0.8, 0.8], 0, 1, -1), [0.8, 0])
+assert.equal(model.outputVolumeName(1, false), 'Concert hall')
+assert.equal(model.outputVolumeName(1.25, false), 'Concert hall')
+assert.equal(model.outputVolumeName(1.26, false), 'Overdrive')
+assert.deepEqual(model.parseAudioPorts(JSON.stringify([{
+  direction: 'output', endpoint: 'speakers', label: 'Built-in Audio', activePort: 'speaker',
+  ports: [{ value: 'speaker', label: 'Speakers' }, { value: 'headphones', label: 'Headphones' }]
+}])), [{
+  direction: 'output', endpoint: 'speakers', label: 'Built-in Audio', activePort: 'speaker',
+  ports: [{ value: 'speaker', label: 'Speakers' }, { value: 'headphones', label: 'Headphones' }]
+}])
+
 assert.equal(cards.length, 1)
 assert.equal(model.hasBluetoothCards(cards), true)
 assert.deepEqual(model.audioCardsByBluetooth(cards, true).map(card => card.label), ['Headphones'])
@@ -50,11 +74,34 @@ const headphones = {
   ready: true,
   properties: { 'object.serial': 11 }
 }
+const defaultInput = {
+  name: 'default-input',
+  nickname: 'Desk Microphone',
+  ready: true,
+  properties: { 'object.serial': 20 }
+}
+const headsetInput = {
+  name: 'headset-input',
+  nickname: 'Headset Microphone',
+  ready: true,
+  properties: { 'object.serial': 21 }
+}
 assert.deepEqual(model.streamOutputOptions([defaultOutput, headphones], defaultOutput), [
   { value: 'default:10', label: 'Follow default output' },
   { value: 'override:10', label: 'Always use Desk Speakers' },
   { value: 'override:11', label: 'Always use Headphones' }
 ])
+assert.deepEqual(model.recordingInputOptions([defaultInput, headsetInput], defaultInput), [
+  { value: 'default:20', label: 'Follow default input' },
+  { value: 'override:20', label: 'Always use Desk Microphone' },
+  { value: 'override:21', label: 'Always use Headset Microphone' }
+])
+assert.equal(model.isRecordingStream({ isStream: true, isSink: false }), true)
+assert.equal(model.isRecordingStream({ isStream: true, isSink: true }), false)
+assert.equal(model.streamIconName({ ready: true, properties: { 'application.icon_name': 'firefox' } }, [], []), 'firefox')
+assert.equal(model.streamIconName({ ready: true, properties: { 'application.icon_name': 'chromium-browser' } }, [], []), 'chromium')
+assert.equal(model.streamIconName({ ready: true, properties: { 'application.id': 'org.example.App.desktop' } }, [], []), 'org.example.App')
+assert.equal(model.streamIconName({ description: 'Spotify' }, [], []), 'spotify')
 console.log('PASS: profile and routing model')
 JS
 
@@ -62,7 +109,7 @@ route_log=$(mktemp)
 trap 'rm -f "$route_log"' EXIT
 
 AUDIO_CONTROL_ROUTE_LOG="$route_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" 300 101 override
+  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override
 
 expected_route_log=$(cat <<'EOF'
 move-sink-input 300 101
@@ -74,7 +121,7 @@ EOF
 
 : >"$route_log"
 AUDIO_CONTROL_ROUTE_LOG="$route_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" 300 101 default
+  "$ROOT/scripts/audio-stream-route-set" playback 300 101 default
 
 expected_route_log=$(cat <<'EOF'
 move-sink-input 300 101
@@ -83,7 +130,80 @@ pw-metadata -n default -- 900 target.node -1 Spa:Id
 EOF
 )
 [[ $(<"$route_log") == "$expected_route_log" ]] || fail "default-following stream target"
+
+: >"$route_log"
+AUDIO_CONTROL_ROUTE_LOG="$route_log" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-stream-route-set" recording 400 201 override
+
+expected_route_log=$(cat <<'EOF'
+move-source-output 400 201
+pw-metadata -n default -- 901 target.object 201 Spa:Id
+pw-metadata -n default -- 901 target.node 2001 Spa:Id
+EOF
+)
+[[ $(<"$route_log") == "$expected_route_log" ]] || fail "persistent recording target"
+
+routes=$(AUDIO_CONTROL_ROUTE_LIST=1 PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-stream-routes")
+jq -e '
+  .playback["300"] == {"target":"101","mode":"override"}
+  and .recording["400"] == {"target":"201","mode":"override"}
+' <<<"$routes" >/dev/null || fail "playback and recording route snapshot"
 echo "PASS: persistent application routing"
+
+input_default_log=$(mktemp)
+trap 'rm -f "$route_log" "$input_default_log"' EXIT
+AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-input-set-default" 52 new-microphone old-microphone
+
+expected_input_default_log=$(cat <<'EOF'
+wpctl set-default 52
+pactl set-default-source new-microphone
+pactl move-source-output 400 new-microphone
+EOF
+)
+[[ $(<"$input_default_log") == "$expected_input_default_log" ]] ||
+  fail "default input preserved pinned recording route"
+echo "PASS: default input recording routes"
+
+port_log=$(mktemp)
+trap 'rm -f "$route_log" "$input_default_log" "$port_log"' EXIT
+ports=$(AUDIO_CONTROL_PORT_LOG="$port_log" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-ports")
+jq -e '
+  length == 2
+  and .[0].direction == "output"
+  and .[0].ports == [
+    {"value":"analog-output-speaker","label":"Speakers"},
+    {"value":"analog-output-headphones","label":"Headphones"}
+  ]
+  and .[1].direction == "input"
+' <<<"$ports" >/dev/null || fail "multi-port endpoint discovery"
+
+AUDIO_CONTROL_PORT_LOG="$port_log" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-port-set" output speakers analog-output-headphones
+[[ $(<"$port_log") == "set-sink-port speakers analog-output-headphones" ]] ||
+  fail "audio port selection"
+if AUDIO_CONTROL_PORT_LOG="$port_log" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-port-set" output speakers hdmi-output >/dev/null 2>&1; then
+  fail "unavailable audio port accepted"
+fi
+echo "PASS: audio port controls"
+
+bluetooth_preference_log=$(mktemp)
+bluetooth_preference_state=$(mktemp)
+trap 'rm -f "$route_log" "$input_default_log" "$port_log" "$bluetooth_preference_log" "$bluetooth_preference_state"' EXIT
+bluetooth_preference=$(AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG="$bluetooth_preference_log" \
+  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_STATE="$bluetooth_preference_state" \
+  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-bluetooth-profile-preference")
+[[ $bluetooth_preference == quality ]] || fail "Bluetooth profile preference read"
+bluetooth_preference=$(AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG="$bluetooth_preference_log" \
+  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_STATE="$bluetooth_preference_state" \
+  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-bluetooth-profile-preference" latency)
+[[ $bluetooth_preference == latency ]] || fail "Bluetooth profile preference write"
+[[ $(<"$bluetooth_preference_log") == "settings --save bluetooth.profile-preference latency" ]] ||
+  fail "Bluetooth profile preference command"
+echo "PASS: Bluetooth profile preference"
 
 profiles=$(
   AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
@@ -112,7 +232,7 @@ echo "PASS: safe profile filtering"
 
 profile_log=$(mktemp)
 profile_state=$(mktemp)
-trap 'rm -f "$route_log" "$profile_log" "$profile_state"' EXIT
+trap 'rm -f "$route_log" "$input_default_log" "$port_log" "$bluetooth_preference_log" "$bluetooth_preference_state" "$profile_log" "$profile_state"' EXIT
 printf 'old\n' >"$profile_state"
 
 if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
@@ -149,7 +269,7 @@ echo "PASS: safe profile transition"
 
 menu_tmp=$(mktemp -d)
 menu_file="$menu_tmp/omarchy-menu.jsonc"
-trap 'rm -f "$route_log" "$profile_log" "$profile_state"; rm -rf "$menu_tmp"' EXIT
+trap 'rm -f "$route_log" "$input_default_log" "$port_log" "$bluetooth_preference_log" "$bluetooth_preference_state" "$profile_log" "$profile_state"; rm -rf "$menu_tmp"' EXIT
 cat >"$menu_file" <<'EOF'
 {
   // Existing customization
@@ -181,7 +301,7 @@ echo "PASS: menu integration"
 jq -e '
   .schemaVersion == 1
   and .id == "ssupt.audio-control"
-  and .version == "0.2.0"
+  and .version == "0.3.0"
   and .author == "ssupt"
   and (.kinds | index("bar-widget") != null)
   and (.kinds | index("panel") != null)

@@ -9,8 +9,13 @@ instead of introducing a separate mixer application.
 ## Features
 
 - Remember each application's chosen output across stream and application restarts.
+- Route recording applications to a preferred microphone and control their gain.
+- Show application icons and live playback/recording activity meters.
+- Optionally extend output volume to 150% and adjust stereo channel balance.
+- Select endpoint ports when a live device exposes multiple usable paths.
 - Configure device profiles and Bluetooth codecs in separate keyboard-navigable tabs.
 - Control when Bluetooth headsets switch into communication mode.
+- Choose whether automatic Bluetooth profile selection favors quality or latency.
 
 The optional [Advanced Bluetooth Audio](https://github.com/ssupt/omarchy-bluetooth-audio)
 companion brings the same codec controls into Omarchy's Bluetooth panel while
@@ -30,6 +35,8 @@ not require `sudo` or install a background service.
 Application routes use WirePlumber's native stream-target restoration. Choosing
 **Follow default output** removes the remembered target; choosing **Always use**
 an output restores that choice whenever the application creates a new stream.
+Recording routes follow the same behavior for microphones. Explicitly routed
+recording applications stay pinned when the default input changes.
 
 ## Installation
 
