@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test and validate plugin
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out plugin
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: plugin
+
+      - name: Check out Omarchy validator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: basecamp/omarchy
+          ref: 7be59e1f4b7451d352d4673c560168290792590f # quattro, 2026-08-16
+          path: omarchy
+          sparse-checkout: bin/omarchy-plugin-validate
+          sparse-checkout-cone-mode: false
+
+      - name: Run test suite
+        run: ./plugin/test/all
+
+      - name: Validate Omarchy plugin
+        run: ./omarchy/bin/omarchy-plugin-validate ./plugin
