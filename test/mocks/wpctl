@@ -1,0 +1,26 @@
+#!/bin/bash
+
+if [[ -n ${AUDIO_CONTROL_INPUT_DEFAULT_LOG:-} && $* == "set-default 52" ]]; then
+  printf 'wpctl %s\n' "$*" >>"$AUDIO_CONTROL_INPUT_DEFAULT_LOG"
+  exit 0
+fi
+
+if [[ -n ${AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG:-} ]]; then
+  state_file=${AUDIO_CONTROL_BLUETOOTH_PREFERENCE_STATE:?}
+  case "$*" in
+    "settings --save bluetooth.profile-preference quality"|"settings --save bluetooth.profile-preference latency")
+      printf '%s\n' "$*" >>"$AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG"
+      printf '%s\n' "${!#}" >"$state_file"
+      exit 0
+      ;;
+    "settings bluetooth.profile-preference")
+      value=quality
+      [[ -s $state_file ]] && value=$(<"$state_file")
+      printf 'Value: %s\n' "$value"
+      exit 0
+      ;;
+  esac
+fi
+
+echo "Unexpected wpctl call: $*" >&2
+exit 1

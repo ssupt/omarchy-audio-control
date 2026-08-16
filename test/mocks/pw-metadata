@@ -1,5 +1,18 @@
 #!/bin/bash
 
+if [[ -n ${AUDIO_CONTROL_ROUTE_LIST:-} ]]; then
+  cat <<'EOF'
+update: id:900 key:'target.object' value:'101' type:'Spa:Id'
+update: id:901 key:'target.node' value:'2001' type:'Spa:Id'
+EOF
+  exit 0
+fi
+
+if [[ -n ${AUDIO_CONTROL_INPUT_DEFAULT_LOG:-} ]]; then
+  echo "update: id:902 key:'target.object' value:'200' type:'Spa:Id'"
+  exit 0
+fi
+
 [[ -n ${AUDIO_CONTROL_ROUTE_LOG:-} ]] || {
   echo "Unexpected pw-metadata call: $*" >&2
   exit 1

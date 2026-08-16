@@ -1,35 +1,51 @@
 #!/bin/bash
 
-# omarchy:summary=Set or clear a persistent application output route
+# omarchy:summary=Set or clear a persistent playback or recording application route
 # omarchy:group=audio
-# omarchy:args=<stream-serial> <sink-serial> [override|default]
+# omarchy:args=<playback|recording> <stream-serial> <target-serial> [override|default]
 
-stream=${1:-}
-sink=${2:-}
-mode=${3:-override}
+direction=${1:-}
+stream=${2:-}
+target=${3:-}
+mode=${4:-override}
 
-if (( $# < 2 || $# > 3 )) || [[ ! $stream =~ ^[0-9]+$ || ! $sink =~ ^[0-9]+$ ]] ||
+if (( $# < 3 || $# > 4 )) || [[ $direction != "playback" && $direction != "recording" ]] ||
+  [[ ! $stream =~ ^[0-9]+$ || ! $target =~ ^[0-9]+$ ]] ||
   [[ $mode != "override" && $mode != "default" ]]; then
-  echo "Usage: omarchy-audio-stream-route-set <stream-serial> <sink-serial> [override|default]" >&2
+  echo "Usage: omarchy-audio-stream-route-set <playback|recording> <stream-serial> <target-serial> [override|default]" >&2
   exit 1
 fi
-timeout 2 pactl move-sink-input "$stream" "$sink" || exit 1
+
+if [[ $direction == "playback" ]]; then
+  move_command=move-sink-input
+  streams_key=sink_inputs
+  targets_key=sinks
+else
+  move_command=move-source-output
+  streams_key=source_outputs
+  targets_key=sources
+fi
+
+timeout 2 pactl "$move_command" "$stream" "$target" || exit 1
 
 # WirePlumber stores explicit stream targets by application identity and restores
 # them when that application creates a new stream. Moving through Pulse normally
 # writes such a target, except when the stream is already on that sink. Write both
 # target forms ourselves so choosing the current default is still persistent,
 # and clear both when the user returns to default-following mode.
-stream_object_id=$(timeout 2 pactl -f json list sink-inputs 2>/dev/null |
-  jq -r --arg stream "$stream" 'map(select((.index | tostring) == $stream))[0].properties."object.id" // empty') || exit 1
+state=$(timeout 2 pactl -f json list 2>/dev/null) || exit 1
+stream_object_id=$(jq -r --arg key "$streams_key" --arg stream "$stream" '
+  .[$key] | map(select((.index | tostring) == $stream))[0].properties."object.id" // empty
+' <<<"$state") || exit 1
 [[ $stream_object_id =~ ^[0-9]+$ ]] || exit 1
 
 if [[ $mode == "override" ]]; then
-  sink_object_id=$(timeout 2 pactl -f json list sinks 2>/dev/null |
-    jq -r --arg sink "$sink" 'map(select((.index | tostring) == $sink))[0].properties."object.id" // empty') || exit 1
-  [[ $sink_object_id =~ ^[0-9]+$ ]] || exit 1
-  timeout 2 pw-metadata -n default -- "$stream_object_id" target.object "$sink" Spa:Id >/dev/null 2>&1 || exit 1
-  timeout 2 pw-metadata -n default -- "$stream_object_id" target.node "$sink_object_id" Spa:Id >/dev/null 2>&1 || exit 1
+  target_object_id=$(jq -r --arg key "$targets_key" --arg target "$target" '
+    .[$key] | map(select((.index | tostring) == $target))[0].properties."object.id" // empty
+  ' <<<"$state") || exit 1
+  [[ $target_object_id =~ ^[0-9]+$ ]] || exit 1
+  timeout 2 pw-metadata -n default -- "$stream_object_id" target.object "$target" Spa:Id >/dev/null 2>&1 || exit 1
+  timeout 2 pw-metadata -n default -- "$stream_object_id" target.node "$target_object_id" Spa:Id >/dev/null 2>&1 || exit 1
 else
   timeout 2 pw-metadata -n default -- "$stream_object_id" target.object -1 Spa:Id >/dev/null 2>&1 || exit 1
   timeout 2 pw-metadata -n default -- "$stream_object_id" target.node -1 Spa:Id >/dev/null 2>&1 || exit 1

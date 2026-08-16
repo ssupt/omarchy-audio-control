@@ -1,0 +1,38 @@
+#!/bin/bash
+
+# omarchy:summary=Select a port on a live audio endpoint
+# omarchy:group=audio
+# omarchy:args=<output|input> <endpoint> <port>
+
+direction=${1:-}
+endpoint=${2:-}
+port=${3:-}
+
+if (( $# != 3 )) || [[ $direction != "output" && $direction != "input" ]] ||
+  [[ -z $endpoint || -z $port ]]; then
+  echo "Usage: audio-port-set <output|input> <endpoint> <port>" >&2
+  exit 1
+fi
+
+if [[ $direction == "output" ]]; then
+  list=sinks
+  command=set-sink-port
+else
+  list=sources
+  command=set-source-port
+fi
+
+if ! timeout 2 pactl -f json list "$list" 2>/dev/null | jq -e \
+  --arg endpoint "$endpoint" --arg port "$port" '
+    any(.[];
+      .name == $endpoint
+      and (. as $audio_endpoint
+        | any(.ports[]?;
+            .name == $port
+            and (.availability != "not available" or $port == $audio_endpoint.active_port))))
+  ' >/dev/null; then
+  echo "Audio port is not available" >&2
+  exit 1
+fi
+
+timeout 2 pactl "$command" "$endpoint" "$port"

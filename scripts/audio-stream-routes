@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# omarchy:summary=List live application audio routes as JSON
+# omarchy:summary=List live playback and recording application routes as JSON
 # omarchy:group=audio
 
 if (( $# != 0 )); then
@@ -10,9 +10,9 @@ fi
 
 set -o pipefail
 
-# PipeWire's Pulse server exposes its object.serial as the sink-input index and
-# the destination sink's object.serial as `sink`. Quickshell exposes those same
-# serials on its nodes, giving the native panel an exact, label-independent map.
+# PipeWire's Pulse server exposes stream and endpoint object.serial values as
+# sink-input/source-output and sink/source indices. Quickshell exposes those
+# same serials on its nodes, giving the panel an exact, label-independent map.
 # Explicit targets live in PipeWire metadata; retain that distinction so an app
 # pinned to the current default is not presented as following the default.
 metadata=$(timeout 2 pw-metadata -n default 2>/dev/null) || exit 1
@@ -20,16 +20,23 @@ explicit_targets=$(sed -n "s/^update: id:\([0-9][0-9]*\) key:'target\.\(object\|
   awk -F '\t' '$2 != "-1" { print $1 }' |
   jq -Rsc 'split("\n") | map(select(length > 0)) | map({key: ., value: true}) | from_entries') || exit 1
 
-timeout 2 pactl -f json list sink-inputs 2>/dev/null | jq -c --argjson explicit "$explicit_targets" '
-  map(
-    select(.index != null and .sink != null)
-    | {
-        key: (.index | tostring),
-        value: {
-          sink: (.sink | tostring),
-          mode: (if ($explicit[(.properties."object.id" | tostring)] // false) then "override" else "default" end)
-        }
-      }
-  )
-  | from_entries
+timeout 2 pactl -f json list 2>/dev/null | jq -c --argjson explicit "$explicit_targets" '
+  def routes($streams; $endpoint):
+    $streams
+    | map(
+        select(.index != null and .[$endpoint] != null)
+        | {
+            key: (.index | tostring),
+            value: {
+              target: (.[$endpoint] | tostring),
+              mode: (if ($explicit[(.properties."object.id" | tostring)] // false) then "override" else "default" end)
+            }
+          }
+      )
+    | from_entries;
+
+  {
+    playback: routes((.sink_inputs // []); "sink"),
+    recording: routes((.source_outputs // []); "source")
+  }
 ' || exit 1

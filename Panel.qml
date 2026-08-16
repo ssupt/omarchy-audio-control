@@ -22,9 +22,17 @@ Panel {
   readonly property var source: Pipewire.defaultAudioSource
   readonly property var nodes: Pipewire.nodes ? Pipewire.nodes.values : []
   readonly property var mprisPlayers: Mpris.players ? Mpris.players.values : []
+  readonly property var appLibrary: bar && bar.shell ? bar.shell.appLibrary : null
   readonly property var mediaService: bar && bar.shell
     ? bar.shell.firstPartyServiceFor("omarchy.media") : null
   readonly property var activeMediaPlayer: mediaService ? mediaService.activePlayer : null
+  readonly property string settingsPath: {
+    var configHome = Quickshell.env("XDG_CONFIG_HOME")
+    if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
+    return configHome + "/omarchy/audio-control.json"
+  }
+  property bool outputOverdrive: false
+  readonly property real outputVolumeMaximum: outputOverdrive ? 1.5 : 1.0
 
   readonly property var candidateSinks: {
     var list = []
@@ -61,6 +69,19 @@ Panel {
     return list
   }
 
+  readonly property var candidateRecordingStreams: {
+    var list = []
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i]
+      if (!n || !isRecordingStream(n)) continue
+      // The microphone peak meter creates its own capture stream while this
+      // panel is open; it is instrumentation, not a recording application.
+      if (String(n.name || "").toLowerCase() === "quickshell") continue
+      list.push(n)
+    }
+    return list
+  }
+
   property var sinkAvailability: ({})
   property bool sinkAvailabilityLoaded: false
 
@@ -73,6 +94,10 @@ Panel {
   // `isSink: true`; capture streams publish as stream sources.
   function isPlaybackStream(node) {
     return Model.isPlaybackStream(node)
+  }
+
+  function isRecordingStream(node) {
+    return Model.isRecordingStream(node)
   }
 
   function isAudioSource(node) {
@@ -106,6 +131,13 @@ Panel {
     return list
   }
 
+  readonly property var recordingStreams: {
+    var list = []
+    for (var i = 0; i < candidateRecordingStreams.length; i++)
+      if (candidateRecordingStreams[i].audio) list.push(candidateRecordingStreams[i])
+    return list
+  }
+
   // Feed Repeaters with panel-local snapshots instead of the live PipeWire
   // model. PipeWire can remove nodes while Quickshell is dispatching the
   // removal signal; rebuilding a Repeater from that signal path has crashed
@@ -114,6 +146,7 @@ Panel {
   property var displayAudioSinks: []
   property var displayAudioSources: []
   property var displayAudioStreams: []
+  property var displayRecordingStreams: []
 
   // Per-application routing is separate from the preferred default sink.
   // WirePlumber persists explicit targets by application identity and restores
@@ -122,6 +155,7 @@ Panel {
   // values, so this live-state map remains exact even when several applications
   // share a display name.
   property var streamRoutes: ({})
+  property var recordingStreamRoutes: ({})
   property bool streamOutputMenuOpen: false
   property string streamRouteReadError: ""
   property string streamRouteSetError: ""
@@ -132,6 +166,7 @@ Panel {
   // The default is ordered first and named by behavior. Applications on that
   // option follow later default changes; all other choices are persistent.
   readonly property var streamOutputOptions: Model.streamOutputOptions(displayAudioSinks, sink)
+  readonly property var recordingInputOptions: Model.recordingInputOptions(displayAudioSources, source)
 
   // A DSP sink -- a speaker tuning, or EasyEffects -- can be the selected output
   // without being where loudness lives: changing its volume alters the level going
@@ -158,6 +193,7 @@ Panel {
     }
     return sink
   }
+  onVolumeSinkChanged: enforceOutputVolumeLimit()
 
   // Re-resolve whenever the selected output changes; the timer below is only a
   // safety net for the tuning being applied or removed underneath us.
@@ -178,7 +214,8 @@ Panel {
   // Single cursor model shared by keyboard and mouse. Sections:
   //   "output"  — output slider + sink device list
   //   "input"   — input slider + source device list
-  //   "streams" — per-app playback streams
+  //   "streams"   — per-app playback streams
+  //   "recording" — per-app recording streams
   // selectedIndex semantics within a section:
   //   -1            → on the slider row (h/l adjusts volume, m/Enter mute)
   //   0..N-1        → on the Nth device/stream row
@@ -212,6 +249,7 @@ Panel {
     if (section === "output") return displayAudioSinks.length
     if (section === "input") return displayAudioSources.length
     if (section === "streams") return displayAudioStreams.length
+    if (section === "recording") return displayRecordingStreams.length
     return 0
   }
 
@@ -219,6 +257,7 @@ Panel {
     if (section === "output") return true
     if (section === "input") return displayAudioSources.length > 0 || !!source
     if (section === "streams") return displayAudioStreams.length > 0
+    if (section === "recording") return displayRecordingStreams.length > 0
     return false
   }
 
@@ -235,6 +274,7 @@ Panel {
     if (sectionVisible("output")) list.push("output")
     if (sectionVisible("input")) list.push("input")
     if (sectionVisible("streams")) list.push("streams")
+    if (sectionVisible("recording")) list.push("recording")
     return list
   }
 
@@ -317,6 +357,12 @@ Panel {
     if (focusSection === "streams" && selectedIndex >= 0 && selectedIndex < displayAudioStreams.length) {
       var s = displayAudioStreams[selectedIndex]
       if (s && s.audio) s.audio.volume = Math.max(0, Math.min(1.5, s.audio.volume + delta))
+      return
+    }
+    if (focusSection === "recording" && selectedIndex >= 0 && selectedIndex < displayRecordingStreams.length) {
+      var recording = displayRecordingStreams[selectedIndex]
+      if (recording && recording.audio)
+        recording.audio.volume = Math.max(0, Math.min(1.5, recording.audio.volume + delta))
     }
   }
 
@@ -346,6 +392,16 @@ Panel {
         var st = displayAudioStreams[selectedIndex]
         if (st && st.audio) st.audio.muted = !st.audio.muted
       }
+      return
+    }
+    if (focusSection === "recording" && selectedIndex >= 0) {
+      var recordingRow = recordingStreamRepeater.itemAt(selectedIndex)
+      if (recordingRow && displayAudioSources.length > 1) recordingRow.toggleOutputMenu()
+      else {
+        var recordingStream = displayRecordingStreams[selectedIndex]
+        if (recordingStream && recordingStream.audio)
+          recordingStream.audio.muted = !recordingStream.audio.muted
+      }
     }
   }
 
@@ -359,6 +415,7 @@ Panel {
 
   onOpenedChanged: {
     if (opened) {
+      if (appLibrary && typeof appLibrary.refreshIcons === "function") appLibrary.refreshIcons()
       refreshDisplayAudioModels()
       focusSection = "output"
       headerIndex = 1
@@ -375,6 +432,7 @@ Panel {
   onAudioSinksChanged: scheduleDisplayAudioModelRefresh()
   onAudioSourcesChanged: scheduleDisplayAudioModelRefresh()
   onAudioStreamsChanged: scheduleDisplayAudioModelRefresh()
+  onRecordingStreamsChanged: scheduleDisplayAudioModelRefresh()
 
   function listSnapshot(list) {
     return Model.listSnapshot(list)
@@ -385,6 +443,9 @@ Panel {
     displayAudioSinks = listSnapshot(audioSinks)
     displayAudioSources = listSnapshot(audioSources)
     displayAudioStreams = listSnapshot(audioStreams)
+    displayRecordingStreams = listSnapshot(recordingStreams)
+    if (displayAudioStreams.length === 0) streamRoutes = ({})
+    if (displayRecordingStreams.length === 0) recordingStreamRoutes = ({})
     refreshStreamRoutes()
     clampCursor()
   }
@@ -399,14 +460,17 @@ Panel {
     displayAudioSinks = []
     displayAudioSources = []
     displayAudioStreams = []
+    displayRecordingStreams = []
     streamRoutes = ({})
+    recordingStreamRoutes = ({})
     streamRouteReadError = ""
     streamRouteSetError = ""
     pendingStreamRoute = null
   }
 
   function refreshStreamRoutes() {
-    if (!opened || displayAudioStreams.length === 0 || streamRoutesProc.running) return
+    if (!opened || (displayAudioStreams.length === 0 && displayRecordingStreams.length === 0)
+        || streamRoutesProc.running) return
     streamRoutesProc.running = true
   }
 
@@ -414,16 +478,22 @@ Panel {
     try {
       var routes = JSON.parse(String(raw || "{}"))
       if (!routes || typeof routes !== "object") routes = ({})
-      if (pendingStreamRoute)
-        routes[pendingStreamRoute.stream] = {
-          sink: pendingStreamRoute.sink,
+      var playback = routes.playback && typeof routes.playback === "object" ? routes.playback : ({})
+      var recording = routes.recording && typeof routes.recording === "object" ? routes.recording : ({})
+      if (pendingStreamRoute) {
+        var pendingRoutes = pendingStreamRoute.direction === "recording" ? recording : playback
+        pendingRoutes[pendingStreamRoute.stream] = {
+          target: pendingStreamRoute.target,
           mode: pendingStreamRoute.mode
         }
-      streamRoutes = routes
+      }
+      streamRoutes = playback
+      recordingStreamRoutes = recording
       streamRouteReadError = ""
     } catch (e) {
       streamRoutes = ({})
-      streamRouteReadError = "Could not read application outputs"
+      recordingStreamRoutes = ({})
+      streamRouteReadError = "Could not read application routes"
     }
   }
 
@@ -438,23 +508,34 @@ Panel {
     return route && typeof route === "object" ? route : null
   }
 
-  function setStreamRoute(node, optionValue) {
+  function recordingStreamRoute(node) {
+    var serial = streamSerial(node)
+    if (serial === "") return null
+    var route = recordingStreamRoutes[serial]
+    return route && typeof route === "object" ? route : null
+  }
+
+  function setStreamRoute(node, optionValue, direction) {
     var streamSerialValue = streamSerial(node)
     var route = Model.parseStreamOutputOption(optionValue)
     if (streamSerialValue === "" || route.sink === "" || route.mode === "" || streamRouteSetProc.running) return
 
+    var routes = direction === "recording" ? recordingStreamRoutes : streamRoutes
     var next = ({})
-    for (var key in streamRoutes) next[key] = streamRoutes[key]
-    next[streamSerialValue] = { sink: route.sink, mode: route.mode }
-    streamRoutes = next
+    for (var key in routes) next[key] = routes[key]
+    next[streamSerialValue] = { target: route.sink, mode: route.mode }
+    if (direction === "recording") recordingStreamRoutes = next
+    else streamRoutes = next
     streamRouteSetError = ""
     pendingStreamRoute = {
+      direction: direction,
       stream: streamSerialValue,
-      sink: route.sink,
+      target: route.sink,
       mode: route.mode
     }
     streamRouteSetProc.command = [
       pluginScript("audio-stream-route-set"),
+      direction,
       streamSerialValue,
       route.sink,
       route.mode
@@ -463,8 +544,8 @@ Panel {
   }
 
   // Keep the keyboard-focused row inside the visible viewport of the
-  // ScrollView. Each cursor target (slider rows, SinkRow, SourceRow,
-  // StreamRow) calls this when it gains hasCursor. Without it, j/k can
+  // ScrollView. Each cursor target (slider rows, device rows, application rows)
+  // calls this when it gains hasCursor. Without it, j/k can
   // walk the selection off-screen — wifi uses ListView.positionViewAtIndex
   // for this; we don't have that affordance with a multi-section Column.
   function resetScroll() {
@@ -539,9 +620,18 @@ Panel {
 
   function setOutputVolume(v) {
     if (!volumeSink || !volumeSink.audio) return outputVolume
-    var volume = Math.max(0, Math.min(1, v))
+    var volume = Math.max(0, Math.min(outputVolumeMaximum, v))
     volumeSink.audio.volume = volume
     return volume
+  }
+
+  function enforceOutputVolumeLimit() {
+    if (!outputOverdrive && outputVolume > 1) setOutputVolume(1)
+  }
+
+  function loadAudioControlSettings(raw) {
+    outputOverdrive = Model.parseAudioControlSettings(raw).outputOverdrive
+    enforceOutputVolumeLimit()
   }
 
   function showVolumeOsd(volume) {
@@ -590,12 +680,14 @@ Panel {
 
   function setDefaultSource(node) {
     if (!node) return
+    var previousSourceName = source && source.name ? String(source.name) : ""
     Pipewire.preferredDefaultAudioSource = node
     if (node.id !== undefined && node.name) {
       Quickshell.execDetached([
-        "omarchy-audio-input-set-default",
+        pluginScript("audio-input-set-default"),
         String(node.id),
-        String(node.name)
+        String(node.name),
+        previousSourceName
       ])
     }
   }
@@ -682,6 +774,22 @@ Panel {
     return Model.streamLabel(node, mprisPlayers, displayAudioStreams)
   }
 
+  function recordingStreamLabel(node) {
+    return Model.recordingStreamLabel(node)
+  }
+
+  function streamIconSource(node) {
+    var name = Model.streamIconName(node, mprisPlayers, displayAudioStreams)
+    if (!name) return ""
+    if (name.indexOf("file://") === 0 || name.indexOf("image://") === 0) return name
+    if (name.charAt(0) === "/") return Util.fileUrl(name)
+    var themed = Quickshell.iconPath(name, true)
+    if (themed) return themed
+    if (appLibrary && appLibrary.iconIndex && appLibrary.iconIndex[name]
+        && typeof appLibrary.iconSource === "function") return appLibrary.iconSource(name)
+    return ""
+  }
+
   function streamRepresentsPlayer(node, player) {
     return Model.streamRepresentsPlayer(node, player, mprisPlayers, displayAudioStreams)
   }
@@ -692,11 +800,22 @@ Panel {
   PwObjectTracker { objects: root.candidateSinks }
   PwObjectTracker { objects: root.candidateSources }
   PwObjectTracker { objects: root.audioStreams }
+  PwObjectTracker { objects: root.recordingStreams }
 
   PwNodePeakMonitor {
     id: inputPeakMonitor
     node: root.source
     enabled: root.opened && !!root.source
+  }
+
+  FileView {
+    id: settingsFile
+    path: root.settingsPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.loadAudioControlSettings(text())
+    onLoadFailed: root.loadAudioControlSettings("")
+    onFileChanged: reload()
   }
 
   Process {
@@ -725,15 +844,16 @@ Panel {
       onStreamFinished: root.updateStreamRoutes(text)
     }
     onExited: function(exitCode) {
-      if (exitCode !== 0 && root.opened && root.displayAudioStreams.length > 0)
-        root.streamRouteReadError = "Could not read application outputs"
+      if (exitCode !== 0 && root.opened
+          && (root.displayAudioStreams.length > 0 || root.displayRecordingStreams.length > 0))
+        root.streamRouteReadError = "Could not read application routes"
     }
   }
 
   Process {
     id: streamRouteSetProc
     onExited: function(exitCode) {
-      if (exitCode !== 0) root.streamRouteSetError = "Could not change the application output"
+      if (exitCode !== 0) root.streamRouteSetError = "Could not change the application route"
       else root.streamRouteSetError = ""
       root.pendingStreamRoute = null
       streamRouteRefreshTimer.restart()
@@ -775,7 +895,7 @@ Panel {
 
   Timer {
     interval: 1500
-    running: root.opened && root.displayAudioStreams.length > 0
+    running: root.opened && (root.displayAudioStreams.length > 0 || root.displayRecordingStreams.length > 0)
     repeat: true
     onTriggered: if (!root.streamOutputMenuOpen && !streamRouteSetProc.running)
       root.refreshStreamRoutes()
@@ -825,12 +945,15 @@ Panel {
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
         // 'm' mutes whatever the cursor is on: focused section's slider
-        // for output/input, the focused stream for streams.
+        // for output/input, or the focused playback/recording application.
         if (t === "m" || t === "M") {
           if (!root.cursorActive) return
-          if (root.focusSection === "streams" && root.selectedIndex >= 0
-              && root.selectedIndex < root.displayAudioStreams.length) {
-            var s = root.displayAudioStreams[root.selectedIndex]
+          if ((root.focusSection === "streams" || root.focusSection === "recording")
+              && root.selectedIndex >= 0) {
+            var streams = root.focusSection === "recording"
+              ? root.displayRecordingStreams : root.displayAudioStreams
+            if (root.selectedIndex >= streams.length) return
+            var s = streams[root.selectedIndex]
             if (s && s.audio) s.audio.muted = !s.audio.muted
           } else if (root.focusSection === "input") {
             root.toggleInputMute()
@@ -845,7 +968,20 @@ Panel {
         anchors.fill: parent
         clip: true
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-        ScrollBar.vertical.policy: panelColumn.implicitHeight > height ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+        ScrollBar.vertical: ScrollBar {
+          id: panelScrollBar
+          policy: panelColumn.implicitHeight > scrollArea.height
+            ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+          interactive: false
+          width: Style.space(5)
+          background: Item { }
+          contentItem: Rectangle {
+            implicitWidth: Style.space(3)
+            radius: width / 2
+            color: root.bar.foreground
+            opacity: panelScrollBar.active ? 0.55 : 0.25
+          }
+        }
         Binding {
           target: scrollArea.contentItem
           property: "interactive"
@@ -1003,7 +1139,7 @@ Panel {
                 anchors.leftMargin: Style.space(6)
                 anchors.rightMargin: Style.space(6)
                 minimum: 0
-                maximum: 1
+                maximum: root.outputVolumeMaximum
                 step: 0.05
                 value: root.outputVolume
                 opacity: root.outputMuted ? 0.5 : 1.0
@@ -1142,7 +1278,7 @@ Panel {
             }
           }
 
-          // ---- Per-app streams ----
+          // ---- Per-app playback and recording streams ----
           PanelSeparator {
             visible: root.displayAudioStreams.length > 0
             foreground: root.bar.foreground
@@ -1154,7 +1290,7 @@ Panel {
             visible: root.displayAudioStreams.length > 0
 
             PanelSectionHeader {
-              text: "SOURCES"
+              text: "PLAYBACK"
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
             }
@@ -1163,24 +1299,56 @@ Panel {
               id: streamRepeater
               model: root.displayAudioStreams
 
-              StreamRow {
+              ApplicationStreamRow {
                 required property var modelData
                 required property int index
                 width: panelColumn.width
                 node: modelData
                 rowIndex: index
+                recording: false
               }
             }
+          }
 
-            Text {
-              visible: root.streamRouteError !== ""
-              width: parent.width
-              text: root.streamRouteError
-              color: root.bar.urgent
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              wrapMode: Text.WordWrap
+          PanelSeparator {
+            visible: root.displayRecordingStreams.length > 0
+            foreground: root.bar.foreground
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(10)
+            visible: root.displayRecordingStreams.length > 0
+
+            PanelSectionHeader {
+              text: "RECORDING"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
             }
+
+            Repeater {
+              id: recordingStreamRepeater
+              model: root.displayRecordingStreams
+
+              ApplicationStreamRow {
+                required property var modelData
+                required property int index
+                width: panelColumn.width
+                node: modelData
+                rowIndex: index
+                recording: true
+              }
+            }
+          }
+
+          Text {
+            visible: root.streamRouteError !== ""
+            width: parent.width
+            text: root.streamRouteError
+            color: root.bar.urgent
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
           }
         }
       }
@@ -1309,32 +1477,44 @@ Panel {
     }
   }
 
-  // Per-app stream row — cursor target inside the "streams" section.
-  // The stream has its own slider inline, so h/l from the keyboard adjusts
-  // THIS stream's volume. With multiple outputs, a compact device button (or
-  // Enter/Space from the row cursor) opens routing; `m` remains direct mute.
-  component StreamRow: CursorSurface {
+  // Playback and recording applications share interaction and volume controls;
+  // only their endpoint list, route map, label, and icon differ.
+  component ApplicationStreamRow: CursorSurface {
     id: streamRow
     required property var node
     required property int rowIndex
+    property bool recording: false
 
     readonly property real streamVolume: node && node.audio ? node.audio.volume : 0
     readonly property bool streamMuted: node && node.audio ? node.audio.muted : false
-    readonly property bool isActive: root.streamRepresentsPlayer(node, root.activeMediaPlayer)
+    readonly property bool isActive: !recording && root.streamRepresentsPlayer(node, root.activeMediaPlayer)
     readonly property string streamSerial: root.streamSerial(node)
-    readonly property var currentRoute: root.streamRoute(node)
-    readonly property string sinkSerial: currentRoute ? String(currentRoute.sink || "") : ""
+    readonly property var currentRoute: recording
+      ? root.recordingStreamRoute(node) : root.streamRoute(node)
+    readonly property string targetSerial: currentRoute ? String(currentRoute.target || "") : ""
     readonly property string routeMode: currentRoute ? String(currentRoute.mode || "") : ""
-    readonly property string routeOptionValue: routeMode !== "" && sinkSerial !== "" ? routeMode + ":" + sinkSerial : ""
+    readonly property string routeOptionValue: routeMode !== "" && targetSerial !== ""
+      ? routeMode + ":" + targetSerial : ""
     readonly property bool routeIsExplicit: routeMode === "override"
-    hasCursor: root.cursorActive && root.focusSection === "streams" && root.selectedIndex === rowIndex
+    readonly property string routeSection: recording ? "recording" : "streams"
+    readonly property int targetCount: recording
+      ? root.displayAudioSources.length : root.displayAudioSinks.length
+    readonly property var routeOptions: recording
+      ? root.recordingInputOptions : root.streamOutputOptions
+    hasCursor: root.cursorActive && root.focusSection === routeSection && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(streamRow)
     foreground: root.bar.foreground
     fill: root.hoverFill
     implicitHeight: streamColumn.implicitHeight + Style.spacing.xl
 
+    PwNodePeakMonitor {
+      id: streamPeakMonitor
+      node: streamRow.node
+      enabled: root.opened && !!streamRow.node
+    }
+
     function toggleOutputMenu() {
-      if (root.displayAudioSinks.length > 1 && streamRow.sinkSerial !== "" && routeDropdown.enabled)
+      if (streamRow.targetCount > 1 && streamRow.targetSerial !== "" && routeDropdown.enabled)
         routeDropdown.toggle()
     }
 
@@ -1359,16 +1539,39 @@ Panel {
           anchors.fill: parent
           spacing: Style.space(8)
 
-          Text {
+          Item {
             id: streamMuteIcon
-            text: streamRow.streamMuted ? "󰝟" : "󰕾"
-            color: root.bar.foreground
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.title
             width: Style.space(22)
-            horizontalAlignment: Text.AlignHCenter
+            height: Style.font.title
             anchors.verticalCenter: parent.verticalCenter
-            opacity: streamRow.streamMuted ? 0.5 : 1.0
+
+            Image {
+              id: streamAppIcon
+              anchors.centerIn: parent
+              width: Style.font.title
+              height: Style.font.title
+              fillMode: Image.PreserveAspectFit
+              sourceSize.width: Math.round(width * Screen.devicePixelRatio)
+              sourceSize.height: Math.round(height * Screen.devicePixelRatio)
+              source: root.streamIconSource(streamRow.node)
+              asynchronous: true
+              visible: status === Image.Ready
+              opacity: streamRow.streamMuted ? 0.5 : 1.0
+            }
+
+            Text {
+              visible: !streamAppIcon.visible
+              anchors.fill: parent
+              text: streamRow.recording
+                ? (streamRow.streamMuted ? "󰍭" : "󰍬")
+                : (streamRow.streamMuted ? "󰝟" : "󰕾")
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.title
+              horizontalAlignment: Text.AlignHCenter
+              verticalAlignment: Text.AlignVCenter
+              opacity: streamRow.streamMuted ? 0.5 : 1.0
+            }
 
             MouseArea {
               anchors.fill: parent
@@ -1387,7 +1590,8 @@ Panel {
 
             Text {
               id: streamName
-              text: root.streamLabel(streamRow.node)
+              text: streamRow.recording
+                ? root.recordingStreamLabel(streamRow.node) : root.streamLabel(streamRow.node)
               color: root.bar.foreground
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.body
@@ -1401,7 +1605,7 @@ Panel {
 
             Text {
               id: routeChevron
-              visible: root.displayAudioSinks.length > 1 && streamRow.sinkSerial !== ""
+              visible: streamRow.targetCount > 1 && streamRow.targetSerial !== ""
               width: Style.space(22)
               text: {
                 var position = root.bar ? root.bar.position : "left"
@@ -1437,8 +1641,8 @@ Panel {
 
         // Routing is a property of the application, so the dropdown's actual
         // trigger spans the whole header. Its chrome is hidden: the adjacent
-        // chevron communicates the submenu while the speaker exclusively owns
-        // mute and the slider below continues to own volume changes.
+        // chevron communicates the submenu while the leading icon owns mute
+        // and the slider below continues to own volume changes.
         AudioDropdown {
           id: routeDropdown
           anchors.left: parent.left
@@ -1447,7 +1651,7 @@ Panel {
           anchors.top: parent.top
           anchors.bottom: parent.bottom
           z: 1
-          visible: root.displayAudioSinks.length > 1 && streamRow.sinkSerial !== ""
+          visible: streamRow.targetCount > 1 && streamRow.targetSerial !== ""
           rowHeight: height
           popupRowHeight: Style.space(34)
           popupDirection: {
@@ -1468,17 +1672,19 @@ Panel {
           showChevron: false
           triggerChrome: false
           value: streamRow.routeOptionValue
-          options: root.streamOutputOptions
+          options: streamRow.routeOptions
           enabled: streamRow.streamSerial !== "" && !streamRouteSetProc.running
           foreground: root.bar.foreground
           fontFamily: root.bar.fontFamily
 
           onHovered: function(on) { if (on) {
             root.cursorActive = true
-            root.focusSection = "streams"
+            root.focusSection = streamRow.routeSection
             root.selectedIndex = streamRow.rowIndex
           } }
-          onChanged: function(route) { root.setStreamRoute(streamRow.node, route) }
+          onChanged: function(route) {
+            root.setStreamRoute(streamRow.node, route, streamRow.recording ? "recording" : "playback")
+          }
           onPopupOpenChanged: {
             root.streamOutputMenuOpen = popupOpen
             if (!popupOpen) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
@@ -1503,6 +1709,20 @@ Panel {
             streamRow.node.audio.muted = !streamRow.node.audio.muted
         }
       }
+
+      Rectangle {
+        width: parent.width
+        height: Math.max(Style.space(4), Style.spacing.xs)
+        color: Util.alpha(root.bar.foreground, 0.18)
+        opacity: streamRow.streamMuted ? 0.35 : 1.0
+
+        Rectangle {
+          height: parent.height
+          width: parent.width * Math.max(0, Math.min(1, streamPeakMonitor.peak))
+          color: root.bar.foreground
+          Behavior on width { NumberAnimation { duration: 70 } }
+        }
+      }
     }
 
     MouseArea {
@@ -1512,7 +1732,7 @@ Panel {
       propagateComposedEvents: true
       onContainsMouseChanged: if (containsMouse) {
         root.cursorActive = true
-        root.focusSection = "streams"
+        root.focusSection = streamRow.routeSection
         root.selectedIndex = streamRow.rowIndex
       }
     }

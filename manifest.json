@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "ssupt.audio-control",
   "name": "Advanced Audio Control",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "ssupt",
-  "description": "Adds per-application output routing, device profiles, and Bluetooth codec controls to Omarchy's audio panel",
+  "description": "Adds application playback and recording routing, volume boost, balance, device ports, and Bluetooth audio controls to Omarchy",
   "kinds": [
     "bar-widget",
     "panel"
@@ -15,7 +15,7 @@
   },
   "barWidget": {
     "displayName": "Advanced Audio Control",
-    "description": "Adds per-application output routing, device profiles, and Bluetooth codec controls to Omarchy's audio panel",
+    "description": "Adds application playback and recording routing, volume boost, balance, device ports, and Bluetooth audio controls to Omarchy",
     "category": "Audio",
     "allowMultiple": false
   },
