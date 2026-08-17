@@ -38,6 +38,27 @@ assert.deepEqual(model.parseAudioControlSettings('not json'), {
   version: 1,
   outputOverdrive: false
 })
+const audioPreferences = model.parseAudioPreferences(JSON.stringify({
+  defaults: { output: 'headphones', input: 'headset-microphone' },
+  bluetoothProfiles: { '00:11:22:33:44:55': 'a2dp-aac' }
+}))
+assert.deepEqual(audioPreferences, {
+  version: 1,
+  defaults: { output: 'headphones', input: 'headset-microphone' },
+  bluetoothProfiles: { '001122334455': 'a2dp-aac' }
+})
+assert.equal(model.preferredAudioProfile(
+  audioPreferences, '00-11-22-33-44-55', cards[0].profiles, cards[0].activeProfile
+), 'a2dp-aac')
+assert.equal(model.preferredAudioProfile(
+  audioPreferences, '00:11:22:33:44:55', [{ value: 'headset-msbc' }], 'headset-msbc'
+), 'headset-msbc')
+assert.equal(model.preferredAudioNodeName(
+  audioPreferences, 'output', { name: 'speakers' }, [{ name: 'headphones' }]
+), 'headphones')
+assert.equal(model.preferredAudioNodeName(
+  audioPreferences, 'output', { name: 'speakers' }, [{ name: 'speakers' }]
+), 'speakers')
 assert.equal(model.balanceValue(1, 1), 0)
 assert.equal(model.balanceValue(1, 0.25), -0.75)
 assert.equal(model.balanceValue(0.5, 1), 0.5)
@@ -152,8 +173,11 @@ jq -e '
 echo "PASS: persistent application routing"
 
 input_default_log=$(mktemp)
-trap 'rm -f "$route_log" "$input_default_log"' EXIT
-AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" PATH="$TEST_DIR/mocks:$PATH" \
+shared_preferences=$(mktemp)
+shared_preferences_lock="${shared_preferences}.lock"
+trap 'rm -f "$route_log" "$input_default_log" "$shared_preferences" "$shared_preferences_lock"' EXIT
+AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
+  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
   "$ROOT/scripts/audio-input-set-default" 52 new-microphone old-microphone
 
 expected_input_default_log=$(cat <<'EOF'
@@ -164,7 +188,17 @@ EOF
 )
 [[ $(<"$input_default_log") == "$expected_input_default_log" ]] ||
   fail "default input preserved pinned recording route"
+OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" \
+  "$ROOT/scripts/audio-preferences" set-default output headphones
+OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" \
+  "$ROOT/scripts/audio-preferences" set-profile 00:11:22:33:44:55 a2dp-aac
+jq -e '
+  .version == 1
+  and .defaults == {"output":"headphones","input":"new-microphone"}
+  and .bluetoothProfiles == {"001122334455":"a2dp-aac"}
+' "$shared_preferences" >/dev/null || fail "shared audio preferences"
 echo "PASS: default input recording routes"
+rm -f -- "$shared_preferences" "$shared_preferences_lock"
 
 port_log=$(mktemp)
 trap 'rm -f "$route_log" "$input_default_log" "$port_log"' EXIT
@@ -301,7 +335,7 @@ echo "PASS: menu integration"
 jq -e '
   .schemaVersion == 1
   and .id == "ssupt.audio-control"
-  and .version == "0.3.0"
+  and .version == "0.4.0"
   and .author == "ssupt"
   and (.kinds | index("bar-widget") != null)
   and (.kinds | index("panel") != null)

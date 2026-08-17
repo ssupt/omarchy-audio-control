@@ -33,6 +33,8 @@ Item {
   property bool cursorActive: false
   property int selectedIndex: 0
   property bool profileMenuOpen: false
+  property var pendingSharedProfile: null
+  property var audioPreferences: Model.parseAudioPreferences("")
   property var audioControlSettings: ({ version: 1, outputOverdrive: false })
   property bool outputOverdrive: false
 
@@ -72,6 +74,11 @@ Item {
     var configHome = Quickshell.env("XDG_CONFIG_HOME")
     if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
     return configHome + "/omarchy/audio-control.json"
+  }
+  readonly property string audioPreferencesPath: {
+    var configHome = Quickshell.env("XDG_CONFIG_HOME")
+    if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
+    return configHome + "/omarchy/audio-preferences.json"
   }
   onDefaultOutputDeviceChanged: resolveVolumeSink()
 
@@ -151,6 +158,10 @@ Item {
     clampCursor()
   }
 
+  function loadAudioPreferences(raw) {
+    audioPreferences = Model.parseAudioPreferences(raw)
+  }
+
   function loadAudioControlSettings(raw) {
     audioControlSettings = Model.parseAudioControlSettings(raw)
     outputOverdrive = audioControlSettings.outputOverdrive
@@ -168,6 +179,13 @@ Item {
 
   function profileOptions(card) {
     return Model.audioProfileOptions(card)
+  }
+
+  function selectedAudioProfile(card) {
+    if (!card) return ""
+    if (!card.bluetooth) return String(card.activeProfile || "off")
+    return Model.preferredAudioProfile(
+      audioPreferences, card.address, profileOptions(card), card.activeProfile)
   }
 
   function nodeLabel(node) {
@@ -307,9 +325,13 @@ Item {
   }
 
   function setAudioProfile(card, profile) {
-    if (!card || !profile || profileSetProc.running) return
+    if (!card || !card.name || !profile || profileSetProc.running) return
     error = ""
-    profileSetProc.command = [pluginScript("audio-profile-set"), card, profile]
+    pendingSharedProfile = card.bluetooth && card.address ? {
+      address: String(card.address),
+      profile: String(profile)
+    } : null
+    profileSetProc.command = [pluginScript("audio-profile-set"), String(card.name), profile]
     profileSetProc.running = true
   }
 
@@ -361,6 +383,15 @@ Item {
     onFileChanged: reload()
   }
 
+  FileView {
+    path: root.audioPreferencesPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.loadAudioPreferences(text())
+    onLoadFailed: root.loadAudioPreferences("")
+    onFileChanged: reload()
+  }
+
   PwObjectTracker { objects: root.outputDevice ? [root.outputDevice] : [] }
   PwObjectTracker { objects: root.inputDevice ? [root.inputDevice] : [] }
 
@@ -402,7 +433,17 @@ Item {
     id: profileSetProc
     onExited: function(exitCode) {
       if (exitCode !== 0) root.error = "Could not change the audio profile"
-      else root.error = ""
+      else {
+        root.error = ""
+        if (root.pendingSharedProfile)
+          Quickshell.execDetached([
+            root.pluginScript("audio-preferences"),
+            "set-profile",
+            root.pendingSharedProfile.address,
+            root.pendingSharedProfile.profile
+          ])
+      }
+      root.pendingSharedProfile = null
       profileRefreshTimer.restart()
     }
   }
@@ -1244,7 +1285,7 @@ Item {
         width: parent.width - profileLabels.width - parent.spacing
         showLabel: false
         popupDirection: "down"
-        value: String(profileRow.card.activeProfile || "off")
+        value: root.selectedAudioProfile(profileRow.card)
         options: root.profileOptions(profileRow.card)
         hasCursor: profileRow.hasCursor
         enabled: !profileSetProc.running
@@ -1254,7 +1295,7 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
 
         onHovered: function(on) { if (on) root.setCursor(profileRow.rowIndex) }
-        onChanged: function(profile) { root.setAudioProfile(profileRow.card.name, profile) }
+        onChanged: function(profile) { root.setAudioProfile(profileRow.card, profile) }
         onPopupOpenChanged: {
           root.profileMenuOpen = popupOpen
           if (!popupOpen) Qt.callLater(function() { keyCatcher.forceActiveFocus() })

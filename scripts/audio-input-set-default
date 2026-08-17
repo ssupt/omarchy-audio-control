@@ -45,3 +45,6 @@ timeout 2 pactl set-default-source "$source_name" 2>/dev/null || true
 for output in "${following_outputs[@]}"; do
   [[ -n $output ]] && timeout 2 pactl move-source-output "$output" "$source_name" 2>/dev/null || true
 done
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+"$script_dir/audio-preferences" set-default input "$source_name"
