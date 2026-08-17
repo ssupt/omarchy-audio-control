@@ -32,6 +32,64 @@ function listSnapshot(list) {
   return list && list.slice ? list.slice() : []
 }
 
+function normalizedBluetoothAddress(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^0-9a-f]/g, "")
+}
+
+function parseAudioPreferences(raw) {
+  var parsed
+  try {
+    parsed = JSON.parse(String(raw || "{}"))
+  } catch (e) {
+    parsed = {}
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) parsed = {}
+
+  var defaults = parsed.defaults
+  if (!defaults || typeof defaults !== "object" || Array.isArray(defaults)) defaults = {}
+  var rawProfiles = parsed.bluetoothProfiles
+  if (!rawProfiles || typeof rawProfiles !== "object" || Array.isArray(rawProfiles)) rawProfiles = {}
+
+  var profiles = {}
+  for (var address in rawProfiles) {
+    var key = normalizedBluetoothAddress(address)
+    var profile = rawProfiles[address]
+    if (key !== "" && typeof profile === "string" && profile !== "") profiles[key] = profile
+  }
+
+  return {
+    version: 1,
+    defaults: {
+      output: typeof defaults.output === "string" ? defaults.output : "",
+      input: typeof defaults.input === "string" ? defaults.input : ""
+    },
+    bluetoothProfiles: profiles
+  }
+}
+
+function preferredAudioProfile(preferences, address, options, activeProfile) {
+  var profiles = preferences && preferences.bluetoothProfiles
+  var saved = profiles ? String(profiles[normalizedBluetoothAddress(address)] || "") : ""
+  var values = options && typeof options.length === "number" ? options : []
+  for (var i = 0; i < values.length; i++) {
+    var value = values[i] && typeof values[i] === "object" ? values[i].value : values[i]
+    if (String(value || "") === saved) return saved
+  }
+  return String(activeProfile || "")
+}
+
+function preferredAudioNodeName(preferences, direction, liveNode, nodes) {
+  var defaults = preferences && preferences.defaults
+  var saved = defaults && (direction === "output" || direction === "input")
+    ? String(defaults[direction] || "") : ""
+  var values = nodes && typeof nodes.length === "number" ? nodes : []
+  if (saved !== "") {
+    for (var i = 0; i < values.length; i++)
+      if (values[i] && String(values[i].name || "") === saved) return saved
+  }
+  return liveNode ? String(liveNode.name || "") : ""
+}
+
 function parseAudioControlSettings(raw) {
   var parsed
   try {
@@ -516,6 +574,10 @@ if (typeof module !== "undefined") {
     isRecordingStream: isRecordingStream,
     isAudioSource: isAudioSource,
     listSnapshot: listSnapshot,
+    normalizedBluetoothAddress: normalizedBluetoothAddress,
+    parseAudioPreferences: parseAudioPreferences,
+    preferredAudioProfile: preferredAudioProfile,
+    preferredAudioNodeName: preferredAudioNodeName,
     parseAudioControlSettings: parseAudioControlSettings,
     balanceValue: balanceValue,
     applyBalance: applyBalance,

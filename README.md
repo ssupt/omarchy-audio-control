@@ -19,7 +19,9 @@ instead of introducing a separate mixer application.
 
 The optional [Advanced Bluetooth Audio](https://github.com/ssupt/omarchy-bluetooth-audio)
 companion brings the same codec controls into Omarchy's Bluetooth panel while
-preserving its native pairing, discovery, and connection behavior.
+preserving its native pairing, discovery, and connection behavior. When both
+plugins are enabled, codec and preferred-device choices are shared immediately
+through `~/.config/omarchy/audio-preferences.json`.
 
 More plugins by `ssupt`: [omarchy-plugins](https://github.com/ssupt/omarchy-plugins).
 
@@ -27,7 +29,7 @@ More plugins by `ssupt`: [omarchy-plugins](https://github.com/ssupt/omarchy-plug
 
 - Omarchy Quattro
 - PipeWire with WirePlumber (`pactl`, `wpctl`, and `pw-metadata`)
-- `jq`, `hyprctl`, and `timeout`
+- `jq`, `hyprctl`, `timeout`, and `flock`
 
 These commands are present in a standard Omarchy installation. The plugin does
 not require `sudo` or install a background service.

@@ -1,0 +1,80 @@
+#!/bin/bash
+
+# omarchy:summary=Show or update preferences shared by Omarchy audio plugins
+# omarchy:group=audio
+# omarchy:args=[set-default <output|input> <node-name> | set-profile <bluetooth-address> <profile>]
+
+set -euo pipefail
+
+preferences_file=${OMARCHY_AUDIO_PREFERENCES_FILE:-${XDG_CONFIG_HOME:-${HOME:?}/.config}/omarchy/audio-preferences.json}
+action=${1:-show}
+
+usage() {
+  echo "Usage: audio-preferences [show | set-default <output|input> <node-name> | set-profile <bluetooth-address> <profile>]" >&2
+  exit 1
+}
+
+default_preferences() {
+  printf '%s\n' '{"version":1,"defaults":{"output":"","input":""},"bluetoothProfiles":{}}'
+}
+
+read_preferences() {
+  if [[ -s $preferences_file ]] && jq -e 'type == "object"' "$preferences_file" >/dev/null 2>&1; then
+    jq -c '
+      .version = 1
+      | .defaults = (if (.defaults | type) == "object" then .defaults else {} end)
+      | .defaults.output = (if (.defaults.output | type) == "string" then .defaults.output else "" end)
+      | .defaults.input = (if (.defaults.input | type) == "string" then .defaults.input else "" end)
+      | .bluetoothProfiles = (if (.bluetoothProfiles | type) == "object" then .bluetoothProfiles else {} end)
+    ' "$preferences_file"
+  else
+    default_preferences
+  fi
+}
+
+write_preferences() {
+  local filter=$1
+  shift
+
+  local preferences_dir lock_file temporary_file
+  preferences_dir=$(dirname -- "$preferences_file")
+  mkdir -p -- "$preferences_dir"
+  lock_file="${preferences_file}.lock"
+  exec 9>"$lock_file"
+  flock 9
+
+  temporary_file=$(mktemp "$preferences_dir/.audio-preferences.XXXXXX")
+  trap 'rm -f -- "$temporary_file"' EXIT
+  read_preferences | jq "$@" "$filter" >"$temporary_file"
+  chmod 600 "$temporary_file"
+  mv -f -- "$temporary_file" "$preferences_file"
+  trap - EXIT
+}
+
+case "$action" in
+  show)
+    (( $# == 0 || $# == 1 )) || usage
+    read_preferences
+    ;;
+  set-default)
+    (( $# == 3 )) || usage
+    direction=$2
+    node_name=$3
+    [[ $direction == output || $direction == input ]] || usage
+    [[ -n $node_name ]] || usage
+    write_preferences \
+      '.version = 1 | .defaults[$direction] = $node' \
+      --arg direction "$direction" --arg node "$node_name"
+    ;;
+  set-profile)
+    (( $# == 3 )) || usage
+    address=${2,,}
+    address=${address//[^0-9a-f]/}
+    profile=$3
+    [[ $address =~ ^[0-9a-f]{12}$ && -n $profile ]] || usage
+    write_preferences \
+      '.version = 1 | .bluetoothProfiles[$address] = $profile' \
+      --arg address "$address" --arg profile "$profile"
+    ;;
+  *) usage ;;
+esac

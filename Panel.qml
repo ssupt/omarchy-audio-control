@@ -31,6 +31,12 @@ Panel {
     if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
     return configHome + "/omarchy/audio-control.json"
   }
+  readonly property string audioPreferencesPath: {
+    var configHome = Quickshell.env("XDG_CONFIG_HOME")
+    if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
+    return configHome + "/omarchy/audio-preferences.json"
+  }
+  property var audioPreferences: Model.parseAudioPreferences("")
   property bool outputOverdrive: false
   readonly property real outputVolumeMaximum: outputOverdrive ? 1.5 : 1.0
 
@@ -104,6 +110,10 @@ Panel {
     return Model.isAudioSource(node)
   }
 
+  function loadAudioPreferences(raw) {
+    audioPreferences = Model.parseAudioPreferences(raw)
+  }
+
   property var cachedAudioSinks: []
   property var cachedAudioSources: []
 
@@ -123,6 +133,10 @@ Panel {
 
   readonly property var audioSinks: rawAudioSinks.length > 0 ? rawAudioSinks : cachedAudioSinks
   readonly property var audioSources: rawAudioSources.length > 0 ? rawAudioSources : cachedAudioSources
+  readonly property string preferredOutputName: Model.preferredAudioNodeName(
+    audioPreferences, "output", sink, audioSinks)
+  readonly property string preferredInputName: Model.preferredAudioNodeName(
+    audioPreferences, "input", source, audioSources)
 
   readonly property var audioStreams: {
     var list = []
@@ -818,6 +832,15 @@ Panel {
     onFileChanged: reload()
   }
 
+  FileView {
+    path: root.audioPreferencesPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.loadAudioPreferences(text())
+    onLoadFailed: root.loadAudioPreferences("")
+    onFileChanged: reload()
+  }
+
   Process {
     id: sinkAvailabilityProc
     command: ["omarchy-audio-sink-availability"]
@@ -1365,7 +1388,7 @@ Panel {
     required property var node
     required property int rowIndex
 
-    readonly property bool isActive: root.sink && node && root.sink.id === node.id
+    readonly property bool isActive: node && String(node.name || "") === root.preferredOutputName
     hasCursor: root.cursorActive && root.focusSection === "output" && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sinkRow)
     current: isActive
@@ -1424,7 +1447,7 @@ Panel {
     required property var node
     required property int rowIndex
 
-    readonly property bool isActive: root.source && node && root.source.id === node.id
+    readonly property bool isActive: node && String(node.name || "") === root.preferredInputName
     hasCursor: root.cursorActive && root.focusSection === "input" && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sourceRow)
     current: isActive

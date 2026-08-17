@@ -52,3 +52,6 @@ timeout 2 pactl set-default-sink "$sink_name" 2>/dev/null || true
 for input in "${following_inputs[@]}"; do
   [[ -n $input ]] && timeout 2 pactl move-sink-input "$input" "$sink_name" 2>/dev/null || true
 done
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+"$script_dir/audio-preferences" set-default output "$sink_name"

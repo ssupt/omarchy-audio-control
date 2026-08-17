@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "ssupt.audio-control",
   "name": "Advanced Audio Control",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": "ssupt",
   "description": "Adds application playback and recording routing, volume boost, balance, device ports, and Bluetooth audio controls to Omarchy",
   "kinds": [
