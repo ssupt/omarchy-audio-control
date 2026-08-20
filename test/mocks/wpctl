@@ -1,8 +1,35 @@
 #!/bin/bash
 
+if [[ -n ${AUDIO_CONTROL_DEFAULT_FAILURE:-} && $1 == "set-default" ]]; then
+  exit 1
+fi
+
+if [[ -n ${AUDIO_CONTROL_OUTPUT_DEFAULT_LOG:-} && $* == "set-default 51" ]]; then
+  printf 'wpctl %s\n' "$*" >>"$AUDIO_CONTROL_OUTPUT_DEFAULT_LOG"
+  exit 0
+fi
+
 if [[ -n ${AUDIO_CONTROL_INPUT_DEFAULT_LOG:-} && $* == "set-default 52" ]]; then
   printf 'wpctl %s\n' "$*" >>"$AUDIO_CONTROL_INPUT_DEFAULT_LOG"
   exit 0
+fi
+
+if [[ -n ${AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG:-} ]]; then
+  state_file=${AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_STATE:?}
+  case "$*" in
+    "settings --save bluetooth.autoswitch-to-headset-profile true"|"settings --save bluetooth.autoswitch-to-headset-profile false")
+      printf '%s\n' "$*" >>"$AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG"
+      [[ ${AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_FAIL:-0} == 1 ]] && exit 1
+      printf '%s\n' "${!#}" >"$state_file"
+      exit 0
+      ;;
+    "settings bluetooth.autoswitch-to-headset-profile")
+      value=true
+      [[ -s $state_file ]] && value=$(<"$state_file")
+      printf 'Value: %s\n' "$value"
+      exit 0
+      ;;
+  esac
 fi
 
 if [[ -n ${AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG:-} ]]; then

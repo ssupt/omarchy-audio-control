@@ -64,6 +64,11 @@ assert.equal(model.balanceValue(1, 0.25), -0.75)
 assert.equal(model.balanceValue(0.5, 1), 0.5)
 assert.deepEqual(model.applyBalance([0.8, 0.8], 0, 1, 0.25), [0.6000000000000001, 0.8])
 assert.deepEqual(model.applyBalance([0.8, 0.8], 0, 1, -1), [0.8, 0])
+assert.deepEqual([0.2, 0.6, 1].map(volume =>
+  model.audioMeterLevel([], [], 1, volume, false)), [0.2, 0.6, 1])
+assert.ok(Math.abs(model.audioMeterLevel([0.8, 0.4], [0.25, 0.75], 0, 0, false) - 0.3) < 1e-9)
+assert.equal(model.audioMeterLevel([1], [1.5], 0, 0, false), 1)
+assert.equal(model.audioMeterLevel([1], [1], 1, 1, true), 0)
 assert.equal(model.outputVolumeName(1, false), 'Concert hall')
 assert.equal(model.outputVolumeName(1.25, false), 'Concert hall')
 assert.equal(model.outputVolumeName(1.26, false), 'Overdrive')
@@ -172,10 +177,27 @@ jq -e '
 ' <<<"$routes" >/dev/null || fail "playback and recording route snapshot"
 echo "PASS: persistent application routing"
 
+output_default_log=$(mktemp)
 input_default_log=$(mktemp)
 shared_preferences=$(mktemp)
 shared_preferences_lock="${shared_preferences}.lock"
-trap 'rm -f "$route_log" "$input_default_log" "$shared_preferences" "$shared_preferences_lock"' EXIT
+shared_preferences_output_lock="${shared_preferences}.output.lock"
+shared_preferences_input_lock="${shared_preferences}.input.lock"
+trap 'rm -f "$route_log" "$output_default_log" "$input_default_log" "$shared_preferences" "$shared_preferences_lock" "$shared_preferences_output_lock" "$shared_preferences_input_lock"' EXIT
+
+AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
+  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers
+
+expected_output_default_log=$(cat <<'EOF'
+wpctl set-default 51
+pactl set-default-sink new-speakers
+pactl move-sink-input 300 new-speakers
+EOF
+)
+[[ $(<"$output_default_log") == "$expected_output_default_log" ]] ||
+  fail "default output preserved pinned playback route"
+
 AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
   OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
   "$ROOT/scripts/audio-input-set-default" 52 new-microphone old-microphone
@@ -188,6 +210,38 @@ EOF
 )
 [[ $(<"$input_default_log") == "$expected_input_default_log" ]] ||
   fail "default input preserved pinned recording route"
+jq -e '
+  .defaults == {"output":"new-speakers","input":"new-microphone"}
+' "$shared_preferences" >/dev/null || fail "verified default devices"
+
+failed_preferences=$(mktemp)
+failed_preferences_output_lock="${failed_preferences}.output.lock"
+if AUDIO_CONTROL_DEFAULT_FAILURE=1 OMARCHY_AUDIO_PREFERENCES_FILE="$failed_preferences" \
+  PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-output-set-default" 99 missing-speakers old-speakers >/dev/null 2>&1; then
+  fail "failed default output reported success"
+fi
+[[ ! -s $failed_preferences ]] || fail "failed default output was persisted"
+
+invalid_preferences=$(mktemp)
+invalid_preferences_lock="${invalid_preferences}.lock"
+invalid_preferences_output_lock="${invalid_preferences}.output.lock"
+printf '{invalid json\n' >"$invalid_preferences"
+invalid_preferences_before=$(<"$invalid_preferences")
+: >"$output_default_log"
+if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
+  OMARCHY_AUDIO_PREFERENCES_FILE="$invalid_preferences" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers >/dev/null 2>&1; then
+  fail "invalid shared preferences allowed a default output change"
+fi
+[[ ! -s $output_default_log ]] || fail "default output changed before preferences validation"
+if OMARCHY_AUDIO_PREFERENCES_FILE="$invalid_preferences" \
+  "$ROOT/scripts/audio-preferences" set-default output speakers >/dev/null 2>&1; then
+  fail "invalid shared preferences were overwritten"
+fi
+[[ $(<"$invalid_preferences") == "$invalid_preferences_before" ]] ||
+  fail "invalid shared preferences changed"
+
 OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" \
   "$ROOT/scripts/audio-preferences" set-default output headphones
 OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" \
@@ -197,8 +251,11 @@ jq -e '
   and .defaults == {"output":"headphones","input":"new-microphone"}
   and .bluetoothProfiles == {"001122334455":"a2dp-aac"}
 ' "$shared_preferences" >/dev/null || fail "shared audio preferences"
-echo "PASS: default input recording routes"
-rm -f -- "$shared_preferences" "$shared_preferences_lock"
+echo "PASS: verified default device routing"
+rm -f -- "$output_default_log" "$shared_preferences" "$shared_preferences_lock" \
+  "$shared_preferences_output_lock" "$shared_preferences_input_lock" \
+  "$failed_preferences" "$failed_preferences_output_lock" \
+  "$invalid_preferences" "$invalid_preferences_lock" "$invalid_preferences_output_lock"
 
 port_log=$(mktemp)
 trap 'rm -f "$route_log" "$input_default_log" "$port_log"' EXIT
@@ -238,6 +295,28 @@ bluetooth_preference=$(AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG="$bluetooth_prefer
 [[ $(<"$bluetooth_preference_log") == "settings --save bluetooth.profile-preference latency" ]] ||
   fail "Bluetooth profile preference command"
 echo "PASS: Bluetooth profile preference"
+
+bluetooth_autoswitch_log=$(mktemp)
+bluetooth_autoswitch_state=$(mktemp)
+trap 'rm -f "$route_log" "$input_default_log" "$port_log" "$bluetooth_preference_log" "$bluetooth_preference_state" "$bluetooth_autoswitch_log" "$bluetooth_autoswitch_state"' EXIT
+bluetooth_autoswitch=$(AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG="$bluetooth_autoswitch_log" \
+  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_STATE="$bluetooth_autoswitch_state" \
+  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-bluetooth-autoswitch")
+[[ $bluetooth_autoswitch == true ]] || fail "Bluetooth autoswitch read"
+bluetooth_autoswitch=$(AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG="$bluetooth_autoswitch_log" \
+  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_STATE="$bluetooth_autoswitch_state" \
+  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-bluetooth-autoswitch" off)
+[[ $bluetooth_autoswitch == false ]] || fail "Bluetooth autoswitch write"
+if AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG="$bluetooth_autoswitch_log" \
+  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_STATE="$bluetooth_autoswitch_state" \
+  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_FAIL=1 PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-bluetooth-autoswitch" on >/dev/null 2>&1; then
+  fail "failed Bluetooth autoswitch write reported success"
+fi
+[[ $(<"$bluetooth_autoswitch_state") == false ]] ||
+  fail "failed Bluetooth autoswitch write changed state"
+echo "PASS: Bluetooth autoswitch failure handling"
+rm -f -- "$bluetooth_autoswitch_log" "$bluetooth_autoswitch_state"
 
 profiles=$(
   AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
@@ -288,11 +367,13 @@ AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
 
 expected_profile_log=$(cat <<'EOF'
 set-sink-mute 100 true
+set-source-mute 200 true
 set-sink-input-mute 300 true
 set-card-profile alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback
 set-sink-mute 101 true
-set-sink-volume 101 42%
+set-sink-volume 101 42% 21%
 set-sink-mute 101 false
+set-source-mute 200 true
 set-source-volume 200 36%
 set-source-mute 200 true
 set-sink-input-mute 300 false
@@ -300,6 +381,35 @@ EOF
 )
 [[ $(<"$profile_log") == "$expected_profile_log" ]] || fail "safe profile transition order"
 echo "PASS: safe profile transition"
+
+: >"$profile_log"
+printf 'old\n' >"$profile_state"
+AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
+  AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
+  AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
+  AUDIO_CONTROL_MULTI_PROFILE=1 PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-profile-set" \
+    alsa_card.pci-example-ucm 'HiFi (Mic1, Speaker)'
+
+expected_profile_log=$(cat <<'EOF'
+set-sink-mute 110 true
+set-source-mute 210 true
+set-source-mute 211 true
+set-card-profile alsa_card.pci-example-ucm HiFi (Mic1, Speaker)
+set-sink-mute 120 true
+set-sink-volume 120 60% 45%
+set-sink-mute 120 false
+set-source-mute 221 true
+set-source-mute 220 true
+set-source-volume 221 70%
+set-source-mute 221 true
+set-source-volume 220 30%
+set-source-mute 220 false
+EOF
+)
+[[ $(<"$profile_log") == "$expected_profile_log" ]] ||
+  fail "per-endpoint profile state preservation"
+echo "PASS: per-endpoint profile state preservation"
 
 menu_tmp=$(mktemp -d)
 menu_file="$menu_tmp/omarchy-menu.jsonc"

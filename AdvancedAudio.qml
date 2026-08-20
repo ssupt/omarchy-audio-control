@@ -28,7 +28,18 @@ Item {
   property string bluetoothProfilePreference: "quality"
   property bool bluetoothProfilePreferenceLoaded: false
   property bool bluetoothProfilePreferenceMutation: false
-  property string error: ""
+  property string profileLoadError: ""
+  property string portLoadError: ""
+  property string profileSetError: ""
+  property string portSetError: ""
+  property string bluetoothAutoswitchError: ""
+  property string bluetoothPreferenceError: ""
+  readonly property string error: {
+    var errors = [profileSetError, portSetError, bluetoothAutoswitchError,
+      bluetoothPreferenceError, profileLoadError, portLoadError]
+    for (var i = 0; i < errors.length; i++) if (errors[i] !== "") return errors[i]
+    return ""
+  }
   property int activeTab: 0  // 0 = devices, 1 = Bluetooth
   property bool cursorActive: false
   property int selectedIndex: 0
@@ -69,6 +80,7 @@ Item {
   readonly property int itemCount: activeTab === 0
     ? balanceStartIndex + (outputBalanceAvailable ? 1 : 0) + (inputBalanceAvailable ? 1 : 0)
     : 2 + bluetoothCards.length
+  readonly property bool audioMutationBusy: profileSetProc.running || portSetProc.running
   readonly property color hoverFill: Style.hoverFillFor(foreground, Color.accent)
   readonly property string settingsPath: {
     var configHome = Quickshell.env("XDG_CONFIG_HOME")
@@ -95,10 +107,21 @@ Item {
     closingFromHost = false
     cursorActive = false
     selectedIndex = 0
-    error = ""
+    clearErrors()
     profilesLoaded = false
+    bluetoothAutoSwitchLoaded = false
+    bluetoothProfilePreferenceLoaded = false
     if (windowRuleReady) showOnCurrentWorkspace()
     else if (!windowRuleProc.running) windowRuleProc.running = true
+  }
+
+  function clearErrors() {
+    profileLoadError = ""
+    portLoadError = ""
+    profileSetError = ""
+    portSetError = ""
+    bluetoothAutoswitchError = ""
+    bluetoothPreferenceError = ""
   }
 
   function showOnCurrentWorkspace() {
@@ -302,7 +325,7 @@ Item {
       return
     }
     if (activeTab === 1 && selectedIndex === 1) {
-      bluetoothPreferenceDropdown.toggle()
+      if (bluetoothPreferenceDropdown.enabled) bluetoothPreferenceDropdown.toggle()
       return
     }
     var row = activeTab === 0
@@ -325,8 +348,8 @@ Item {
   }
 
   function setAudioProfile(card, profile) {
-    if (!card || !card.name || !profile || profileSetProc.running) return
-    error = ""
+    if (!card || !card.name || !profile || audioMutationBusy) return
+    profileSetError = ""
     pendingSharedProfile = card.bluetooth && card.address ? {
       address: String(card.address),
       profile: String(profile)
@@ -336,15 +359,15 @@ Item {
   }
 
   function setAudioPort(port, value) {
-    if (!port || !value || portSetProc.running) return
-    error = ""
+    if (!port || !value || audioMutationBusy) return
+    portSetError = ""
     portSetProc.command = [pluginScript("audio-port-set"), port.direction, port.endpoint, value]
     portSetProc.running = true
   }
 
   function setBluetoothAutoSwitch(enabled) {
     if (!bluetoothAutoSwitchLoaded || bluetoothAutoswitchProc.running) return
-    error = ""
+    bluetoothAutoswitchError = ""
     autoswitchMutation = true
     bluetoothAutoswitchProc.command = [pluginScript("audio-bluetooth-autoswitch"), enabled ? "on" : "off"]
     bluetoothAutoswitchProc.running = true
@@ -353,8 +376,7 @@ Item {
   function setBluetoothProfilePreference(value) {
     if (!bluetoothProfilePreferenceLoaded || bluetoothPreferenceProc.running
         || (value !== "quality" && value !== "latency")) return
-    error = ""
-    bluetoothProfilePreference = value
+    bluetoothPreferenceError = ""
     bluetoothProfilePreferenceMutation = true
     bluetoothPreferenceProc.command = [pluginScript("audio-bluetooth-profile-preference"), value]
     bluetoothPreferenceProc.running = true
@@ -404,7 +426,8 @@ Item {
     }
     onExited: function(exitCode) {
       root.profilesLoaded = true
-      if (exitCode !== 0 && window.visible) root.error = "Could not load audio profiles"
+      root.profileLoadError = exitCode !== 0 && window.visible
+        ? "Could not load audio profiles" : ""
     }
   }
 
@@ -425,16 +448,17 @@ Item {
       onStreamFinished: root.parseAudioPorts(text)
     }
     onExited: function(exitCode) {
-      if (exitCode !== 0 && window.visible) root.error = "Could not load audio ports"
+      root.portLoadError = exitCode !== 0 && window.visible
+        ? "Could not load audio ports" : ""
     }
   }
 
   Process {
     id: profileSetProc
     onExited: function(exitCode) {
-      if (exitCode !== 0) root.error = "Could not change the audio profile"
+      if (exitCode !== 0) root.profileSetError = "Could not change the audio profile"
       else {
-        root.error = ""
+        root.profileSetError = ""
         if (root.pendingSharedProfile)
           Quickshell.execDetached([
             root.pluginScript("audio-preferences"),
@@ -451,8 +475,7 @@ Item {
   Process {
     id: portSetProc
     onExited: function(exitCode) {
-      if (exitCode !== 0) root.error = "Could not change the audio port"
-      else root.error = ""
+      root.portSetError = exitCode !== 0 ? "Could not change the audio port" : ""
       portRefreshTimer.restart()
     }
   }
@@ -470,8 +493,11 @@ Item {
       }
     }
     onExited: function(exitCode) {
-      if (root.autoswitchMutation && exitCode !== 0)
-        root.error = "Could not change automatic headset mode"
+      if (exitCode !== 0)
+        root.bluetoothAutoswitchError = root.autoswitchMutation
+          ? "Could not change automatic headset mode"
+          : "Could not load automatic headset mode"
+      else root.bluetoothAutoswitchError = ""
       root.autoswitchMutation = false
     }
   }
@@ -489,8 +515,11 @@ Item {
       }
     }
     onExited: function(exitCode) {
-      if (root.bluetoothProfilePreferenceMutation && exitCode !== 0)
-        root.error = "Could not change Bluetooth profile preference"
+      if (exitCode !== 0)
+        root.bluetoothPreferenceError = root.bluetoothProfilePreferenceMutation
+          ? "Could not change Bluetooth profile preference"
+          : "Could not load Bluetooth profile preference"
+      else root.bluetoothPreferenceError = ""
       root.bluetoothProfilePreferenceMutation = false
     }
   }
@@ -1061,7 +1090,7 @@ Item {
     fill: root.hoverFill
     bordered: true
 
-    function togglePortMenu() { portDropdown.toggle() }
+    function togglePortMenu() { if (portDropdown.enabled) portDropdown.toggle() }
     function closePortMenu() { portDropdown.close() }
 
     Row {
@@ -1106,7 +1135,7 @@ Item {
         value: String(portRow.port.activePort || "")
         options: portRow.port.ports
         hasCursor: portRow.hasCursor
-        enabled: !portSetProc.running
+        enabled: !root.audioMutationBusy
         opacity: enabled ? 1 : 0.6
         foreground: root.foreground
         fontFamily: root.fontFamily
@@ -1240,7 +1269,7 @@ Item {
     fill: root.hoverFill
     bordered: true
 
-    function toggleProfileMenu() { profileDropdown.toggle() }
+    function toggleProfileMenu() { if (profileDropdown.enabled) profileDropdown.toggle() }
     function closeProfileMenu() { profileDropdown.close() }
 
     Component.onDestruction: if (profileDropdown.popupOpen) root.profileMenuOpen = false
@@ -1288,7 +1317,7 @@ Item {
         value: root.selectedAudioProfile(profileRow.card)
         options: root.profileOptions(profileRow.card)
         hasCursor: profileRow.hasCursor
-        enabled: !profileSetProc.running
+        enabled: !root.audioMutationBusy
         opacity: enabled ? 1 : 0.6
         foreground: root.foreground
         fontFamily: root.fontFamily

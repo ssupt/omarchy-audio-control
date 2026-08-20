@@ -5,6 +5,49 @@ if [[ $* == "-f json list cards" && -n ${AUDIO_CONTROL_CARD_FIXTURE:-} ]]; then
   exit 0
 fi
 
+if [[ -n ${AUDIO_CONTROL_DEFAULT_FAILURE:-} ]]; then
+  case "$*" in
+    "get-default-sink")
+      echo "old-speakers"
+      exit 0
+      ;;
+    "-f json list sinks")
+      echo '[{"index":100,"name":"old-speakers"},{"index":101,"name":"missing-speakers"}]'
+      exit 0
+      ;;
+    "-f json list sink-inputs")
+      echo '[]'
+      exit 0
+      ;;
+    "set-default-sink missing-speakers") exit 1 ;;
+  esac
+fi
+
+if [[ -n ${AUDIO_CONTROL_OUTPUT_DEFAULT_LOG:-} ]]; then
+  case "$*" in
+    "get-default-sink")
+      if grep -q '^pactl set-default-sink new-speakers$' "$AUDIO_CONTROL_OUTPUT_DEFAULT_LOG" 2>/dev/null; then
+        echo "new-speakers"
+      else
+        echo "old-speakers"
+      fi
+      exit 0
+      ;;
+    "-f json list sinks")
+      echo '[{"index":100,"name":"old-speakers"},{"index":101,"name":"new-speakers"}]'
+      exit 0
+      ;;
+    "-f json list sink-inputs")
+      echo '[{"index":300,"sink":100,"properties":{"object.id":"900","application.name":"Player"}},{"index":301,"sink":100,"properties":{"object.id":"901","application.name":"Pinned"}}]'
+      exit 0
+      ;;
+    "set-default-sink new-speakers"|"move-sink-input 300 new-speakers")
+      printf 'pactl %s\n' "$*" >>"$AUDIO_CONTROL_OUTPUT_DEFAULT_LOG"
+      exit 0
+      ;;
+  esac
+fi
+
 if [[ -n ${AUDIO_CONTROL_ROUTE_LIST:-} && $* == "-f json list" ]]; then
   echo '{"sink_inputs":[{"index":300,"sink":101,"properties":{"object.id":"900"}}],"source_outputs":[{"index":400,"source":201,"properties":{"object.id":"901"}}]}'
   exit 0
@@ -48,6 +91,14 @@ fi
 
 if [[ -n ${AUDIO_CONTROL_INPUT_DEFAULT_LOG:-} ]]; then
   case "$*" in
+    "get-default-source")
+      if grep -q '^pactl set-default-source new-microphone$' "$AUDIO_CONTROL_INPUT_DEFAULT_LOG" 2>/dev/null; then
+        echo "new-microphone"
+      else
+        echo "old-microphone"
+      fi
+      exit 0
+      ;;
     "-f json list sources")
       echo '[{"index":200,"name":"old-microphone"},{"index":201,"name":"new-microphone"}]'
       exit 0
@@ -68,19 +119,33 @@ if [[ -n ${AUDIO_CONTROL_PROFILE_LOG:-} && -n ${AUDIO_CONTROL_PROFILE_STATE:-} ]
 
   case "$*" in
     "-f json list sinks")
-      if [[ $state == old ]]; then
-        echo '[{"index":100,"card":10,"volume":{"front-left":{"value_percent":"42%"}},"mute":false}]'
+      if [[ ${AUDIO_CONTROL_MULTI_PROFILE:-0} == 1 && $state == old ]]; then
+        echo '[{"index":110,"name":"speaker-output","card":40,"volume":{"front-left":{"value_percent":"60%"},"front-right":{"value_percent":"45%"}},"mute":false}]'
+      elif [[ ${AUDIO_CONTROL_MULTI_PROFILE:-0} == 1 ]]; then
+        echo '[{"index":120,"name":"speaker-output","card":40,"volume":{"front-left":{"value_percent":"100%"},"front-right":{"value_percent":"100%"}},"mute":false}]'
+      elif [[ $state == old ]]; then
+        echo '[{"index":100,"name":"headset-output","card":10,"volume":{"front-left":{"value_percent":"42%"},"front-right":{"value_percent":"21%"}},"mute":false}]'
       else
-        echo '[{"index":101,"card":10,"volume":{"front-left":{"value_percent":"100%"}},"mute":false}]'
+        echo '[{"index":101,"name":"headset-output","card":10,"volume":{"front-left":{"value_percent":"100%"},"front-right":{"value_percent":"100%"}},"mute":false}]'
       fi
       exit 0
       ;;
     "-f json list sources")
-      echo '[{"index":200,"card":10,"volume":{"mono":{"value_percent":"36%"}},"mute":true}]'
+      if [[ ${AUDIO_CONTROL_MULTI_PROFILE:-0} == 1 && $state == old ]]; then
+        echo '[{"index":210,"name":"mic-a","card":40,"volume":{"mono":{"value_percent":"30%"}},"mute":false},{"index":211,"name":"mic-b","card":40,"volume":{"mono":{"value_percent":"70%"}},"mute":true}]'
+      elif [[ ${AUDIO_CONTROL_MULTI_PROFILE:-0} == 1 ]]; then
+        echo '[{"index":221,"name":"mic-b","card":40,"volume":{"mono":{"value_percent":"100%"}},"mute":false},{"index":220,"name":"mic-a","card":40,"volume":{"mono":{"value_percent":"100%"}},"mute":false}]'
+      else
+        echo '[{"index":200,"name":"headset-input","card":10,"volume":{"mono":{"value_percent":"36%"}},"mute":true}]'
+      fi
       exit 0
       ;;
     "-f json list sink-inputs")
-      echo '[{"index":300,"sink":100,"mute":false}]'
+      if [[ ${AUDIO_CONTROL_MULTI_PROFILE:-0} == 1 ]]; then
+        echo '[]'
+      else
+        echo '[{"index":300,"sink":100,"mute":false}]'
+      fi
       exit 0
       ;;
     set-card-profile\ *)

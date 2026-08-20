@@ -14,8 +14,8 @@ fi
 
 case "$action" in
   "") ;;
-  on) wpctl settings --save "$setting" true >/dev/null ;;
-  off) wpctl settings --save "$setting" false >/dev/null ;;
+  on) wpctl settings --save "$setting" true >/dev/null || exit 1 ;;
+  off) wpctl settings --save "$setting" false >/dev/null || exit 1 ;;
   *)
     echo "Usage: omarchy-audio-bluetooth-autoswitch [on|off]" >&2
     exit 1

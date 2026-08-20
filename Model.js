@@ -126,6 +126,35 @@ function applyBalance(volumes, leftIndex, rightIndex, balance) {
   return values
 }
 
+function audioMeterLevel(peaks, volumes, peak, volume, muted) {
+  if (muted) return 0
+
+  var peakValues = peaks && typeof peaks.length === "number" ? peaks : []
+  var volumeValues = volumes && typeof volumes.length === "number" ? volumes : []
+  var level = 0
+
+  // PwNodePeakMonitor deliberately removes each channel's node volume from
+  // its peaks. Reapply those volumes so the meter represents the signal that
+  // actually leaves the application, including channel balance.
+  if (peakValues.length > 0 && peakValues.length === volumeValues.length) {
+    for (var i = 0; i < peakValues.length; i++) {
+      var channelPeak = Number(peakValues[i])
+      var channelVolume = Number(volumeValues[i])
+      if (!isFinite(channelPeak) || channelPeak < 0) channelPeak = 0
+      if (!isFinite(channelVolume) || channelVolume < 0) channelVolume = 0
+      level = Math.max(level, channelPeak * channelVolume)
+    }
+  } else {
+    var maximumPeak = Number(peak)
+    var averageVolume = Number(volume)
+    if (!isFinite(maximumPeak) || maximumPeak < 0) maximumPeak = 0
+    if (!isFinite(averageVolume) || averageVolume < 0) averageVolume = 0
+    level = maximumPeak * averageVolume
+  }
+
+  return Math.max(0, Math.min(1, level))
+}
+
 function outputVolumeName(volume, muted) {
   if (muted) return "Muted"
   var p = Math.round(volume * 100)
@@ -581,6 +610,7 @@ if (typeof module !== "undefined") {
     parseAudioControlSettings: parseAudioControlSettings,
     balanceValue: balanceValue,
     applyBalance: applyBalance,
+    audioMeterLevel: audioMeterLevel,
     outputVolumeName: outputVolumeName,
     parseSinkAvailability: parseSinkAvailability,
     parseAudioProfiles: parseAudioProfiles,

@@ -19,7 +19,9 @@ default_preferences() {
 }
 
 read_preferences() {
-  if [[ -s $preferences_file ]] && jq -e 'type == "object"' "$preferences_file" >/dev/null 2>&1; then
+  if [[ ! -s $preferences_file ]]; then
+    default_preferences
+  elif jq -e 'type == "object"' "$preferences_file" >/dev/null 2>&1; then
     jq -c '
       .version = 1
       | .defaults = (if (.defaults | type) == "object" then .defaults else {} end)
@@ -28,7 +30,8 @@ read_preferences() {
       | .bluetoothProfiles = (if (.bluetoothProfiles | type) == "object" then .bluetoothProfiles else {} end)
     ' "$preferences_file"
   else
-    default_preferences
+    echo "Audio preferences contain invalid JSON; refusing to overwrite them" >&2
+    return 1
   fi
 }
 
@@ -45,7 +48,11 @@ write_preferences() {
 
   temporary_file=$(mktemp "$preferences_dir/.audio-preferences.XXXXXX")
   trap 'rm -f -- "$temporary_file"' EXIT
-  read_preferences | jq "$@" "$filter" >"$temporary_file"
+  if ! read_preferences | jq "$@" "$filter" >"$temporary_file"; then
+    rm -f -- "$temporary_file"
+    trap - EXIT
+    return 1
+  fi
   chmod 600 "$temporary_file"
   mv -f -- "$temporary_file" "$preferences_file"
   trap - EXIT

@@ -13,11 +13,23 @@ if (( $# < 2 || $# > 3 )) || [[ -z $node_id || -z $sink_name ]]; then
   exit 1
 fi
 
+preferences_file=${OMARCHY_AUDIO_PREFERENCES_FILE:-${XDG_CONFIG_HOME:-${HOME:?}/.config}/omarchy/audio-preferences.json}
+mkdir -p -- "$(dirname -- "$preferences_file")" || exit 1
+exec 8>"${preferences_file}.output.lock" || exit 1
+flock 8 || exit 1
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+"$script_dir/audio-preferences" show >/dev/null || exit 1
+
 # Capture the applications following the old default before changing it.
 # PipeWire records explicit per-application routes in the default metadata, so
 # checking the current sink alone is not enough: an explicitly routed stream may
 # happen to be on the old default and must still remain there.
-[[ -n $old_sink_name ]] || old_sink_name=$(timeout 2 pactl get-default-sink 2>/dev/null || true)
+live_sink_name=$(timeout 2 pactl get-default-sink 2>/dev/null || true)
+if [[ -n $live_sink_name && $live_sink_name != "$sink_name" ]]; then
+  old_sink_name=$live_sink_name
+elif [[ -z $old_sink_name ]]; then
+  old_sink_name=$live_sink_name
+fi
 old_sink_index=$(timeout 2 pactl -f json list sinks 2>/dev/null |
   jq -r --arg name "$old_sink_name" 'map(select(.name == $name))[0].index // empty' || true)
 
@@ -49,9 +61,17 @@ fi
 timeout 2 wpctl set-default "$node_id" 2>/dev/null || true
 timeout 2 pactl set-default-sink "$sink_name" 2>/dev/null || true
 
+actual_sink_name=$(timeout 2 pactl get-default-sink 2>/dev/null || true)
+if [[ $actual_sink_name != "$sink_name" ]]; then
+  echo "Could not set the default audio output" >&2
+  exit 1
+fi
+
 for input in "${following_inputs[@]}"; do
   [[ -n $input ]] && timeout 2 pactl move-sink-input "$input" "$sink_name" 2>/dev/null || true
 done
 
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-"$script_dir/audio-preferences" set-default output "$sink_name"
+if ! "$script_dir/audio-preferences" set-default output "$sink_name"; then
+  echo "The default output changed, but its preference could not be saved" >&2
+  exit 2
+fi
