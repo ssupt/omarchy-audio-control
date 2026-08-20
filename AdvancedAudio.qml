@@ -28,19 +28,26 @@ Item {
   property string bluetoothProfilePreference: "quality"
   property bool bluetoothProfilePreferenceLoaded: false
   property bool bluetoothProfilePreferenceMutation: false
+  property var policySettings: ({})
+  property bool policySettingsLoaded: false
+  property bool policyMutation: false
+  property bool policyResponseValid: false
+  property var previousPolicySettings: ({})
+  property string pendingPolicyKey: ""
   property string profileLoadError: ""
   property string portLoadError: ""
   property string profileSetError: ""
   property string portSetError: ""
   property string bluetoothAutoswitchError: ""
   property string bluetoothPreferenceError: ""
+  property string policyError: ""
   readonly property string error: {
     var errors = [profileSetError, portSetError, bluetoothAutoswitchError,
-      bluetoothPreferenceError, profileLoadError, portLoadError]
+      bluetoothPreferenceError, policyError, profileLoadError, portLoadError]
     for (var i = 0; i < errors.length; i++) if (errors[i] !== "") return errors[i]
     return ""
   }
-  property int activeTab: 0  // 0 = devices, 1 = Bluetooth
+  property int activeTab: 0  // 0 = devices, 1 = Bluetooth, 2 = policy
   property bool cursorActive: false
   property int selectedIndex: 0
   property bool profileMenuOpen: false
@@ -53,6 +60,60 @@ Item {
   readonly property color background: Color.background
   readonly property color urgent: Color.urgent
   readonly property string fontFamily: Style.font.family
+  readonly property var policyCoreDefinitions: [
+    {
+      key: "node.features.audio.mono",
+      label: "Mono audio",
+      description: "Mix left and right output channels so every sound is audible from either speaker."
+    },
+    {
+      key: "linking.pause-playback",
+      label: "Pause on output loss",
+      description: "Pause compatible media players when their active output device disappears."
+    },
+    {
+      key: "device.routes.mute-on-alsa-playback-removed",
+      label: "Mute after wired disconnect",
+      description: "Keep playback muted instead of unexpectedly moving it to another output."
+    },
+    {
+      key: "device.routes.mute-on-bluetooth-playback-removed",
+      label: "Mute after Bluetooth disconnect",
+      description: "Prevent private audio from jumping to speakers when Bluetooth drops."
+    }
+  ]
+  readonly property var policyVolumeDefinitions: [
+    {
+      key: "device.routes.default-sink-volume",
+      label: "New output devices",
+      description: "Starting level before WirePlumber has remembered a volume for the device."
+    },
+    {
+      key: "device.routes.default-source-volume",
+      label: "New input devices",
+      description: "Starting level before WirePlumber has remembered a volume for the microphone."
+    },
+    {
+      key: "node.stream.default-playback-volume",
+      label: "New playback apps",
+      description: "Starting level for applications that have not played audio before."
+    },
+    {
+      key: "node.stream.default-capture-volume",
+      label: "New recording apps",
+      description: "Starting level for applications that have not recorded before."
+    }
+  ]
+  readonly property var policyExperimentalDefinitions: [
+    {
+      key: "monitor.alsa.autodetect-hdmi-channels",
+      label: "Detect HDMI channel layout",
+      description: "Let WirePlumber infer HDMI channel counts. Experimental; some receivers report them incorrectly."
+    }
+  ]
+  readonly property var availablePolicyCore: supportedPolicyDefinitions(policyCoreDefinitions)
+  readonly property var availablePolicyVolumes: supportedPolicyDefinitions(policyVolumeDefinitions)
+  readonly property var availablePolicyExperimental: supportedPolicyDefinitions(policyExperimentalDefinitions)
   readonly property var bluetoothCards: Model.audioCardsByBluetooth(audioCards, true)
   readonly property var deviceCards: Model.audioCardsByBluetooth(audioCards, false)
   readonly property var pipewireNodes: Pipewire.nodes ? Pipewire.nodes.values : []
@@ -77,9 +138,12 @@ Item {
   readonly property int outputBalanceIndex: outputBalanceAvailable ? balanceStartIndex : -1
   readonly property int inputBalanceIndex: inputBalanceAvailable
     ? balanceStartIndex + (outputBalanceAvailable ? 1 : 0) : -1
+  readonly property int policyVolumeStartIndex: availablePolicyCore.length
+  readonly property int policyExperimentalStartIndex: policyVolumeStartIndex + availablePolicyVolumes.length
+  readonly property int policyItemCount: policyExperimentalStartIndex + availablePolicyExperimental.length
   readonly property int itemCount: activeTab === 0
     ? balanceStartIndex + (outputBalanceAvailable ? 1 : 0) + (inputBalanceAvailable ? 1 : 0)
-    : 2 + bluetoothCards.length
+    : (activeTab === 1 ? 2 + bluetoothCards.length : policyItemCount)
   readonly property bool audioMutationBusy: profileSetProc.running || portSetProc.running
   readonly property color hoverFill: Style.hoverFillFor(foreground, Color.accent)
   readonly property string settingsPath: {
@@ -102,7 +166,7 @@ Item {
   function open(payloadJson) {
     var payload = ({})
     try { payload = JSON.parse(payloadJson || "{}") } catch (e) { payload = ({}) }
-    activeTab = payload.tab === "bluetooth" ? 1 : 0
+    activeTab = payload.tab === "bluetooth" ? 1 : (payload.tab === "policy" ? 2 : 0)
     openRequested = true
     closingFromHost = false
     cursorActive = false
@@ -111,6 +175,7 @@ Item {
     profilesLoaded = false
     bluetoothAutoSwitchLoaded = false
     bluetoothProfilePreferenceLoaded = false
+    policySettingsLoaded = false
     if (windowRuleReady) showOnCurrentWorkspace()
     else if (!windowRuleProc.running) windowRuleProc.running = true
   }
@@ -122,6 +187,7 @@ Item {
     portSetError = ""
     bluetoothAutoswitchError = ""
     bluetoothPreferenceError = ""
+    policyError = ""
   }
 
   function showOnCurrentWorkspace() {
@@ -163,6 +229,13 @@ Item {
       bluetoothPreferenceProc.running = true
     }
     if (!portsProc.running && !portSetProc.running) portsProc.running = true
+    if (!policyProc.running) {
+      policyMutation = false
+      policyResponseValid = false
+      pendingPolicyKey = ""
+      policyProc.command = [pluginScript("audio-policy-settings")]
+      policyProc.running = true
+    }
     resolveVolumeSink()
   }
 
@@ -188,6 +261,76 @@ Item {
   function loadAudioControlSettings(raw) {
     audioControlSettings = Model.parseAudioControlSettings(raw)
     outputOverdrive = audioControlSettings.outputOverdrive
+  }
+
+  function supportedPolicyDefinitions(definitions) {
+    var supported = []
+    for (var i = 0; i < definitions.length; i++) {
+      var definition = definitions[i]
+      if (policySettings[definition.key] !== undefined) supported.push(definition)
+    }
+    return supported
+  }
+
+  function copyPolicySettings(source) {
+    var copy = ({})
+    for (var key in source) copy[key] = source[key]
+    return copy
+  }
+
+  function loadPolicySettings(raw) {
+    var response = Model.parseAudioPolicySettings(raw)
+    policyResponseValid = response.valid
+    if (!response.valid) return
+    policySettings = response.values
+    policySettingsLoaded = true
+    clampCursor()
+  }
+
+  function setPolicySetting(key, value) {
+    if (!policySettingsLoaded || policyProc.running || policySettings[key] === undefined) return
+    var current = policySettings[key]
+    var normalized
+    if (typeof current === "boolean") {
+      if (typeof value !== "boolean") return
+      normalized = value
+    } else {
+      normalized = Math.max(0, Math.min(1, Math.round(Number(value) * 20) / 20))
+      if (!isFinite(normalized)) return
+    }
+    if (normalized === current) return
+
+    policyError = ""
+    previousPolicySettings = copyPolicySettings(policySettings)
+    var next = copyPolicySettings(policySettings)
+    next[key] = normalized
+    policySettings = next
+    policyMutation = true
+    policyResponseValid = false
+    pendingPolicyKey = key
+    policyProc.command = [pluginScript("audio-policy-settings"), "set", key, String(normalized)]
+    policyProc.running = true
+  }
+
+  function policyToggleAtCursor() {
+    if (activeTab !== 2) return null
+    if (selectedIndex < availablePolicyCore.length)
+      return availablePolicyCore[selectedIndex]
+    if (selectedIndex >= policyExperimentalStartIndex) {
+      var experimentalIndex = selectedIndex - policyExperimentalStartIndex
+      if (experimentalIndex < availablePolicyExperimental.length)
+        return availablePolicyExperimental[experimentalIndex]
+    }
+    return null
+  }
+
+  function adjustPolicyVolumeAtCursor(delta) {
+    if (activeTab !== 2) return false
+    var index = selectedIndex - policyVolumeStartIndex
+    if (index < 0 || index >= availablePolicyVolumes.length) return false
+    var definition = availablePolicyVolumes[index]
+    setPolicySetting(definition.key, Number(policySettings[definition.key]) + delta * 0.05)
+    return true
   }
 
   function setOutputOverdrive(enabled) {
@@ -283,7 +426,7 @@ Item {
   }
 
   function selectTab(index) {
-    var next = Math.max(0, Math.min(1, index))
+    var next = Math.max(0, Math.min(2, index))
     if (next === activeTab) return
     closeProfileMenus()
     activeTab = next
@@ -294,7 +437,7 @@ Item {
   }
 
   function switchTab(direction) {
-    selectTab((activeTab + (direction < 0 ? -1 : 1) + 2) % 2)
+    selectTab((activeTab + (direction < 0 ? -1 : 1) + 3) % 3)
   }
 
   function setCursor(index) {
@@ -304,6 +447,12 @@ Item {
 
   function activateCursor() {
     if (!cursorActive || itemCount === 0) return
+    if (activeTab === 2) {
+      var policyToggle = policyToggleAtCursor()
+      if (policyToggle)
+        setPolicySetting(policyToggle.key, policySettings[policyToggle.key] !== true)
+      return
+    }
     if (activeTab === 0 && selectedIndex === 0) {
       setOutputOverdrive(!outputOverdrive)
       return
@@ -524,6 +673,31 @@ Item {
     }
   }
 
+  Process {
+    id: policyProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.loadPolicySettings(text)
+    }
+    onExited: function(exitCode) {
+      var mutation = root.policyMutation
+      if (exitCode !== 0 || !root.policyResponseValid) {
+        if (mutation) root.policySettings = root.previousPolicySettings
+        else root.policySettings = ({})
+        root.policySettingsLoaded = true
+        root.policyError = mutation
+          ? "Could not change the audio safety policy"
+          : "Could not load audio safety policies"
+      } else {
+        root.policyError = ""
+      }
+      root.policyMutation = false
+      root.pendingPolicyKey = ""
+      root.previousPolicySettings = ({})
+      root.clampCursor()
+    }
+  }
+
   Timer {
     id: profileRefreshTimer
     interval: 200
@@ -584,6 +758,7 @@ Item {
             if (dx !== 0) {
               root.cursorActive = true
               if (root.activeTab === 0 && root.adjustBalanceAtCursor(dx)) return
+              if (root.activeTab === 2 && root.adjustPolicyVolumeAtCursor(dx)) return
               root.switchTab(dx)
             return
           }
@@ -631,7 +806,7 @@ Item {
 
                 Text {
                   width: parent.width
-                  text: "Configure audio devices, Bluetooth codecs, and headset behavior."
+                  text: "Configure devices, Bluetooth behavior, and system-wide audio safety."
                   color: Qt.darker(root.foreground, 1.35)
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -645,14 +820,17 @@ Item {
             ButtonGroup {
               options: [
                 { value: "devices", label: "Devices", icon: "󰓃" },
-                { value: "bluetooth", label: "Bluetooth", icon: "󰂯" }
+                { value: "bluetooth", label: "Bluetooth", icon: "󰂯" },
+                { value: "policy", label: "Policy", icon: "󰒃" }
               ]
-              value: root.activeTab === 0 ? "devices" : "bluetooth"
+              value: root.activeTab === 0 ? "devices" : (root.activeTab === 1 ? "bluetooth" : "policy")
               focusable: false
               foreground: root.foreground
               background: root.background
               fontFamily: root.fontFamily
-              onChanged: function(value) { root.selectTab(value === "bluetooth" ? 1 : 0) }
+              onChanged: function(value) {
+                root.selectTab(value === "bluetooth" ? 1 : (value === "policy" ? 2 : 0))
+              }
             }
           }
 
@@ -949,6 +1127,164 @@ Item {
               PanelSeparator {
                 visible: root.activeTab === 1
                 foreground: root.foreground
+              }
+
+              Column {
+                visible: root.activeTab === 2
+                width: parent.width
+                spacing: Style.space(18)
+
+                Text {
+                  visible: !root.policySettingsLoaded
+                  width: parent.width
+                  text: "Loading audio safety policies…"
+                  color: Qt.darker(root.foreground, 1.35)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                Text {
+                  visible: root.policySettingsLoaded && root.policyItemCount === 0
+                    && root.policyError === ""
+                  width: parent.width
+                  text: "This WirePlumber version does not expose the supported policy controls."
+                  color: Qt.darker(root.foreground, 1.35)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+
+                Text {
+                  visible: root.policySettingsLoaded && root.policyItemCount > 0
+                  width: parent.width
+                  text: "Changes apply system-wide and are saved by WirePlumber. Unsupported controls are hidden automatically."
+                  color: Qt.darker(root.foreground, 1.35)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+
+                Column {
+                  visible: root.availablePolicyCore.length > 0
+                  width: parent.width
+                  spacing: Style.space(8)
+
+                  PanelSectionHeader {
+                    text: "SAFETY & ACCESSIBILITY"
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                  }
+
+                  Repeater {
+                    model: root.availablePolicyCore
+
+                    AudioPolicyToggleRow {
+                      id: policyCoreRow
+                      required property var modelData
+                      required property int index
+                      width: parent.width
+                      definition: modelData
+                      checked: root.policySettings[modelData.key] === true
+                      busy: policyProc.running && root.pendingPolicyKey === modelData.key
+                      enabled: root.policySettingsLoaded && !policyProc.running
+                      opacity: enabled ? 1 : 0.6
+                      hasCursor: root.cursorActive && root.activeTab === 2
+                        && root.selectedIndex === index
+                      foreground: root.foreground
+                      fill: root.hoverFill
+                      fontFamily: root.fontFamily
+                      onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(policyCoreRow)
+                      onHovered: root.setCursor(index)
+                      onActivated: root.setPolicySetting(modelData.key, !checked)
+                    }
+                  }
+                }
+
+                PanelSeparator {
+                  visible: root.availablePolicyCore.length > 0
+                    && (root.availablePolicyVolumes.length > 0
+                      || root.availablePolicyExperimental.length > 0)
+                  foreground: root.foreground
+                }
+
+                Column {
+                  visible: root.availablePolicyVolumes.length > 0
+                  width: parent.width
+                  spacing: Style.space(8)
+
+                  PanelSectionHeader {
+                    text: "STARTING VOLUMES"
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                  }
+
+                  Repeater {
+                    model: root.availablePolicyVolumes
+
+                    AudioPolicyVolumeRow {
+                      id: policyVolumeRow
+                      required property var modelData
+                      required property int index
+                      readonly property int rowIndex: root.policyVolumeStartIndex + index
+                      width: parent.width
+                      definition: modelData
+                      value: Number(root.policySettings[modelData.key])
+                      enabled: root.policySettingsLoaded && !policyProc.running
+                      opacity: enabled ? 1 : 0.6
+                      hasCursor: root.cursorActive && root.activeTab === 2
+                        && root.selectedIndex === rowIndex
+                      foreground: root.foreground
+                      fill: root.hoverFill
+                      fontFamily: root.fontFamily
+                      onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(policyVolumeRow)
+                      onHovered: root.setCursor(rowIndex)
+                      onCommitted: function(value) { root.setPolicySetting(modelData.key, value) }
+                    }
+                  }
+                }
+
+                PanelSeparator {
+                  visible: root.availablePolicyExperimental.length > 0
+                    && (root.availablePolicyCore.length > 0 || root.availablePolicyVolumes.length > 0)
+                  foreground: root.foreground
+                }
+
+                Column {
+                  visible: root.availablePolicyExperimental.length > 0
+                  width: parent.width
+                  spacing: Style.space(8)
+
+                  PanelSectionHeader {
+                    text: "EXPERIMENTAL"
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                  }
+
+                  Repeater {
+                    model: root.availablePolicyExperimental
+
+                    AudioPolicyToggleRow {
+                      id: policyExperimentalRow
+                      required property var modelData
+                      required property int index
+                      readonly property int rowIndex: root.policyExperimentalStartIndex + index
+                      width: parent.width
+                      definition: modelData
+                      checked: root.policySettings[modelData.key] === true
+                      busy: policyProc.running && root.pendingPolicyKey === modelData.key
+                      enabled: root.policySettingsLoaded && !policyProc.running
+                      opacity: enabled ? 1 : 0.6
+                      hasCursor: root.cursorActive && root.activeTab === 2
+                        && root.selectedIndex === rowIndex
+                      foreground: root.foreground
+                      fill: root.hoverFill
+                      fontFamily: root.fontFamily
+                      onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(policyExperimentalRow)
+                      onHovered: root.setCursor(rowIndex)
+                      onActivated: root.setPolicySetting(modelData.key, !checked)
+                    }
+                  }
+                }
               }
 
               Column {

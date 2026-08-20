@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "ssupt.audio-control",
   "name": "Advanced Audio Control",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": "ssupt",
-  "description": "Adds application playback and recording routing, volume boost, balance, device ports, and Bluetooth audio controls to Omarchy",
+  "description": "Advanced PipeWire and WirePlumber audio mixer for Omarchy: persistent per-application speaker/output and microphone/input routing; app volume, mute, icons, and live playback/recording meters; default device selection; ports and profiles; Bluetooth codecs, headset autoswitch, and quality/latency preference; 150% volume boost; stereo balance; mono audio; pause or mute protection when wired/Bluetooth devices disconnect; starting volumes for new devices and apps; HDMI channel detection; and a persistent microphone privacy/recording badge with app names and quick mute",
   "kinds": [
     "bar-widget",
     "panel"
@@ -15,7 +15,7 @@
   },
   "barWidget": {
     "displayName": "Advanced Audio Control",
-    "description": "Adds application playback and recording routing, volume boost, balance, device ports, and Bluetooth audio controls to Omarchy",
+    "description": "Advanced PipeWire and WirePlumber audio mixer for Omarchy: persistent per-application speaker/output and microphone/input routing; app volume, mute, icons, and live playback/recording meters; default device selection; ports and profiles; Bluetooth codecs, headset autoswitch, and quality/latency preference; 150% volume boost; stereo balance; mono audio; pause or mute protection when wired/Bluetooth devices disconnect; starting volumes for new devices and apps; HDMI channel detection; and a persistent microphone privacy/recording badge with app names and quick mute",
     "category": "Audio",
     "allowMultiple": false
   },
