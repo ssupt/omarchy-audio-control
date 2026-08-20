@@ -16,6 +16,15 @@ instead of introducing a separate mixer application.
 - Configure device profiles and Bluetooth codecs in separate keyboard-navigable tabs.
 - Control when Bluetooth headsets switch into communication mode.
 - Choose whether automatic Bluetooth profile selection favors quality or latency.
+- Configure supported WirePlumber safety policies, including mono audio, pause on
+  output loss, disconnect protection, and HDMI channel detection.
+- Set safe starting volumes for new devices and playback or recording applications.
+- Keep microphone use visible on the bar, including the recording applications and
+  a persistent app-count badge even while the microphone is muted.
+
+The bar audio icon uses left-click for the quick mixer, middle-click to mute or
+unmute the microphone, right-click to mute or unmute all audio, and the wheel to
+adjust output volume. Hovering it lists applications with active microphone access.
 
 The optional [Advanced Bluetooth Audio](https://github.com/ssupt/omarchy-bluetooth-audio)
 companion brings the same codec controls into Omarchy's Bluetooth panel while
@@ -39,6 +48,11 @@ Application routes use WirePlumber's native stream-target restoration. Choosing
 an output restores that choice whenever the application creates a new stream.
 Recording routes follow the same behavior for microphones. Explicitly routed
 recording applications stay pinned when the default input changes.
+
+The Policy tab discovers settings from the installed WirePlumber version, so it
+only shows controls the system supports. Changes use WirePlumber's persistent
+settings API. Starting-volume percentages are converted to its cubic storage
+scale before they are saved, keeping the displayed values perceptually accurate.
 
 ## Installation
 

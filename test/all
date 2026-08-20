@@ -38,6 +38,20 @@ assert.deepEqual(model.parseAudioControlSettings('not json'), {
   version: 1,
   outputOverdrive: false
 })
+assert.deepEqual(model.parseAudioPolicySettings(JSON.stringify({
+  'node.features.audio.mono': true,
+  'linking.pause-playback': 'true',
+  'device.routes.default-sink-volume': 0.4,
+  'device.routes.default-source-volume': 2,
+  'unknown.setting': false
+})), {
+  valid: true,
+  values: {
+    'node.features.audio.mono': true,
+    'device.routes.default-sink-volume': 0.4
+  }
+})
+assert.deepEqual(model.parseAudioPolicySettings('not json'), { valid: false, values: {} })
 const audioPreferences = model.parseAudioPreferences(JSON.stringify({
   defaults: { output: 'headphones', input: 'headset-microphone' },
   bluetoothProfiles: { '00:11:22:33:44:55': 'a2dp-aac' }
@@ -124,6 +138,11 @@ assert.deepEqual(model.recordingInputOptions([defaultInput, headsetInput], defau
 ])
 assert.equal(model.isRecordingStream({ isStream: true, isSink: false }), true)
 assert.equal(model.isRecordingStream({ isStream: true, isSink: true }), false)
+assert.deepEqual(model.uniqueRecordingStreamLabels([
+  { ready: true, properties: { 'application.name': 'Firefox' } },
+  { ready: true, properties: { 'application.name': 'firefox' } },
+  { ready: true, properties: { 'application.name': 'Discord' } }
+]), ['Firefox', 'Discord'])
 assert.equal(model.streamIconName({ ready: true, properties: { 'application.icon_name': 'firefox' } }, [], []), 'firefox')
 assert.equal(model.streamIconName({ ready: true, properties: { 'application.icon_name': 'chromium-browser' } }, [], []), 'chromium')
 assert.equal(model.streamIconName({ ready: true, properties: { 'application.id': 'org.example.App.desktop' } }, [], []), 'org.example.App')
@@ -280,6 +299,62 @@ if AUDIO_CONTROL_PORT_LOG="$port_log" PATH="$TEST_DIR/mocks:$PATH" \
   fail "unavailable audio port accepted"
 fi
 echo "PASS: audio port controls"
+
+policy_log=$(mktemp)
+policy_state=$(mktemp)
+trap 'rm -f "$route_log" "$input_default_log" "$port_log" "$policy_log" "$policy_state"' EXIT
+printf '{}\n' >"$policy_state"
+
+policy=$(AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
+  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings")
+jq -e '
+  .["node.features.audio.mono"] == false
+  and .["linking.pause-playback"] == true
+  and ((.["device.routes.default-sink-volume"] - 0.4) | fabs) < 0.000001
+  and .["node.stream.default-capture-volume"] == 1
+' <<<"$policy" >/dev/null || fail "audio policy snapshot"
+
+policy=$(AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
+  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings" \
+  set node.features.audio.mono true)
+jq -e '.["node.features.audio.mono"] == true' "$policy_state" >/dev/null ||
+  fail "boolean audio policy write"
+jq -e '.["node.features.audio.mono"] == true' <<<"$policy" >/dev/null ||
+  fail "boolean audio policy confirmation"
+
+policy=$(AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
+  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings" \
+  set device.routes.default-sink-volume 0.5)
+jq -e '((.["device.routes.default-sink-volume"] - 0.125) | fabs) < 0.000001' \
+  "$policy_state" >/dev/null || fail "cubic audio policy write"
+jq -e '((.["device.routes.default-sink-volume"] - 0.5) | fabs) < 0.000001' \
+  <<<"$policy" >/dev/null || fail "linear audio policy confirmation"
+
+if AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
+  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings" \
+  set unknown.audio.setting true >/dev/null 2>&1; then
+  fail "unknown audio policy accepted"
+fi
+if AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
+  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings" \
+  set device.routes.default-source-volume 1.5 >/dev/null 2>&1; then
+  fail "out-of-range audio policy volume accepted"
+fi
+if AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
+  AUDIO_CONTROL_POLICY_FAIL=linking.pause-playback PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-policy-settings" set linking.pause-playback false >/dev/null 2>&1; then
+  fail "failed audio policy write reported success"
+fi
+jq -e 'has("linking.pause-playback") | not' "$policy_state" >/dev/null ||
+  fail "failed audio policy write changed state"
+
+policy=$(AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
+  AUDIO_CONTROL_POLICY_UNSUPPORTED=monitor.alsa.autodetect-hdmi-channels \
+  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings")
+jq -e 'has("monitor.alsa.autodetect-hdmi-channels") | not' <<<"$policy" >/dev/null ||
+  fail "unsupported audio policy exposed"
+echo "PASS: capability-aware audio safety policies"
+rm -f -- "$policy_log" "$policy_state"
 
 bluetooth_preference_log=$(mktemp)
 bluetooth_preference_state=$(mktemp)
@@ -445,7 +520,7 @@ echo "PASS: menu integration"
 jq -e '
   .schemaVersion == 1
   and .id == "ssupt.audio-control"
-  and .version == "0.4.0"
+  and .version == "0.5.0"
   and .author == "ssupt"
   and (.kinds | index("bar-widget") != null)
   and (.kinds | index("panel") != null)

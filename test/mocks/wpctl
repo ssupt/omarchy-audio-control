@@ -14,6 +14,51 @@ if [[ -n ${AUDIO_CONTROL_INPUT_DEFAULT_LOG:-} && $* == "set-default 52" ]]; then
   exit 0
 fi
 
+if [[ -n ${AUDIO_CONTROL_POLICY_STATE:-} ]]; then
+  state_file=$AUDIO_CONTROL_POLICY_STATE
+
+  policy_default() {
+    case "$1" in
+      node.features.audio.mono) printf '%s\n' false ;;
+      linking.pause-playback) printf '%s\n' true ;;
+      device.routes.mute-on-alsa-playback-removed) printf '%s\n' false ;;
+      device.routes.mute-on-bluetooth-playback-removed) printf '%s\n' false ;;
+      monitor.alsa.autodetect-hdmi-channels) printf '%s\n' false ;;
+      device.routes.default-sink-volume) printf '%s\n' 0.064 ;;
+      device.routes.default-source-volume) printf '%s\n' 1 ;;
+      node.stream.default-playback-volume) printf '%s\n' 1 ;;
+      node.stream.default-capture-volume) printf '%s\n' 1 ;;
+      *) return 1 ;;
+    esac
+  }
+
+  if [[ $1 == settings && ${2:-} == --save ]]; then
+    setting=${3:-}
+    value=${4:-}
+    policy_default "$setting" >/dev/null || exit 1
+    [[ -n ${AUDIO_CONTROL_POLICY_LOG:-} ]] &&
+      printf 'settings --save %s %s\n' "$setting" "$value" >>"$AUDIO_CONTROL_POLICY_LOG"
+    [[ ${AUDIO_CONTROL_POLICY_FAIL:-} == 1 || ${AUDIO_CONTROL_POLICY_FAIL:-} == "$setting" ]] && exit 1
+    temporary_file="${state_file}.tmp"
+    jq --arg setting "$setting" --argjson value "$value" \
+      '.[$setting] = $value' "$state_file" >"$temporary_file"
+    mv -f -- "$temporary_file" "$state_file"
+    exit 0
+  fi
+
+  if [[ $1 == settings && $# == 2 ]]; then
+    setting=$2
+    if [[ ,${AUDIO_CONTROL_POLICY_UNSUPPORTED:-}, == *,"$setting",* ]]; then
+      exit 1
+    fi
+    fallback=$(policy_default "$setting") || exit 1
+    value=$(jq -r --arg setting "$setting" --arg fallback "$fallback" \
+      'if has($setting) then .[$setting] else ($fallback | fromjson) end' "$state_file")
+    printf 'Value: %s\n' "$value"
+    exit 0
+  fi
+fi
+
 if [[ -n ${AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG:-} ]]; then
   state_file=${AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_STATE:?}
   case "$*" in

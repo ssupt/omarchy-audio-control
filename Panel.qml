@@ -152,6 +152,26 @@ Panel {
     return list
   }
 
+  readonly property var activeRecordingLabels: Model.uniqueRecordingStreamLabels(recordingStreams)
+  readonly property int recordingApplicationCount: activeRecordingLabels.length
+  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  readonly property string recordingTooltip: {
+    var microphoneAction = hasInput
+      ? "Middle-click to " + (inputMuted ? "unmute" : "mute") + " microphone"
+      : ""
+    if (recordingApplicationCount === 0) {
+      var outputStatus = outputMuted ? "Output muted" : "Output " + Math.round(outputVolume * 100) + "%"
+      return microphoneAction === "" ? outputStatus : outputStatus + "\n" + microphoneAction
+    }
+
+    var access = recordingApplicationCount === 1
+      ? "Microphone access · " + activeRecordingLabels[0]
+      : "Microphone access by " + recordingApplicationCount + " apps\n"
+        + activeRecordingLabels.join(", ")
+    var state = inputMuted ? "Microphone muted" : "Microphone in use"
+    return access + "\n" + state + (microphoneAction === "" ? "" : " · " + microphoneAction)
+  }
+
   // Feed Repeaters with panel-local snapshots instead of the live PipeWire
   // model. PipeWire can remove nodes while Quickshell is dispatching the
   // removal signal; rebuilding a Repeater from that signal path has crashed
@@ -962,9 +982,23 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.outputIcon()
+    tooltipText: root.recordingTooltip
+    iconComponent: Component {
+      Item {
+        AudioBarIcon {
+          anchors.fill: parent
+          outputGlyph: root.outputIcon()
+          recordingCount: root.recordingApplicationCount
+          microphoneMuted: root.inputMuted
+          foreground: root.barForeground
+          urgent: root.urgent
+          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+        }
+      }
+    }
     onPressed: function(b) {
       if (b === Qt.RightButton) root.toggleAllMuted()
+      else if (b === Qt.MiddleButton) root.toggleInputMute()
       else root.toggle()
     }
 

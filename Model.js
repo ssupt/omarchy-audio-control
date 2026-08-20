@@ -104,6 +104,44 @@ function parseAudioControlSettings(raw) {
   }
 }
 
+function parseAudioPolicySettings(raw) {
+  var parsed
+  try {
+    parsed = JSON.parse(String(raw || ""))
+  } catch (e) {
+    return { valid: false, values: {} }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    return { valid: false, values: {} }
+
+  var booleanKeys = [
+    "node.features.audio.mono",
+    "linking.pause-playback",
+    "device.routes.mute-on-alsa-playback-removed",
+    "device.routes.mute-on-bluetooth-playback-removed",
+    "monitor.alsa.autodetect-hdmi-channels"
+  ]
+  var volumeKeys = [
+    "device.routes.default-sink-volume",
+    "device.routes.default-source-volume",
+    "node.stream.default-playback-volume",
+    "node.stream.default-capture-volume"
+  ]
+  var values = {}
+  var i
+  for (i = 0; i < booleanKeys.length; i++) {
+    var booleanKey = booleanKeys[i]
+    if (typeof parsed[booleanKey] === "boolean") values[booleanKey] = parsed[booleanKey]
+  }
+  for (i = 0; i < volumeKeys.length; i++) {
+    var volumeKey = volumeKeys[i]
+    var volume = parsed[volumeKey]
+    if (typeof volume === "number" && isFinite(volume) && volume >= 0 && volume <= 1)
+      values[volumeKey] = volume
+  }
+  return { valid: true, values: values }
+}
+
 function balanceValue(left, right) {
   var l = Math.max(0, Number(left || 0))
   var r = Math.max(0, Number(right || 0))
@@ -549,6 +587,20 @@ function recordingStreamLabel(node) {
   return friendlyStreamLabel(rawStreamLabel(node)) || "Recording application"
 }
 
+function uniqueRecordingStreamLabels(streams) {
+  var values = Array.isArray(streams) ? streams : []
+  var labels = []
+  var keys = []
+  for (var i = 0; i < values.length; i++) {
+    var label = recordingStreamLabel(values[i])
+    var key = streamLabelKey(label)
+    if (keys.indexOf(key) !== -1) continue
+    keys.push(key)
+    labels.push(label)
+  }
+  return labels
+}
+
 function normalizeStreamIconName(name) {
   var value = String(name || "").trim()
   var aliases = {
@@ -608,6 +660,7 @@ if (typeof module !== "undefined") {
     preferredAudioProfile: preferredAudioProfile,
     preferredAudioNodeName: preferredAudioNodeName,
     parseAudioControlSettings: parseAudioControlSettings,
+    parseAudioPolicySettings: parseAudioPolicySettings,
     balanceValue: balanceValue,
     applyBalance: applyBalance,
     audioMeterLevel: audioMeterLevel,
@@ -641,6 +694,7 @@ if (typeof module !== "undefined") {
     unmatchedMprisStreamLabel: unmatchedMprisStreamLabel,
     streamLabel: streamLabel,
     recordingStreamLabel: recordingStreamLabel,
+    uniqueRecordingStreamLabels: uniqueRecordingStreamLabels,
     streamIconName: streamIconName,
     streamRepresentsPlayer: streamRepresentsPlayer
   }
