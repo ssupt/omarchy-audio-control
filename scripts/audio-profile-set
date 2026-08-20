@@ -16,49 +16,68 @@ fi
 set -o pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-if ! "$script_dir/audio-profiles" |
-  jq -e --arg card "$card" --arg profile "$profile" '
-    any(.[]; .name == $card and any(.profiles[]; .value == $profile))
-  ' >/dev/null; then
+profiles=$("$script_dir/audio-profiles") || exit 1
+profile_state=$(jq -c --arg card "$card" --arg profile "$profile" '
+  [.[] | select(.name == $card) | .profiles[] | select(.value == $profile)][0] // empty
+' <<<"$profiles") || exit 1
+if [[ -z $profile_state ]]; then
   echo "Profile is not available for this device" >&2
   exit 1
 fi
+expected_sinks=$(jq -r '.sinks // 0' <<<"$profile_state")
+expected_sources=$(jq -r '.sources // 0' <<<"$profile_state")
+[[ $expected_sinks =~ ^[0-9]+$ ]] || expected_sinks=0
+[[ $expected_sources =~ ^[0-9]+$ ]] || expected_sources=0
 
 card_index=$(timeout 2 pactl -f json list cards 2>/dev/null |
   jq -r --arg card "$card" 'map(select(.name == $card))[0].index // empty') || exit 1
 [[ $card_index =~ ^[0-9]+$ ]] || exit 1
 
-sink_state=$(timeout 2 pactl -f json list sinks 2>/dev/null |
-  jq -r --argjson card "$card_index" '
-    map(select(.card == $card))[0]
-    | if . == null then empty
-      else [(.volume | to_entries[0].value.value_percent // ""), (.mute // false)] | @tsv
-      end' || true)
-source_state=$(timeout 2 pactl -f json list sources 2>/dev/null |
-  jq -r --argjson card "$card_index" '
-    map(select(.card == $card))[0]
-    | if . == null then empty
-      else [(.volume | to_entries[0].value.value_percent // ""), (.mute // false)] | @tsv
-      end' || true)
+read_endpoint_states() {
+  local endpoint_type=$1
+  timeout 2 pactl -f json list "$endpoint_type" 2>/dev/null |
+    jq -c --argjson card "$card_index" '
+      map(
+        select(.card == $card)
+        | {
+            index: .index,
+            name: (.name // ""),
+            mute: (.mute // false),
+            volumes: [
+              .volume // {}
+              | to_entries[]?
+              | if .value.value != null then (.value.value | tostring)
+                else (.value.value_percent // empty)
+                end
+            ]
+          }
+      )
+    '
+}
 
-IFS=$'\t' read -r sink_volume sink_muted <<<"$sink_state"
-IFS=$'\t' read -r source_volume source_muted <<<"$source_state"
+sink_states=$(read_endpoint_states sinks) || sink_states='[]'
+source_states=$(read_endpoint_states sources) || source_states='[]'
+jq -e 'type == "array"' <<<"$sink_states" >/dev/null 2>&1 || sink_states='[]'
+jq -e 'type == "array"' <<<"$source_states" >/dev/null 2>&1 || source_states='[]'
 
 # Profile changes recreate endpoints, and a newly exposed sink can carry a
 # previously stored 100% volume. Mute the old endpoint, create the new one,
 # restore its level first, and only then restore the original mute state.
-old_sinks=()
-while IFS= read -r sink_index; do
+mapfile -t old_sinks < <(jq -r '.[].index | select(type == "number")' <<<"$sink_states")
+mapfile -t old_sources < <(jq -r '.[].index | select(type == "number")' <<<"$source_states")
+for sink_index in "${old_sinks[@]}"; do
   [[ $sink_index =~ ^[0-9]+$ ]] || continue
-  old_sinks+=("$sink_index")
   timeout 2 pactl set-sink-mute "$sink_index" true >/dev/null 2>&1 || true
-done < <(timeout 2 pactl -f json list sinks 2>/dev/null |
-  jq -r --argjson card "$card_index" '.[] | select(.card == $card) | .index' || true)
+done
+for source_index in "${old_sources[@]}"; do
+  [[ $source_index =~ ^[0-9]+$ ]] || continue
+  timeout 2 pactl set-source-mute "$source_index" true >/dev/null 2>&1 || true
+done
 
 old_sink_inputs=()
 old_sink_input_mutes=()
 if (( ${#old_sinks[@]} > 0 )); then
-  old_sinks_json=$(printf '%s\n' "${old_sinks[@]}" | jq -Rsc 'split("\n") | map(select(length > 0) | tonumber)')
+  old_sinks_json=$(jq -c '[.[].index | select(type == "number")]' <<<"$sink_states")
   while IFS=$'\t' read -r input_index input_muted; do
     [[ $input_index =~ ^[0-9]+$ ]] || continue
     old_sink_inputs+=("$input_index")
@@ -77,34 +96,91 @@ restore_sink_inputs() {
   done
 }
 
-if ! timeout 2 pactl set-card-profile "$card" "$profile"; then
-  for sink_index in "${old_sinks[@]}"; do
-    timeout 2 pactl set-sink-mute "$sink_index" "${sink_muted:-false}" >/dev/null 2>&1 || true
+restore_endpoint_mutes() {
+  local endpoint_kind=$1
+  local states=$2
+  local count index endpoint_index endpoint_muted
+  count=$(jq 'length' <<<"$states")
+  for (( index = 0; index < count; index++ )); do
+    endpoint_index=$(jq -r --argjson index "$index" '.[$index].index // empty' <<<"$states")
+    endpoint_muted=$(jq -r --argjson index "$index" '.[$index].mute // false' <<<"$states")
+    [[ $endpoint_index =~ ^[0-9]+$ ]] || continue
+    timeout 2 pactl "set-${endpoint_kind}-mute" "$endpoint_index" "$endpoint_muted" >/dev/null 2>&1 || true
   done
+}
+
+if ! timeout 2 pactl set-card-profile "$card" "$profile"; then
+  restore_endpoint_mutes sink "$sink_states"
+  restore_endpoint_mutes source "$source_states"
   restore_sink_inputs
   exit 1
 fi
 
-for (( attempt = 0; attempt < 20; attempt++ )); do
-  mapfile -t new_sinks < <(timeout 2 pactl -f json list sinks 2>/dev/null |
-    jq -r --argjson card "$card_index" '.[] | select(.card == $card) | .index' || true)
-  mapfile -t new_sources < <(timeout 2 pactl -f json list sources 2>/dev/null |
-    jq -r --argjson card "$card_index" '.[] | select(.card == $card) | .index' || true)
-  (( ${#new_sinks[@]} > 0 || ${#new_sources[@]} > 0 )) && break
+new_sink_states='[]'
+new_source_states='[]'
+for (( attempt = 0; attempt < 40; attempt++ )); do
+  new_sink_states=$(read_endpoint_states sinks) || new_sink_states='[]'
+  new_source_states=$(read_endpoint_states sources) || new_source_states='[]'
+  new_sink_count=$(jq 'length' <<<"$new_sink_states")
+  new_source_count=$(jq 'length' <<<"$new_source_states")
+  (( new_sink_count >= expected_sinks && new_source_count >= expected_sources )) && break
   sleep 0.05
 done
 
-for sink_index in "${new_sinks[@]}"; do
-  [[ $sink_index =~ ^[0-9]+$ ]] || continue
-  timeout 2 pactl set-sink-mute "$sink_index" true >/dev/null 2>&1 || true
-  [[ -n $sink_volume ]] && timeout 2 pactl set-sink-volume "$sink_index" "$sink_volume" >/dev/null 2>&1 || true
-  timeout 2 pactl set-sink-mute "$sink_index" "${sink_muted:-false}" >/dev/null 2>&1 || true
-done
+restore_new_endpoint_states() {
+  local endpoint_kind=$1
+  local old_states=$2
+  local new_states=$3
+  local count index endpoint_index endpoint_name new_state saved_state restore_state
+  local saved_count new_channel_count endpoint_muted
+  local -a saved_volumes volume_arguments
 
-for source_index in "${new_sources[@]}"; do
-  [[ $source_index =~ ^[0-9]+$ ]] || continue
-  [[ -n $source_volume ]] && timeout 2 pactl set-source-volume "$source_index" "$source_volume" >/dev/null 2>&1 || true
-  timeout 2 pactl set-source-mute "$source_index" "${source_muted:-false}" >/dev/null 2>&1 || true
-done
+  count=$(jq 'length' <<<"$new_states")
+
+  # Mute every newly exposed endpoint before restoring any of them. This keeps
+  # later endpoints from becoming audible while an earlier one is configured.
+  for (( index = 0; index < count; index++ )); do
+    endpoint_index=$(jq -r --argjson index "$index" '.[$index].index // empty' <<<"$new_states")
+    [[ $endpoint_index =~ ^[0-9]+$ ]] || continue
+    timeout 2 pactl "set-${endpoint_kind}-mute" "$endpoint_index" true >/dev/null 2>&1 || true
+  done
+
+  for (( index = 0; index < count; index++ )); do
+    new_state=$(jq -c --argjson index "$index" '.[$index]' <<<"$new_states")
+    endpoint_index=$(jq -r '.index // empty' <<<"$new_state")
+    endpoint_name=$(jq -r '.name // ""' <<<"$new_state")
+    [[ $endpoint_index =~ ^[0-9]+$ ]] || continue
+
+    # Names remain stable for many profile changes. When a profile changes the
+    # endpoint name too, preserve state by endpoint order instead of copying the
+    # first endpoint's state to every new endpoint.
+    saved_state=$(jq -c --arg name "$endpoint_name" --argjson index "$index" '
+      ([.[] | select(.name == $name)][0] // .[$index] // empty)
+    ' <<<"$old_states")
+    restore_state=${saved_state:-$new_state}
+
+    if [[ -n $saved_state ]]; then
+      mapfile -t saved_volumes < <(jq -r '.volumes[]?' <<<"$saved_state")
+      saved_count=${#saved_volumes[@]}
+      new_channel_count=$(jq '.volumes | length' <<<"$new_state")
+      if (( saved_count > 0 )); then
+        if (( saved_count == new_channel_count )); then
+          volume_arguments=("${saved_volumes[@]}")
+        else
+          volume_arguments=("${saved_volumes[0]}")
+        fi
+        timeout 2 pactl "set-${endpoint_kind}-volume" "$endpoint_index" \
+          "${volume_arguments[@]}" >/dev/null 2>&1 || true
+      fi
+    fi
+
+    endpoint_muted=$(jq -r '.mute // false' <<<"$restore_state")
+    timeout 2 pactl "set-${endpoint_kind}-mute" "$endpoint_index" "$endpoint_muted" >/dev/null 2>&1 || true
+  done
+}
+
+restore_new_endpoint_states sink "$sink_states" "$new_sink_states"
+restore_new_endpoint_states source "$source_states" "$new_source_states"
 
 restore_sink_inputs
+exit 0

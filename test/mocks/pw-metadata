@@ -8,6 +8,11 @@ EOF
   exit 0
 fi
 
+if [[ -n ${AUDIO_CONTROL_OUTPUT_DEFAULT_LOG:-} ]]; then
+  echo "update: id:901 key:'target.object' value:'101' type:'Spa:Id'"
+  exit 0
+fi
+
 if [[ -n ${AUDIO_CONTROL_INPUT_DEFAULT_LOG:-} ]]; then
   echo "update: id:902 key:'target.object' value:'200' type:'Spa:Id'"
   exit 0

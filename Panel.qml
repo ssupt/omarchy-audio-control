@@ -175,6 +175,14 @@ Panel {
   property string streamRouteSetError: ""
   readonly property string streamRouteError: streamRouteSetError !== ""
     ? streamRouteSetError : streamRouteReadError
+  property string defaultOutputError: ""
+  property string defaultInputError: ""
+  property var previousDefaultSink: null
+  property var previousDefaultSource: null
+  readonly property string defaultDeviceError: defaultOutputError !== ""
+    ? defaultOutputError : defaultInputError
+  readonly property string panelError: defaultDeviceError !== ""
+    ? defaultDeviceError : streamRouteError
   property var pendingStreamRoute: null
 
   // The default is ordered first and named by behavior. Applications on that
@@ -679,31 +687,33 @@ Panel {
   }
 
   function setDefaultSink(node) {
-    if (!node) return
+    if (!node || node.id === undefined || !node.name || defaultSinkProc.running) return
     var previousSinkName = sink && sink.name ? String(sink.name) : ""
+    previousDefaultSink = sink
     Pipewire.preferredDefaultAudioSink = node
-    if (node.id !== undefined && node.name) {
-      Quickshell.execDetached([
-        pluginScript("audio-output-set-default"),
-        String(node.id),
-        String(node.name),
-        previousSinkName
-      ])
-    }
+    defaultOutputError = ""
+    defaultSinkProc.command = [
+      pluginScript("audio-output-set-default"),
+      String(node.id),
+      String(node.name),
+      previousSinkName
+    ]
+    defaultSinkProc.running = true
   }
 
   function setDefaultSource(node) {
-    if (!node) return
+    if (!node || node.id === undefined || !node.name || defaultSourceProc.running) return
     var previousSourceName = source && source.name ? String(source.name) : ""
+    previousDefaultSource = source
     Pipewire.preferredDefaultAudioSource = node
-    if (node.id !== undefined && node.name) {
-      Quickshell.execDetached([
-        pluginScript("audio-input-set-default"),
-        String(node.id),
-        String(node.name),
-        previousSourceName
-      ])
-    }
+    defaultInputError = ""
+    defaultSourceProc.command = [
+      pluginScript("audio-input-set-default"),
+      String(node.id),
+      String(node.name),
+      previousSourceName
+    ]
+    defaultSourceProc.running = true
   }
 
   function sinkAvailable(node) {
@@ -856,6 +866,30 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.volumeSinkName = String(text).trim()
+    }
+  }
+
+  Process {
+    id: defaultSinkProc
+    onExited: function(exitCode) {
+      root.defaultOutputError = exitCode === 0 ? ""
+        : (exitCode === 2 ? "Default output changed, but its preference could not be saved"
+          : "Could not change the default audio output")
+      if (exitCode !== 0 && exitCode !== 2 && root.previousDefaultSink)
+        Pipewire.preferredDefaultAudioSink = root.previousDefaultSink
+      root.previousDefaultSink = null
+    }
+  }
+
+  Process {
+    id: defaultSourceProc
+    onExited: function(exitCode) {
+      root.defaultInputError = exitCode === 0 ? ""
+        : (exitCode === 2 ? "Default input changed, but its preference could not be saved"
+          : "Could not change the default audio input")
+      if (exitCode !== 0 && exitCode !== 2 && root.previousDefaultSource)
+        Pipewire.preferredDefaultAudioSource = root.previousDefaultSource
+      root.previousDefaultSource = null
     }
   }
 
@@ -1365,9 +1399,9 @@ Panel {
           }
 
           Text {
-            visible: root.streamRouteError !== ""
+            visible: root.panelError !== ""
             width: parent.width
-            text: root.streamRouteError
+            text: root.panelError
             color: root.bar.urgent
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -1430,8 +1464,9 @@ Panel {
 
     MouseArea {
       anchors.fill: parent
+      enabled: !defaultSinkProc.running
       hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
+      cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
       onContainsMouseChanged: if (containsMouse) {
         root.cursorActive = true
         root.focusSection = "output"
@@ -1489,8 +1524,9 @@ Panel {
 
     MouseArea {
       anchors.fill: parent
+      enabled: !defaultSourceProc.running
       hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
+      cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
       onContainsMouseChanged: if (containsMouse) {
         root.cursorActive = true
         root.focusSection = "input"
@@ -1510,6 +1546,12 @@ Panel {
 
     readonly property real streamVolume: node && node.audio ? node.audio.volume : 0
     readonly property bool streamMuted: node && node.audio ? node.audio.muted : false
+    readonly property real meterLevel: Model.audioMeterLevel(
+      streamPeakMonitor.peaks,
+      node && node.audio ? node.audio.volumes : [],
+      streamPeakMonitor.peak,
+      streamVolume,
+      streamMuted)
     readonly property bool isActive: !recording && root.streamRepresentsPlayer(node, root.activeMediaPlayer)
     readonly property string streamSerial: root.streamSerial(node)
     readonly property var currentRoute: recording
@@ -1741,7 +1783,7 @@ Panel {
 
         Rectangle {
           height: parent.height
-          width: parent.width * Math.max(0, Math.min(1, streamPeakMonitor.peak))
+          width: parent.width * streamRow.meterLevel
           color: root.bar.foreground
           Behavior on width { NumberAnimation { duration: 70 } }
         }

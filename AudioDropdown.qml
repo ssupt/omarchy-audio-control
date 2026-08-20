@@ -55,9 +55,12 @@ Item {
   // own keyCatcher so j/k inside the popup don't double-drive the panel
   // cursor.
   readonly property bool popupOpen: popup.opened
-  function open() { popup.open() }
+  function open() { if (enabled) popup.open() }
   function close() { popup.close() }
-  function toggle() { popup.opened ? popup.close() : popup.open() }
+  function toggle() {
+    if (popup.opened) popup.close()
+    else if (enabled) popup.open()
+  }
 
   signal changed(string value)
   signal hovered(bool isHovered)
