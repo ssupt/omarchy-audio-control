@@ -1,0 +1,11 @@
+#!/bin/bash
+
+[[ -n ${AUDIO_CONTROL_MICROPHONE_TEST_LOG:-} ]] &&
+  printf 'pw-record %s\n' "$*" >>"$AUDIO_CONTROL_MICROPHONE_TEST_LOG"
+[[ ${AUDIO_CONTROL_MICROPHONE_TEST_RECORD_FAIL:-0} == 1 ]] && exit 1
+if [[ ${AUDIO_CONTROL_MICROPHONE_TEST_RECORD_WAIT:-0} == 1 ]]; then
+  truncate -s 96000 "${!#}"
+  while true; do sleep 0.05; done
+fi
+truncate -s "${AUDIO_CONTROL_MICROPHONE_TEST_RECORD_BYTES:-480000}" "${!#}"
+exit "${AUDIO_CONTROL_MICROPHONE_TEST_RECORD_STATUS:-0}"

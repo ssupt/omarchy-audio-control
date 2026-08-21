@@ -100,7 +100,8 @@ function parseAudioControlSettings(raw) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) parsed = {}
   return {
     version: 1,
-    outputOverdrive: parsed.outputOverdrive === true
+    outputOverdrive: parsed.outputOverdrive === true,
+    captureNotifications: parsed.captureNotifications !== false
   }
 }
 
@@ -601,6 +602,21 @@ function uniqueRecordingStreamLabels(streams) {
   return labels
 }
 
+function addedRecordingStreamLabels(previous, current) {
+  var before = Array.isArray(previous) ? previous : []
+  var now = Array.isArray(current) ? current : []
+  var previousKeys = []
+  var additions = []
+  var i
+  for (i = 0; i < before.length; i++) previousKeys.push(streamLabelKey(before[i]))
+  for (i = 0; i < now.length; i++) {
+    var label = String(now[i] || "").trim()
+    if (label !== "" && previousKeys.indexOf(streamLabelKey(label)) === -1)
+      additions.push(label)
+  }
+  return additions
+}
+
 function normalizeStreamIconName(name) {
   var value = String(name || "").trim()
   var aliases = {
@@ -695,6 +711,7 @@ if (typeof module !== "undefined") {
     streamLabel: streamLabel,
     recordingStreamLabel: recordingStreamLabel,
     uniqueRecordingStreamLabels: uniqueRecordingStreamLabels,
+    addedRecordingStreamLabels: addedRecordingStreamLabels,
     streamIconName: streamIconName,
     streamRepresentsPlayer: streamRepresentsPlayer
   }

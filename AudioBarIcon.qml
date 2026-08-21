@@ -8,6 +8,7 @@ Item {
   property string outputGlyph: ""
   property int recordingCount: 0
   property bool microphoneMuted: false
+  property bool microphoneClipping: false
   property real iconSize: Style.bar.iconFont
   property color foreground: Color.foreground
   property color urgent: Color.urgent
@@ -42,7 +43,7 @@ Item {
     Text {
       id: badgeText
       anchors.centerIn: parent
-      text: root.recordingCount > 9 ? "9+" : String(root.recordingCount)
+      text: root.microphoneClipping ? "!" : (root.recordingCount > 9 ? "9+" : String(root.recordingCount))
       color: Color.background
       font.family: root.fontFamily
       font.pixelSize: Math.max(6, Math.round(parent.height * 0.62))

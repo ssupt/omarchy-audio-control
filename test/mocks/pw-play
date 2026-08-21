@@ -1,0 +1,6 @@
+#!/bin/bash
+
+[[ -n ${AUDIO_CONTROL_MICROPHONE_TEST_LOG:-} ]] &&
+  printf 'pw-play %s\n' "$*" >>"$AUDIO_CONTROL_MICROPHONE_TEST_LOG"
+[[ ${AUDIO_CONTROL_MICROPHONE_TEST_PLAY_FAIL:-0} == 1 ]] && exit 1
+exit 0

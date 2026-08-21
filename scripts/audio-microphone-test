@@ -1,0 +1,149 @@
+#!/bin/bash
+
+# omarchy:summary=Record, stop, play, or clear the private microphone test clip
+# omarchy:group=audio
+# omarchy:args=[status | record <source-name> | stop | play | clear]
+
+set -euo pipefail
+
+runtime_root=${XDG_RUNTIME_DIR:-/run/user/$UID}/omarchy/audio-control
+test_file=${AUDIO_CONTROL_MICROPHONE_TEST_FILE:-$runtime_root/microphone-test.raw}
+record_pid_file=${AUDIO_CONTROL_MICROPHONE_TEST_PID_FILE:-$test_file.pid}
+stop_request_file=${AUDIO_CONTROL_MICROPHONE_TEST_STOP_FILE:-$test_file.stop}
+action=${1:-status}
+sample_rate=48000
+channel_count=1
+sample_bytes=2
+maximum_samples=240000
+maximum_bytes=$((maximum_samples * channel_count * sample_bytes))
+
+usage() {
+  echo "Usage: audio-microphone-test [status | record <source-name> | stop | play | clear]" >&2
+  exit 1
+}
+
+recording_size() {
+  local path=$1
+  [[ -f $path && ! -L $path ]] || {
+    printf '%s\n' 0
+    return
+  }
+  stat -c '%s' "$path" 2>/dev/null || printf '%s\n' 0
+}
+
+case "$action" in
+  status)
+    (( $# == 0 || $# == 1 )) || usage
+    [[ -s $test_file && ! -L $test_file ]] && printf '%s\n' ready || printf '%s\n' empty
+    ;;
+  record)
+    (( $# == 2 )) || usage
+    source_name=$2
+    [[ -n $source_name ]] || usage
+    command -v pw-record >/dev/null
+
+    test_dir=$(dirname -- "$test_file")
+    umask 077
+    if [[ ! -d $test_dir ]]; then
+      mkdir -p -- "$test_dir"
+      chmod 700 "$test_dir"
+    fi
+    temporary_file=$(mktemp "$test_dir/.microphone-test.XXXXXX.raw")
+    record_pid=""
+    rm -f -- "$record_pid_file" "$stop_request_file"
+
+    cleanup_recording() {
+      local status=$1
+      trap - EXIT INT TERM HUP
+      if [[ -n $record_pid ]]; then
+        kill -KILL "$record_pid" 2>/dev/null || true
+        wait "$record_pid" 2>/dev/null || true
+      fi
+      rm -f -- "$temporary_file" "$record_pid_file" "$stop_request_file"
+      exit "$status"
+    }
+    trap 'cleanup_recording $?' EXIT
+    trap 'cleanup_recording 130' INT
+    trap 'cleanup_recording 143' TERM HUP
+
+    pw-record \
+      --target "$source_name" \
+      --media-category Capture \
+      --media-role Communication \
+      --properties '{"node.name":"omarchy_audio_test_record","application.name":"Advanced Audio Control","media.name":"Microphone test"}' \
+      --rate "$sample_rate" \
+      --channels "$channel_count" \
+      --format s16 \
+      --raw \
+      --sample-count "$maximum_samples" \
+      "$temporary_file" &
+    record_pid=$!
+    printf '%s\n' "$record_pid" >"$record_pid_file"
+    record_status=0
+    wait "$record_pid" 2>/dev/null || record_status=$?
+    record_pid=""
+    rm -f -- "$record_pid_file"
+
+    size=$(recording_size "$temporary_file")
+    stopped_early=false
+    [[ -f $stop_request_file && ! -L $stop_request_file ]] && stopped_early=true
+    if (( size < sample_bytes )) || { ! $stopped_early && (( size < maximum_bytes )); }; then
+      exit "$((record_status == 0 ? 1 : record_status))"
+    fi
+
+    # A hard stop can land between 16-bit samples. Drop that incomplete byte so
+    # pw-play never receives a malformed final frame.
+    aligned_size=$((size - size % sample_bytes))
+    (( aligned_size == size )) || truncate -s "$aligned_size" "$temporary_file"
+    mv -f -- "$temporary_file" "$test_file"
+    rm -f -- "$stop_request_file"
+    trap - EXIT INT TERM HUP
+    printf '%s\n' ready
+    ;;
+  stop)
+    (( $# == 1 )) || usage
+    test_dir=$(dirname -- "$test_file")
+    [[ -d $test_dir ]] || exit 1
+    umask 077
+    : >"$stop_request_file"
+
+    record_pid=""
+    for _attempt in {1..20}; do
+      if [[ -s $record_pid_file && ! -L $record_pid_file ]]; then
+        read -r record_pid <"$record_pid_file" || true
+        [[ $record_pid =~ ^[1-9][0-9]*$ ]] && break
+      fi
+      sleep 0.025
+    done
+    if [[ ! $record_pid =~ ^[1-9][0-9]*$ ]] || ! kill -0 "$record_pid" 2>/dev/null; then
+      rm -f -- "$stop_request_file"
+      exit 1
+    fi
+
+    # Raw PCM needs no container finalization, so an intentional hard stop is
+    # safe and deterministic even on pw-record builds that ignore TERM/INT.
+    kill -KILL "$record_pid" 2>/dev/null || true
+    ;;
+  play)
+    (( $# == 1 )) || usage
+    [[ -s $test_file && ! -L $test_file ]] || {
+      echo "No microphone test recording is ready" >&2
+      exit 1
+    }
+    command -v pw-play >/dev/null
+    exec pw-play \
+      --media-role Communication \
+      --properties '{"node.name":"omarchy_audio_test_playback","application.name":"Advanced Audio Control","media.name":"Microphone test playback"}' \
+      --volume 0.8 \
+      --rate "$sample_rate" \
+      --channels "$channel_count" \
+      --format s16 \
+      --raw \
+      "$test_file"
+    ;;
+  clear)
+    (( $# == 1 )) || usage
+    rm -f -- "$test_file" "$record_pid_file" "$stop_request_file"
+    ;;
+  *) usage ;;
+esac

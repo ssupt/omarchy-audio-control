@@ -21,6 +21,12 @@ instead of introducing a separate mixer application.
 - Set safe starting volumes for new devices and playback or recording applications.
 - Keep microphone use visible on the bar, including the recording applications and
   a persistent app-count badge even while the microphone is muted.
+- Optionally notify when a new application starts capturing, while respecting
+  Omarchy's Do Not Disturb setting and suppressing shell-startup noise.
+- Show live microphone peak hold and a latched clipping warning in the quick mixer
+  and recording badge.
+- Record a private five-second microphone test, then explicitly play it back or
+  discard it; the temporary clip is removed when the Audio window closes.
 
 The bar audio icon uses left-click for the quick mixer, middle-click to mute or
 unmute the microphone, right-click to mute or unmute all audio, and the wheel to
@@ -37,7 +43,9 @@ More plugins by `ssupt`: [omarchy-plugins](https://github.com/ssupt/omarchy-plug
 ## Requirements
 
 - Omarchy Quattro
-- PipeWire with WirePlumber (`pactl`, `wpctl`, and `pw-metadata`)
+- PipeWire with WirePlumber (`pactl`, `wpctl`, `pw-metadata`, `pw-record`, and
+  `pw-play`)
+- `notify-send` for optional capture-start notifications
 - `jq`, `hyprctl`, `timeout`, and `flock`
 
 These commands are present in a standard Omarchy installation. The plugin does
@@ -53,6 +61,13 @@ The Policy tab discovers settings from the installed WirePlumber version, so it
 only shows controls the system supports. Changes use WirePlumber's persistent
 settings API. Starting-volume percentages are converted to its cubic storage
 scale before they are saved, keeping the displayed values perceptually accurate.
+
+Capture-start notifications can be disabled under **Policy > Microphone privacy**.
+Normal notification urgency lets Omarchy's notification service honor Do Not
+Disturb. The microphone test records only after an explicit action, stores its
+clip with private permissions in the user's runtime directory, never plays it
+automatically, and deletes it on discard or when the Audio window closes. Stopping
+before five seconds keeps the audio recorded so far and makes it ready to play.
 
 ## Installation
 

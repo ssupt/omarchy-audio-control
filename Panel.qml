@@ -38,6 +38,11 @@ Panel {
   }
   property var audioPreferences: Model.parseAudioPreferences("")
   property bool outputOverdrive: false
+  property bool captureNotifications: true
+  property var observedRecordingLabels: []
+  property bool recordingObservationReady: false
+  property real inputPeakHold: 0
+  property bool inputClipping: false
   readonly property real outputVolumeMaximum: outputOverdrive ? 1.5 : 1.0
 
   readonly property var candidateSinks: {
@@ -69,7 +74,9 @@ Panel {
       if (!n || !n.isStream || !isPlaybackStream(n)) continue
       // A tuning's output is a playback stream too, but it is the processing
       // itself rather than an application, so it does not belong in the list.
-      if (String(n.name || "").indexOf("omarchy_speaker_tuning") === 0) continue
+      var nodeName = String(n.name || "")
+      if (nodeName.indexOf("omarchy_speaker_tuning") === 0
+          || nodeName.indexOf("omarchy_audio_test") === 0) continue
       list.push(n)
     }
     return list
@@ -82,7 +89,8 @@ Panel {
       if (!n || !isRecordingStream(n)) continue
       // The microphone peak meter creates its own capture stream while this
       // panel is open; it is instrumentation, not a recording application.
-      if (String(n.name || "").toLowerCase() === "quickshell") continue
+      var nodeName = String(n.name || "").toLowerCase()
+      if (nodeName === "quickshell" || nodeName.indexOf("omarchy_audio_test") === 0) continue
       list.push(n)
     }
     return list
@@ -112,6 +120,27 @@ Panel {
 
   function loadAudioPreferences(raw) {
     audioPreferences = Model.parseAudioPreferences(raw)
+  }
+
+  function observeRecordingApplications() {
+    var current = listSnapshot(activeRecordingLabels)
+    var additions = Model.addedRecordingStreamLabels(observedRecordingLabels, current)
+    observedRecordingLabels = current
+    if (!captureNotifications || additions.length === 0) return
+
+    var summary = "Microphone access started"
+    var body = additions.length === 1
+      ? additions[0] + " is now using the microphone."
+      : additions.length + " applications started using the microphone: " + additions.join(", ")
+    Quickshell.execDetached([
+      "notify-send",
+      "--app-name", "Advanced Audio Control",
+      "--icon", "audio-input-microphone-symbolic",
+      "--urgency", "normal",
+      "--expire-time", "8000",
+      summary,
+      body
+    ])
   }
 
   property var cachedAudioSinks: []
@@ -154,6 +183,8 @@ Panel {
 
   readonly property var activeRecordingLabels: Model.uniqueRecordingStreamLabels(recordingStreams)
   readonly property int recordingApplicationCount: activeRecordingLabels.length
+  readonly property real inputPeakLevel: inputMuted
+    ? 0 : Math.max(0, Math.min(1, Number(inputPeakMonitor.peak || 0)))
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property string recordingTooltip: {
     var microphoneAction = hasInput
@@ -168,8 +199,27 @@ Panel {
       ? "Microphone access · " + activeRecordingLabels[0]
       : "Microphone access by " + recordingApplicationCount + " apps\n"
         + activeRecordingLabels.join(", ")
-    var state = inputMuted ? "Microphone muted" : "Microphone in use"
+    var state = inputMuted ? "Microphone muted"
+      : (inputClipping ? "Microphone clipping" : "Microphone in use")
     return access + "\n" + state + (microphoneAction === "" ? "" : " · " + microphoneAction)
+  }
+  onActiveRecordingLabelsChanged: {
+    if (recordingObservationReady) recordingChangeTimer.restart()
+    else observedRecordingLabels = listSnapshot(activeRecordingLabels)
+  }
+  onInputPeakLevelChanged: {
+    if (inputPeakLevel > inputPeakHold) {
+      inputPeakHold = inputPeakLevel
+      inputPeakHoldTimer.restart()
+    }
+    if (inputPeakLevel >= 0.98) {
+      inputClipping = true
+      inputClippingTimer.restart()
+    }
+  }
+  onInputMutedChanged: if (inputMuted) {
+    inputPeakHold = 0
+    inputClipping = false
   }
 
   // Feed Repeaters with panel-local snapshots instead of the live PipeWire
@@ -672,7 +722,9 @@ Panel {
   }
 
   function loadAudioControlSettings(raw) {
-    outputOverdrive = Model.parseAudioControlSettings(raw).outputOverdrive
+    var settings = Model.parseAudioControlSettings(raw)
+    outputOverdrive = settings.outputOverdrive
+    captureNotifications = settings.captureNotifications
     enforceOutputVolumeLimit()
   }
 
@@ -849,7 +901,7 @@ Panel {
   PwNodePeakMonitor {
     id: inputPeakMonitor
     node: root.source
-    enabled: root.opened && !!root.source
+    enabled: (root.opened || root.recordingApplicationCount > 0) && !!root.source
   }
 
   FileView {
@@ -972,6 +1024,37 @@ Panel {
 
   Timer {
     interval: 1500
+    running: !root.recordingObservationReady
+    repeat: false
+    onTriggered: {
+      root.observedRecordingLabels = root.listSnapshot(root.activeRecordingLabels)
+      root.recordingObservationReady = true
+    }
+  }
+
+  Timer {
+    id: recordingChangeTimer
+    interval: 150
+    repeat: false
+    onTriggered: root.observeRecordingApplications()
+  }
+
+  Timer {
+    id: inputPeakHoldTimer
+    interval: 1200
+    repeat: false
+    onTriggered: root.inputPeakHold = 0
+  }
+
+  Timer {
+    id: inputClippingTimer
+    interval: 2500
+    repeat: false
+    onTriggered: root.inputClipping = false
+  }
+
+  Timer {
+    interval: 1500
     running: root.opened && (root.displayAudioStreams.length > 0 || root.displayRecordingStreams.length > 0)
     repeat: true
     onTriggered: if (!root.streamOutputMenuOpen && !streamRouteSetProc.running)
@@ -990,6 +1073,7 @@ Panel {
           outputGlyph: root.outputIcon()
           recordingCount: root.recordingApplicationCount
           microphoneMuted: root.inputMuted
+          microphoneClipping: root.inputClipping
           foreground: root.barForeground
           urgent: root.urgent
           fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
@@ -1288,8 +1372,10 @@ Panel {
 
               Text {
                 id: microphonePercent
-                text: Math.round((inputSlider.dragging ? inputSlider.liveValue : root.inputVolume) * 100) + "%"
-                color: Qt.darker(root.bar.foreground, 1.4)
+                text: root.inputClipping
+                  ? "CLIPPING"
+                  : Math.round((inputSlider.dragging ? inputSlider.liveValue : root.inputVolume) * 100) + "%"
+                color: root.inputClipping ? root.urgent : Qt.darker(root.bar.foreground, 1.4)
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
@@ -1340,9 +1426,19 @@ Panel {
 
                   Rectangle {
                     height: parent.height
-                    width: parent.width * Math.max(0, Math.min(1, inputPeakMonitor.peak))
-                    color: root.bar.foreground
+                    width: parent.width * root.inputPeakLevel
+                    color: root.inputClipping ? root.urgent : root.bar.foreground
                     Behavior on width { NumberAnimation { duration: 70 } }
+                  }
+
+                  Rectangle {
+                    visible: root.inputPeakHold > 0.02
+                    width: Math.max(1, Style.space(2))
+                    height: parent.height + Style.space(4)
+                    x: Math.max(0, Math.min(parent.width - width,
+                      parent.width * root.inputPeakHold - width / 2))
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: root.inputPeakHold >= 0.98 ? root.urgent : root.bar.foreground
                   }
                 }
               }
