@@ -34,6 +34,11 @@ Item {
   property bool policyResponseValid: false
   property var previousPolicySettings: ({})
   property string pendingPolicyKey: ""
+  property string microphoneTestState: "idle"
+  property string microphoneTestOperation: ""
+  property bool microphoneTestCancelled: false
+  property int microphoneTestSecondsRemaining: 0
+  property string microphoneTestError: ""
   property string profileLoadError: ""
   property string portLoadError: ""
   property string profileSetError: ""
@@ -53,8 +58,13 @@ Item {
   property bool profileMenuOpen: false
   property var pendingSharedProfile: null
   property var audioPreferences: Model.parseAudioPreferences("")
-  property var audioControlSettings: ({ version: 1, outputOverdrive: false })
+  property var audioControlSettings: ({
+    version: 1,
+    outputOverdrive: false,
+    captureNotifications: true
+  })
   property bool outputOverdrive: false
+  property bool captureNotifications: true
 
   readonly property color foreground: Color.foreground
   readonly property color background: Color.background
@@ -111,6 +121,11 @@ Item {
       description: "Let WirePlumber infer HDMI channel counts. Experimental; some receivers report them incorrectly."
     }
   ]
+  readonly property var captureNotificationDefinition: ({
+    key: "captureNotifications",
+    label: "Capture-start notifications",
+    description: "Notify when a new application begins using the microphone. Respects Do Not Disturb and ignores existing captures at shell startup."
+  })
   readonly property var availablePolicyCore: supportedPolicyDefinitions(policyCoreDefinitions)
   readonly property var availablePolicyVolumes: supportedPolicyDefinitions(policyVolumeDefinitions)
   readonly property var availablePolicyExperimental: supportedPolicyDefinitions(policyExperimentalDefinitions)
@@ -130,6 +145,8 @@ Item {
     return defaultOutputDevice
   }
   readonly property var inputDevice: Pipewire.defaultAudioSource
+  readonly property bool inputDeviceMuted: !inputDevice || !inputDevice.audio
+    || inputDevice.audio.muted
   readonly property bool outputBalanceAvailable: balanceAvailable(outputDevice)
   readonly property bool inputBalanceAvailable: balanceAvailable(inputDevice)
   readonly property int audioPortStartIndex: 1
@@ -138,13 +155,23 @@ Item {
   readonly property int outputBalanceIndex: outputBalanceAvailable ? balanceStartIndex : -1
   readonly property int inputBalanceIndex: inputBalanceAvailable
     ? balanceStartIndex + (outputBalanceAvailable ? 1 : 0) : -1
+  readonly property int deviceItemCount: balanceStartIndex
+    + (outputBalanceAvailable ? 1 : 0) + (inputBalanceAvailable ? 1 : 0)
+  readonly property int microphoneTestIndex: inputDevice ? deviceItemCount : -1
   readonly property int policyVolumeStartIndex: availablePolicyCore.length
   readonly property int policyExperimentalStartIndex: policyVolumeStartIndex + availablePolicyVolumes.length
-  readonly property int policyItemCount: policyExperimentalStartIndex + availablePolicyExperimental.length
+  readonly property int wireplumberPolicyItemCount: policyExperimentalStartIndex
+    + availablePolicyExperimental.length
+  readonly property int captureNotificationIndex: wireplumberPolicyItemCount
+  readonly property int policyItemCount: wireplumberPolicyItemCount + 1
   readonly property int itemCount: activeTab === 0
-    ? balanceStartIndex + (outputBalanceAvailable ? 1 : 0) + (inputBalanceAvailable ? 1 : 0)
+    ? deviceItemCount + (inputDevice ? 1 : 0)
     : (activeTab === 1 ? 2 + bluetoothCards.length : policyItemCount)
   readonly property bool audioMutationBusy: profileSetProc.running || portSetProc.running
+    || microphoneTestProc.running || microphoneTestStopProc.running
+  readonly property real microphoneTestLevel: inputDevice && inputDevice.audio
+    && !inputDevice.audio.muted
+    ? Math.max(0, Math.min(1, Number(microphoneTestPeakMonitor.peak || 0))) : 0
   readonly property color hoverFill: Style.hoverFillFor(foreground, Color.accent)
   readonly property string settingsPath: {
     var configHome = Quickshell.env("XDG_CONFIG_HOME")
@@ -157,6 +184,9 @@ Item {
     return configHome + "/omarchy/audio-preferences.json"
   }
   onDefaultOutputDeviceChanged: resolveVolumeSink()
+  onInputDeviceChanged: if (microphoneTestState !== "idle") discardMicrophoneTest()
+  onInputDeviceMutedChanged: if (inputDeviceMuted && microphoneTestState === "recording")
+    cancelMicrophoneTest()
 
   function pluginScript(name) {
     var url = String(Qt.resolvedUrl("scripts/" + name))
@@ -176,6 +206,7 @@ Item {
     bluetoothAutoSwitchLoaded = false
     bluetoothProfilePreferenceLoaded = false
     policySettingsLoaded = false
+    discardMicrophoneTest()
     if (windowRuleReady) showOnCurrentWorkspace()
     else if (!windowRuleProc.running) windowRuleProc.running = true
   }
@@ -205,12 +236,14 @@ Item {
     openRequested = false
     closingFromHost = true
     profileMenuOpen = false
+    discardMicrophoneTest()
     window.visible = false
     closingFromHost = false
   }
 
   function requestClose() {
     openRequested = false
+    discardMicrophoneTest()
     if (shell && typeof shell.hide === "function") shell.hide("ssupt.audio-control")
     else window.visible = false
   }
@@ -261,6 +294,7 @@ Item {
   function loadAudioControlSettings(raw) {
     audioControlSettings = Model.parseAudioControlSettings(raw)
     outputOverdrive = audioControlSettings.outputOverdrive
+    captureNotifications = audioControlSettings.captureNotifications
   }
 
   function supportedPolicyDefinitions(definitions) {
@@ -334,13 +368,91 @@ Item {
   }
 
   function setOutputOverdrive(enabled) {
+    setAudioControlSetting("outputOverdrive", enabled)
+  }
+
+  function setCaptureNotifications(enabled) {
+    setAudioControlSetting("captureNotifications", enabled)
+  }
+
+  function setAudioControlSetting(key, value) {
     var next = ({})
-    for (var key in audioControlSettings) next[key] = audioControlSettings[key]
+    for (var setting in audioControlSettings) next[setting] = audioControlSettings[setting]
     next.version = 1
-    next.outputOverdrive = enabled
+    next[key] = value
     audioControlSettings = next
-    outputOverdrive = enabled
+    if (key === "outputOverdrive") outputOverdrive = value
+    else if (key === "captureNotifications") captureNotifications = value
     settingsFile.setText(JSON.stringify(next, null, 2) + "\n")
+  }
+
+  function startMicrophoneTestRecording() {
+    if (!inputDevice || !inputDevice.name || inputDeviceMuted || microphoneTestProc.running
+        || microphoneTestStopProc.running) return
+    microphoneTestError = ""
+    microphoneTestCancelled = false
+    microphoneTestOperation = "record"
+    microphoneTestState = "recording"
+    microphoneTestSecondsRemaining = 5
+    microphoneTestProc.command = [
+      pluginScript("audio-microphone-test"),
+      "record",
+      String(inputDevice.name)
+    ]
+    microphoneTestProc.running = true
+    microphoneTestCountdown.restart()
+  }
+
+  function playMicrophoneTest() {
+    if (microphoneTestState !== "ready" || microphoneTestProc.running
+        || microphoneTestStopProc.running) return
+    microphoneTestError = ""
+    microphoneTestCancelled = false
+    microphoneTestOperation = "play"
+    microphoneTestState = "playing"
+    microphoneTestProc.command = [pluginScript("audio-microphone-test"), "play"]
+    microphoneTestProc.running = true
+  }
+
+  function stopMicrophoneTestRecording() {
+    if (microphoneTestState !== "recording" || !microphoneTestProc.running
+        || microphoneTestStopProc.running) return
+    microphoneTestError = ""
+    microphoneTestState = "stopping"
+    microphoneTestCountdown.stop()
+    microphoneTestSecondsRemaining = 0
+    microphoneTestStopProc.command = [pluginScript("audio-microphone-test"), "stop"]
+    microphoneTestStopProc.running = true
+  }
+
+  function cancelMicrophoneTest() {
+    if (!microphoneTestProc.running) return
+    var operation = microphoneTestOperation
+    microphoneTestCancelled = true
+    microphoneTestProc.running = false
+    microphoneTestCountdown.stop()
+    microphoneTestSecondsRemaining = 0
+    microphoneTestState = operation === "record" ? "idle" : "ready"
+    if (operation === "record")
+      Quickshell.execDetached([pluginScript("audio-microphone-test"), "clear"])
+  }
+
+  function discardMicrophoneTest() {
+    if (microphoneTestStopProc.running) microphoneTestStopProc.running = false
+    if (microphoneTestProc.running) cancelMicrophoneTest()
+    microphoneTestCountdown.stop()
+    microphoneTestSecondsRemaining = 0
+    microphoneTestState = "idle"
+    microphoneTestError = ""
+    Quickshell.execDetached([pluginScript("audio-microphone-test"), "clear"])
+  }
+
+  function activateMicrophoneTest() {
+    if (microphoneTestState === "stopping") return
+    if (microphoneTestState === "recording") stopMicrophoneTestRecording()
+    else if (microphoneTestProc.running) cancelMicrophoneTest()
+    else if (microphoneTestState === "ready") playMicrophoneTest()
+    else startMicrophoneTestRecording()
   }
 
   function profileOptions(card) {
@@ -448,6 +560,10 @@ Item {
   function activateCursor() {
     if (!cursorActive || itemCount === 0) return
     if (activeTab === 2) {
+      if (selectedIndex === captureNotificationIndex) {
+        setCaptureNotifications(!captureNotifications)
+        return
+      }
       var policyToggle = policyToggleAtCursor()
       if (policyToggle)
         setPolicySetting(policyToggle.key, policySettings[policyToggle.key] !== true)
@@ -467,6 +583,10 @@ Item {
         && selectedIndex < deviceProfileStartIndex) {
       var portRow = audioPortRepeater.itemAt(selectedIndex - audioPortStartIndex)
       if (portRow) portRow.togglePortMenu()
+      return
+    }
+    if (activeTab === 0 && selectedIndex === microphoneTestIndex) {
+      activateMicrophoneTest()
       return
     }
     if (activeTab === 1 && selectedIndex === 0) {
@@ -565,6 +685,12 @@ Item {
 
   PwObjectTracker { objects: root.outputDevice ? [root.outputDevice] : [] }
   PwObjectTracker { objects: root.inputDevice ? [root.inputDevice] : [] }
+
+  PwNodePeakMonitor {
+    id: microphoneTestPeakMonitor
+    node: root.inputDevice
+    enabled: window.visible && root.microphoneTestState === "recording" && !!root.inputDevice
+  }
 
   Process {
     id: profilesProc
@@ -698,11 +824,53 @@ Item {
     }
   }
 
+  Process {
+    id: microphoneTestProc
+    onExited: function(exitCode) {
+      var operation = root.microphoneTestOperation
+      microphoneTestCountdown.stop()
+      root.microphoneTestSecondsRemaining = 0
+      if (root.microphoneTestCancelled) {
+        root.microphoneTestCancelled = false
+        root.microphoneTestOperation = ""
+        return
+      }
+
+      if (operation === "record") {
+        if (exitCode === 0) {
+          root.microphoneTestState = "ready"
+          root.microphoneTestError = ""
+        }
+        else {
+          root.microphoneTestState = "idle"
+          root.microphoneTestError = "Could not record the microphone test"
+          Quickshell.execDetached([root.pluginScript("audio-microphone-test"), "clear"])
+        }
+      } else if (operation === "play") {
+        root.microphoneTestState = "ready"
+        if (exitCode !== 0) root.microphoneTestError = "Could not play the microphone test"
+      }
+      root.microphoneTestOperation = ""
+    }
+  }
+
+  Process {
+    id: microphoneTestStopProc
+  }
+
   Timer {
     id: profileRefreshTimer
     interval: 200
     repeat: false
     onTriggered: if (window.visible && !profilesProc.running) profilesProc.running = true
+  }
+
+  Timer {
+    id: microphoneTestCountdown
+    interval: 1000
+    repeat: true
+    onTriggered: if (root.microphoneTestState === "recording")
+      root.microphoneTestSecondsRemaining = Math.max(0, root.microphoneTestSecondsRemaining - 1)
   }
 
   Timer {
@@ -742,8 +910,11 @@ Item {
     minimumSize: Qt.size(520, 440)
 
     onVisibleChanged: {
-      if (!visible && !root.closingFromHost && root.shell && typeof root.shell.hide === "function")
-        root.shell.hide("ssupt.audio-control")
+      if (!visible && !root.closingFromHost) {
+        root.discardMicrophoneTest()
+        if (root.shell && typeof root.shell.hide === "function")
+          root.shell.hide("ssupt.audio-control")
+      }
     }
 
     FocusScope {
@@ -1144,7 +1315,7 @@ Item {
                 }
 
                 Text {
-                  visible: root.policySettingsLoaded && root.policyItemCount === 0
+                  visible: root.policySettingsLoaded && root.wireplumberPolicyItemCount === 0
                     && root.policyError === ""
                   width: parent.width
                   text: "This WirePlumber version does not expose the supported policy controls."
@@ -1155,9 +1326,9 @@ Item {
                 }
 
                 Text {
-                  visible: root.policySettingsLoaded && root.policyItemCount > 0
+                  visible: root.policySettingsLoaded && root.wireplumberPolicyItemCount > 0
                   width: parent.width
-                  text: "Changes apply system-wide and are saved by WirePlumber. Unsupported controls are hidden automatically."
+                  text: "WirePlumber policies apply system-wide and are saved immediately. Unsupported controls are hidden automatically."
                   color: Qt.darker(root.foreground, 1.35)
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -1285,6 +1456,39 @@ Item {
                     }
                   }
                 }
+
+                PanelSeparator {
+                  visible: root.wireplumberPolicyItemCount > 0
+                  foreground: root.foreground
+                }
+
+                Column {
+                  width: parent.width
+                  spacing: Style.space(8)
+
+                  PanelSectionHeader {
+                    text: "MICROPHONE PRIVACY"
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                  }
+
+                  AudioPolicyToggleRow {
+                    id: captureNotificationRow
+                    width: parent.width
+                    definition: root.captureNotificationDefinition
+                    checked: root.captureNotifications
+                    enabled: true
+                    hasCursor: root.cursorActive && root.activeTab === 2
+                      && root.selectedIndex === root.captureNotificationIndex
+                    foreground: root.foreground
+                    fill: root.hoverFill
+                    fontFamily: root.fontFamily
+                    onHasCursorChanged: if (hasCursor)
+                      root.ensureCursorVisible(captureNotificationRow)
+                    onHovered: root.setCursor(root.captureNotificationIndex)
+                    onActivated: root.setCaptureNotifications(!root.captureNotifications)
+                  }
+                }
               }
 
               Column {
@@ -1393,6 +1597,45 @@ Item {
                     node: root.inputDevice
                     label: "Input"
                     rowIndex: root.inputBalanceIndex
+                  }
+                }
+
+                PanelSeparator {
+                  visible: root.activeTab === 0 && !!root.inputDevice
+                  foreground: root.foreground
+                }
+
+                Column {
+                  visible: root.activeTab === 0 && !!root.inputDevice
+                  width: parent.width
+                  spacing: Style.space(8)
+
+                  PanelSectionHeader {
+                    text: "MICROPHONE TEST"
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                  }
+
+                  MicrophoneTestRow {
+                    id: microphoneTestRow
+                    width: parent.width
+                    deviceLabel: root.nodeLabel(root.inputDevice)
+                    state: root.microphoneTestState
+                    secondsRemaining: root.microphoneTestSecondsRemaining
+                    level: root.microphoneTestLevel
+                    microphoneMuted: root.inputDeviceMuted
+                    error: root.microphoneTestError
+                    enabled: !profileSetProc.running && !portSetProc.running
+                    hasCursor: root.cursorActive && root.activeTab === 0
+                      && root.selectedIndex === root.microphoneTestIndex
+                    foreground: root.foreground
+                    fill: root.hoverFill
+                    urgent: root.urgent
+                    fontFamily: root.fontFamily
+                    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(microphoneTestRow)
+                    onHovered: root.setCursor(root.microphoneTestIndex)
+                    onPrimaryActivated: root.activateMicrophoneTest()
+                    onDiscarded: root.discardMicrophoneTest()
                   }
                 }
 

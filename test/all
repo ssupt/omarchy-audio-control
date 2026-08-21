@@ -32,12 +32,15 @@ const cards = model.parseAudioProfiles(JSON.stringify([{
 
 assert.deepEqual(model.parseAudioControlSettings('{"outputOverdrive":true}'), {
   version: 1,
-  outputOverdrive: true
+  outputOverdrive: true,
+  captureNotifications: true
 })
 assert.deepEqual(model.parseAudioControlSettings('not json'), {
   version: 1,
-  outputOverdrive: false
+  outputOverdrive: false,
+  captureNotifications: true
 })
+assert.equal(model.parseAudioControlSettings('{"captureNotifications":false}').captureNotifications, false)
 assert.deepEqual(model.parseAudioPolicySettings(JSON.stringify({
   'node.features.audio.mono': true,
   'linking.pause-playback': 'true',
@@ -143,6 +146,8 @@ assert.deepEqual(model.uniqueRecordingStreamLabels([
   { ready: true, properties: { 'application.name': 'firefox' } },
   { ready: true, properties: { 'application.name': 'Discord' } }
 ]), ['Firefox', 'Discord'])
+assert.deepEqual(model.addedRecordingStreamLabels(
+  ['Firefox', 'OBS'], ['firefox', 'Discord', 'OBS Studio']), ['Discord', 'OBS Studio'])
 assert.equal(model.streamIconName({ ready: true, properties: { 'application.icon_name': 'firefox' } }, [], []), 'firefox')
 assert.equal(model.streamIconName({ ready: true, properties: { 'application.icon_name': 'chromium-browser' } }, [], []), 'chromium')
 assert.equal(model.streamIconName({ ready: true, properties: { 'application.id': 'org.example.App.desktop' } }, [], []), 'org.example.App')
@@ -356,6 +361,104 @@ jq -e 'has("monitor.alsa.autodetect-hdmi-channels") | not' <<<"$policy" >/dev/nu
 echo "PASS: capability-aware audio safety policies"
 rm -f -- "$policy_log" "$policy_state"
 
+microphone_test_dir=$(mktemp -d)
+microphone_test_log="$microphone_test_dir/commands.log"
+microphone_test_file="$microphone_test_dir/microphone-test.raw"
+trap 'rm -f "$route_log" "$input_default_log" "$port_log"; rm -rf "$microphone_test_dir"' EXIT
+
+microphone_test_status=$(AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
+  "$ROOT/scripts/audio-microphone-test" status)
+[[ $microphone_test_status == empty ]] || fail "empty microphone test status"
+
+microphone_test_status=$(AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
+  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
+  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_STATUS=1 PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-microphone-test" record test-source)
+[[ $microphone_test_status == ready && -s $microphone_test_file ]] ||
+  fail "microphone test recording"
+[[ $(stat -c '%a' "$microphone_test_file") == 600 ]] ||
+  fail "microphone test recording permissions"
+grep -q -- '--target test-source' "$microphone_test_log" ||
+  fail "microphone test selected source"
+grep -q -- 'node.name.*omarchy_audio_test_record' "$microphone_test_log" ||
+  fail "microphone test private stream identity"
+
+AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
+  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-microphone-test" play
+grep -q '^pw-play .*--volume 0.8 ' "$microphone_test_log" ||
+  fail "microphone test playback"
+grep -q '^pw-play .*--raw ' "$microphone_test_log" ||
+  fail "microphone test raw playback format"
+
+AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
+  "$ROOT/scripts/audio-microphone-test" clear
+[[ ! -e $microphone_test_file ]] || fail "microphone test cleanup"
+
+if AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
+  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
+  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_FAIL=1 PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-microphone-test" record test-source >/dev/null 2>&1; then
+  fail "failed microphone test recording reported success"
+fi
+[[ ! -e $microphone_test_file ]] || fail "failed microphone test left a recording"
+
+: >"$microphone_test_log"
+microphone_test_output="$microphone_test_dir/record-output"
+AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
+  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
+  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_WAIT=1 PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-microphone-test" record test-source >"$microphone_test_output" &
+microphone_test_pid=$!
+for _attempt in {1..100}; do
+  [[ -s $microphone_test_file.pid ]] && break
+  kill -0 "$microphone_test_pid" 2>/dev/null || fail "microphone test stopped before early stop"
+  sleep 0.01
+done
+[[ -s $microphone_test_file.pid ]] || fail "microphone test early-stop setup"
+AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
+  "$ROOT/scripts/audio-microphone-test" stop
+microphone_test_exit=0
+wait "$microphone_test_pid" || microphone_test_exit=$?
+[[ $microphone_test_exit == 0 && $(<"$microphone_test_output") == ready ]] ||
+  fail "microphone test early-stop completion"
+[[ $(stat -c '%s' "$microphone_test_file") == 96000 ]] ||
+  fail "microphone test early-stop partial clip"
+[[ ! -e $microphone_test_file.pid && ! -e $microphone_test_file.stop ]] ||
+  fail "microphone test early-stop control cleanup"
+
+AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
+  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-microphone-test" play
+grep -q '^pw-play .*--raw ' "$microphone_test_log" ||
+  fail "partial microphone test playback"
+AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
+  "$ROOT/scripts/audio-microphone-test" clear
+
+: >"$microphone_test_log"
+AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
+  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
+  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_WAIT=1 PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-microphone-test" record test-source >/dev/null &
+microphone_test_pid=$!
+for _attempt in {1..100}; do
+  [[ -s $microphone_test_file.pid ]] && break
+  kill -0 "$microphone_test_pid" 2>/dev/null || fail "microphone test stopped before cancellation"
+  sleep 0.01
+done
+[[ -s $microphone_test_file.pid ]] || fail "microphone test cancellation setup"
+kill -TERM "$microphone_test_pid"
+microphone_test_exit=0
+wait "$microphone_test_pid" || microphone_test_exit=$?
+[[ $microphone_test_exit == 143 ]] || fail "microphone test cancellation status"
+[[ ! -e $microphone_test_file ]] || fail "cancelled microphone test left a recording"
+[[ ! -e $microphone_test_file.pid && ! -e $microphone_test_file.stop ]] ||
+  fail "cancelled microphone test left a control file"
+[[ -z $(find "$microphone_test_dir" -type f -name '.microphone-test.*.raw' -print -quit) ]] ||
+  fail "cancelled microphone test left a temporary file"
+echo "PASS: private microphone record and playback test"
+rm -rf -- "$microphone_test_dir"
+
 bluetooth_preference_log=$(mktemp)
 bluetooth_preference_state=$(mktemp)
 trap 'rm -f "$route_log" "$input_default_log" "$port_log" "$bluetooth_preference_log" "$bluetooth_preference_state"' EXIT
@@ -520,7 +623,7 @@ echo "PASS: menu integration"
 jq -e '
   .schemaVersion == 1
   and .id == "ssupt.audio-control"
-  and .version == "0.5.0"
+  and .version == "0.5.1"
   and .author == "ssupt"
   and (.kinds | index("bar-widget") != null)
   and (.kinds | index("panel") != null)
