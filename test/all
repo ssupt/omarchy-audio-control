@@ -361,6 +361,46 @@ jq -e 'has("monitor.alsa.autodetect-hdmi-channels") | not' <<<"$policy" >/dev/nu
 echo "PASS: capability-aware audio safety policies"
 rm -f -- "$policy_log" "$policy_state"
 
+scenes_dir=$(mktemp -d)
+scenes_file="$scenes_dir/audio-scenes.json"
+trap 'rm -f "$route_log" "$input_default_log" "$port_log"; rm -rf "$microphone_test_dir" "$scenes_dir"' EXIT
+
+scene_one='{"name":"Desk","defaults":{"output":"speakers","input":"mic"},"devices":[{"name":"speakers","direction":"output","volume":0.5,"muted":false,"balance":0}],"ports":[],"profiles":[]}'
+scene_two='{"name":"Headset","defaults":{"output":"headphones","input":"headset-mic"},"devices":[],"ports":[],"profiles":[]}'
+if OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-scenes" save Desk <<<'' >/dev/null 2>&1; then
+  fail "empty audio scene accepted"
+fi
+if printf '%s\n' '[1,2]' | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-scenes" save Desk >/dev/null 2>&1; then
+  fail "non-object audio scene accepted"
+fi
+printf '%s\n' "$scene_one" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-scenes" save Desk >/dev/null
+[[ -s $scenes_file ]] || fail "audio scene not saved"
+[[ $(stat -c '%a' "$scenes_file") == 600 ]] || fail "audio scene store permissions"
+jq -e '.scenes[0].name == "Desk" and .scenes[0].defaults.output == "speakers"' "$scenes_file" >/dev/null ||
+  fail "audio scene content"
+scene_replacement='{"name":"Desk","defaults":{"output":"line-out","input":"mic"},"devices":[],"ports":[],"profiles":[]}'
+printf '%s\n' "$scene_two" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-scenes" save Headset >/dev/null
+printf '%s\n' "$scene_replacement" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-scenes" save Desk >/dev/null
+jq -e '(.scenes | length) == 2 and .scenes[1].defaults.output == "line-out"' "$scenes_file" >/dev/null ||
+  fail "audio scene replacement"
+for _index in $(seq 1 30); do
+  printf '%s\n' "{\"name\":\"Scene $_index\"}" |
+    OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+    "$ROOT/scripts/audio-scenes" save "Scene $_index" >/dev/null
+done
+jq -e '(.scenes | length) <= 24' "$scenes_file" >/dev/null || fail "audio scene cap"
+OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-scenes" delete Headset >/dev/null
+jq -e '[.scenes[].name] | index("Headset") | not' "$scenes_file" >/dev/null ||
+  fail "audio scene deletion"
+echo "PASS: named audio scene storage"
+rm -rf -- "$scenes_dir"
+
 microphone_test_dir=$(mktemp -d)
 microphone_test_log="$microphone_test_dir/commands.log"
 microphone_test_file="$microphone_test_dir/microphone-test.raw"

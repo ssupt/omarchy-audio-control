@@ -105,6 +105,120 @@ function parseAudioControlSettings(raw) {
   }
 }
 
+function clampNumber(value, fallback, minimum, maximum) {
+  var number = Number(value)
+  if (!isFinite(number)) return fallback
+  return Math.max(minimum, Math.min(maximum, number))
+}
+
+function sanitizeSceneString(value, fallback, maximumLength) {
+  var text = String(value === undefined || value === null ? "" : value).trim()
+  if (text === "") return fallback
+  if (maximumLength && text.length > maximumLength) text = text.substring(0, maximumLength)
+  return text
+}
+
+function sanitizeSceneEntry(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null
+  var name = sanitizeSceneString(raw.name, "", 48)
+  if (name === "") return null
+
+  var defaults = raw.defaults && typeof raw.defaults === "object" && !Array.isArray(raw.defaults)
+    ? raw.defaults : {}
+  var devices = []
+  var rawDevices = Array.isArray(raw.devices) ? raw.devices : []
+  for (var i = 0; i < rawDevices.length && devices.length < 64; i++) {
+    var device = rawDevices[i]
+    if (!device || typeof device !== "object") continue
+    var deviceName = sanitizeSceneString(device.name, "", 160)
+    var direction = device.direction === "input" ? "input" : "output"
+    if (deviceName === "") continue
+    devices.push({
+      name: deviceName,
+      direction: direction,
+      volume: clampNumber(device.volume, 1, 0, 1.5),
+      muted: device.muted === true,
+      balance: clampNumber(device.balance, 0, -1, 1)
+    })
+  }
+
+  var ports = []
+  var rawPorts = Array.isArray(raw.ports) ? raw.ports : []
+  for (var j = 0; j < rawPorts.length && ports.length < 64; j++) {
+    var port = rawPorts[j]
+    if (!port || typeof port !== "object") continue
+    var endpoint = sanitizeSceneString(port.endpoint, "", 160)
+    var portDirection = port.direction === "input" ? "input" : "output"
+    var portValue = sanitizeSceneString(port.value, "", 160)
+    if (endpoint === "" || portValue === "") continue
+    ports.push({ direction: portDirection, endpoint: endpoint, value: portValue })
+  }
+
+  var profiles = []
+  var rawProfiles = Array.isArray(raw.profiles) ? raw.profiles : []
+  for (var k = 0; k < rawProfiles.length && profiles.length < 64; k++) {
+    var profile = rawProfiles[k]
+    if (!profile || typeof profile !== "object") continue
+    var card = sanitizeSceneString(profile.card, "", 160)
+    var profileValue = sanitizeSceneString(profile.profile, "", 160)
+    if (card === "" || profileValue === "") continue
+    profiles.push({ card: card, profile: profileValue })
+  }
+
+  return {
+    name: name,
+    savedAt: sanitizeSceneString(raw.savedAt, "", 32),
+    defaults: {
+      output: sanitizeSceneString(defaults.output, "", 160),
+      input: sanitizeSceneString(defaults.input, "", 160)
+    },
+    devices: devices,
+    ports: ports,
+    profiles: profiles
+  }
+}
+
+function parseAudioScenes(raw) {
+  var parsed
+  try {
+    parsed = JSON.parse(String(raw || "{}"))
+  } catch (e) {
+    parsed = {}
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) parsed = {}
+
+  var scenes = []
+  var rawScenes = Array.isArray(parsed.scenes) ? parsed.scenes : []
+  var seen = {}
+  for (var i = 0; i < rawScenes.length && scenes.length < 24; i++) {
+    var scene = sanitizeSceneEntry(rawScenes[i])
+    if (!scene || seen[scene.name]) continue
+    seen[scene.name] = true
+    scenes.push(scene)
+  }
+  return { version: 1, scenes: scenes }
+}
+
+function sceneSummary(scene) {
+  if (!scene || typeof scene !== "object") return ""
+  var parts = []
+  var deviceCount = scene.devices ? scene.devices.length : 0
+  if (deviceCount > 0)
+    parts.push(deviceCount + (deviceCount === 1 ? " device" : " devices"))
+  if (scene.defaults && scene.defaults.output && scene.defaults.input)
+    parts.push("defaults")
+  else if (scene.defaults && (scene.defaults.output || scene.defaults.input))
+    parts.push("default " + (scene.defaults.output ? "output" : "input"))
+  var portCount = scene.ports ? scene.ports.length : 0
+  if (portCount > 0)
+    parts.push(portCount + (portCount === 1 ? " port" : " ports"))
+  var profileCount = scene.profiles ? scene.profiles.length : 0
+  if (profileCount > 0)
+    parts.push(profileCount + (profileCount === 1 ? " profile" : " profiles"))
+  if (parts.length === 0) return "Empty scene"
+  return parts.join(" · ")
+}
+
 function parseAudioPolicySettings(raw) {
   var parsed
   try {
@@ -676,6 +790,9 @@ if (typeof module !== "undefined") {
     preferredAudioProfile: preferredAudioProfile,
     preferredAudioNodeName: preferredAudioNodeName,
     parseAudioControlSettings: parseAudioControlSettings,
+    parseAudioScenes: parseAudioScenes,
+    sanitizeSceneEntry: sanitizeSceneEntry,
+    sceneSummary: sceneSummary,
     parseAudioPolicySettings: parseAudioPolicySettings,
     balanceValue: balanceValue,
     applyBalance: applyBalance,
