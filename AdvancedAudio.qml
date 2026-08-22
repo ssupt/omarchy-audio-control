@@ -1119,7 +1119,7 @@ Item {
                 { value: "devices", label: "Devices", icon: "󰓃" },
                 { value: "bluetooth", label: "Bluetooth", icon: "󰂯" },
                 { value: "policy", label: "Policy", icon: "󰒃" },
-                { value: "scenes", label: "Scenes", icon: "󰐭" }
+                { value: "scenes", label: "Scenes", icon: "󰒸" }
               ]
               value: root.activeTab === 0 ? "devices"
                 : root.activeTab === 1 ? "bluetooth"
@@ -1600,6 +1600,17 @@ Item {
                   fill: root.hoverFill
                   bordered: true
 
+                  // Declared beneath the content so the save button stays
+                  // clickable; clicks landing anywhere else still save.
+                  MouseArea {
+                    anchors.fill: parent
+                    enabled: !sceneController.busy && !sceneStoreProc.running
+                    hoverEnabled: true
+                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onContainsMouseChanged: if (containsMouse) root.setCursor(0)
+                    onClicked: root.saveCurrentScene()
+                  }
+
                   Row {
                     id: sceneSaveContent
                     anchors.left: parent.left
@@ -1645,15 +1656,6 @@ Item {
                       enabled: sceneSaveRow.enabled
                       onClicked: root.saveCurrentScene()
                     }
-                  }
-
-                  MouseArea {
-                    anchors.fill: parent
-                    enabled: !sceneController.busy && !sceneStoreProc.running
-                    hoverEnabled: true
-                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                    onContainsMouseChanged: if (containsMouse) root.setCursor(0)
-                    onClicked: root.saveCurrentScene()
                   }
                 }
 

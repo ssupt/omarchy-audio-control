@@ -530,7 +530,11 @@ Panel {
   onOpenedChanged: {
     if (opened) {
       if (appLibrary && typeof appLibrary.refreshIcons === "function") appLibrary.refreshIcons()
-      refreshDisplayAudioModels()
+      // Populate through the debounced refresh: assigning the display models
+      // synchronously inside this signal regenerates every Repeater while
+      // PipeWire nodes may still be churning from a device change, which has
+      // crashed Quickshell during delegate incubation.
+      scheduleDisplayAudioModelRefresh()
       focusSection = "output"
       headerIndex = 1
       selectedIndex = -1  // first keyboard cursor reveal starts on the output slider

@@ -22,6 +22,17 @@ CursorSurface {
   implicitHeight: content.implicitHeight + Style.space(18)
   bordered: true
 
+  // Declared beneath the content so the action buttons stay clickable;
+  // clicks landing anywhere else on the row still apply the scene.
+  MouseArea {
+    anchors.fill: parent
+    enabled: root.actionEnabled
+    hoverEnabled: true
+    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+    onContainsMouseChanged: if (containsMouse) root.hovered()
+    onClicked: root.activated()
+  }
+
   Row {
     id: content
     anchors.left: parent.left
@@ -72,7 +83,7 @@ CursorSurface {
       }
 
       PanelActionButton {
-        iconText: "󰐭"
+        iconText: "󰐊"
         tooltipText: "Apply scene"
         foreground: root.foreground
         fontFamily: root.fontFamily
@@ -81,14 +92,5 @@ CursorSurface {
         onClicked: root.activated()
       }
     }
-  }
-
-  MouseArea {
-    anchors.fill: parent
-    enabled: root.actionEnabled
-    hoverEnabled: true
-    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-    onContainsMouseChanged: if (containsMouse) root.hovered()
-    onClicked: root.activated()
   }
 }
