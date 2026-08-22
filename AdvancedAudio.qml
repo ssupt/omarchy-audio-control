@@ -590,6 +590,8 @@ Item {
   }
 
   function setCursor(index) {
+    // Mouse claims never scroll; keyboard navigation sets the flag itself.
+    keyboardScrolling = false
     cursorActive = true
     selectedIndex = index
   }
@@ -657,7 +659,12 @@ Item {
     if (row) row.toggleProfileMenu()
   }
 
+  // Mouse hovering claims the cursor without scrolling: the wheel and the
+  // keyboard own scroll position here. Keyboard steps opt in below.
+  property bool keyboardScrolling: false
+
   function ensureCursorVisible(item) {
+    if (!keyboardScrolling) return
     if (!item || !scrollArea) return
     var flick = scrollArea.contentItem
     if (!flick || flick.contentY === undefined) return
@@ -1293,6 +1300,7 @@ Item {
         anchors.fill: parent
         blocked: root.profileMenuOpen || root.aliasEditingDevice !== ""
           onMoveRequested: function(dx, dy) {
+            root.keyboardScrolling = true
             if (dx !== 0) {
               root.cursorActive = true
               if (root.activeTab === 0 && root.adjustBalanceAtCursor(dx)) return
@@ -1303,7 +1311,10 @@ Item {
           if (!root.cursorActive) { root.cursorActive = true; return }
           if (dy !== 0) root.moveCursor(dy)
         }
-        onTabRequested: function(direction) { root.switchTab(direction) }
+        onTabRequested: function(direction) {
+          root.keyboardScrolling = true
+          root.switchTab(direction)
+        }
         onActivateRequested: root.activateCursor()
         onCloseRequested: root.requestClose()
 
@@ -2214,7 +2225,10 @@ Item {
                     hidden: modelData ? modelData.hidden === true : false
                     editingAlias: root.aliasEditingDevice === managedDeviceDelegate.deviceName
                       && managedDeviceDelegate.deviceName !== ""
-                    aliasValue: root.deviceAliasFor(managedDeviceDelegate.deviceName)
+                    aliasValue: {
+                      var alias = root.deviceAliasFor(managedDeviceDelegate.deviceName)
+                      return alias !== "" ? alias : managedDeviceDelegate.title
+                    }
                     busy: root.routingMutation || routingWriteProc.running
                     hasCursor: root.cursorActive && root.activeTab === 4
                       && root.selectedIndex === 2 + root.audioRules.appRules.length + managedDeviceDelegate.index
@@ -2229,6 +2243,7 @@ Item {
                     onAliasCommitted: function(text) {
                       root.commitAliasEdit(managedDeviceDelegate.deviceName, text)
                     }
+                    onAliasCancelled: root.cancelAliasEdit()
                     onFavoriteToggled: root.toggleDeviceFavorite(
                       managedDeviceDelegate.deviceName, managedDeviceDelegate.favorite)
                     onHiddenToggled: root.toggleDeviceHidden(

@@ -18,6 +18,7 @@ CursorSurface {
 
   signal aliasEditStarted()
   signal aliasCommitted(string text)
+  signal aliasCancelled()
   signal favoriteToggled()
   signal hiddenToggled()
   signal cursorRequested()
@@ -43,6 +44,7 @@ CursorSurface {
       spacing: Style.space(3)
 
       Text {
+        id: titleText
         width: parent.width
         visible: !root.editingAlias
         text: root.title
@@ -67,6 +69,7 @@ CursorSurface {
         id: aliasField
         visible: root.editingAlias
         width: parent.width
+        implicitHeight: titleText.implicitHeight + Style.space(6)
         text: root.aliasValue
         placeholderText: "Custom name"
         color: root.foreground
@@ -74,16 +77,21 @@ CursorSurface {
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
         selectByMouse: true
+        verticalAlignment: TextInput.AlignVCenter
         background: Rectangle {
           color: "transparent"
           border.width: 1
-          border.color: root.hasCursor ? Color.accent : Qt.darker(root.foreground, 1.5)
+          border.color: Color.accent
           radius: Style.space(3)
         }
+        onVisibleChanged: {
+          if (!visible) return
+          text = root.aliasValue
+          forceActiveFocus()
+          selectAll()
+        }
         onAccepted: root.aliasCommitted(text)
-        onActiveFocusChanged: if (!activeFocus && visible) root.aliasCommitted(text)
-        Component.onCompleted: if (visible) forceActiveFocus()
-        onVisibleChanged: if (visible) forceActiveFocus()
+        Keys.onEscapePressed: root.aliasCancelled()
       }
     }
 
@@ -92,7 +100,32 @@ CursorSurface {
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.space(4)
 
+      // While renaming, only the actions that belong to the edit remain.
       PanelActionButton {
+        visible: root.editingAlias
+        iconText: "󰄬"
+        tooltipText: "Save name"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        bordered: true
+        enabled: root.enabled
+        onClicked: root.aliasCommitted(aliasField.text)
+      }
+
+      PanelActionButton {
+        visible: root.editingAlias
+        iconText: "󰅖"
+        tooltipText: "Cancel renaming"
+        foreground: root.foreground
+        hoverColor: root.urgent
+        fontFamily: root.fontFamily
+        bordered: true
+        enabled: root.enabled
+        onClicked: root.aliasCancelled()
+      }
+
+      PanelActionButton {
+        visible: !root.editingAlias
         iconText: "󰏫"
         tooltipText: "Rename device"
         foreground: root.foreground
@@ -103,6 +136,7 @@ CursorSurface {
       }
 
       PanelActionButton {
+        visible: !root.editingAlias
         iconText: root.favorite ? "󰓎" : "󰓒"
         tooltipText: root.favorite ? "Remove from favorites" : "Add to favorites"
         foreground: root.favorite ? Color.accent : root.foreground
@@ -113,6 +147,7 @@ CursorSurface {
       }
 
       PanelActionButton {
+        visible: !root.editingAlias
         iconText: "󰈉"
         tooltipText: root.hidden ? "Show device" : "Hide device"
         foreground: root.hidden ? root.urgent : root.foreground
