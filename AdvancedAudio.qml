@@ -994,7 +994,6 @@ Item {
 
   // Live endpoint and stream lists power the Routing tab's pickers. The same
   // instrumentation filtering as the quick mixer keeps test streams out.
-  readonly property var pipewireNodes: Pipewire.nodes ? Pipewire.nodes.values : []
   readonly property var candidateSinks: {
     var list = []
     for (var i = 0; i < pipewireNodes.length; i++) {
