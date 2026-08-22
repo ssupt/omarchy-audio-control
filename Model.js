@@ -565,7 +565,8 @@ function nodeSerial(node) {
   return serial === undefined || serial === null ? "" : String(serial)
 }
 
-function streamOutputOptions(outputs, defaultOutput) {
+function streamOutputOptions(outputs, defaultOutput, labelFor) {
+  labelFor = labelFor || nodeLabel
   var values = Array.isArray(outputs) ? outputs : []
   var options = []
   var defaultSerial = nodeSerial(defaultOutput)
@@ -575,7 +576,7 @@ function streamOutputOptions(outputs, defaultOutput) {
     var serial = nodeSerial(candidate)
     if (serial !== "" && serial === defaultSerial) {
       options.push({ value: "default:" + serial, label: "Follow default output" })
-      options.push({ value: "override:" + serial, label: "Always use " + nodeLabel(candidate) })
+      options.push({ value: "override:" + serial, label: "Always use " + labelFor(candidate) })
       break
     }
   }
@@ -584,12 +585,13 @@ function streamOutputOptions(outputs, defaultOutput) {
     var output = values[j]
     var outputSerial = nodeSerial(output)
     if (outputSerial === "" || outputSerial === defaultSerial) continue
-    options.push({ value: "override:" + outputSerial, label: "Always use " + nodeLabel(output) })
+    options.push({ value: "override:" + outputSerial, label: "Always use " + labelFor(output) })
   }
   return options
 }
 
-function recordingInputOptions(inputs, defaultInput) {
+function recordingInputOptions(inputs, defaultInput, labelFor) {
+  labelFor = labelFor || nodeLabel
   var values = Array.isArray(inputs) ? inputs : []
   var options = []
   var defaultSerial = nodeSerial(defaultInput)
@@ -599,7 +601,7 @@ function recordingInputOptions(inputs, defaultInput) {
     var serial = nodeSerial(candidate)
     if (serial !== "" && serial === defaultSerial) {
       options.push({ value: "default:" + serial, label: "Follow default input" })
-      options.push({ value: "override:" + serial, label: "Always use " + nodeLabel(candidate) })
+      options.push({ value: "override:" + serial, label: "Always use " + labelFor(candidate) })
       break
     }
   }
@@ -608,7 +610,7 @@ function recordingInputOptions(inputs, defaultInput) {
     var input = values[j]
     var inputSerial = nodeSerial(input)
     if (inputSerial === "" || inputSerial === defaultSerial) continue
-    options.push({ value: "override:" + inputSerial, label: "Always use " + nodeLabel(input) })
+    options.push({ value: "override:" + inputSerial, label: "Always use " + labelFor(input) })
   }
   return options
 }

@@ -283,8 +283,10 @@ Panel {
 
   // The default is ordered first and named by behavior. Applications on that
   // option follow later default changes; all other choices are persistent.
-  readonly property var streamOutputOptions: Model.streamOutputOptions(displayAudioSinks, sink)
-  readonly property var recordingInputOptions: Model.recordingInputOptions(displayAudioSources, source)
+  readonly property var streamOutputOptions: Model.streamOutputOptions(
+    displayAudioSinks, sink, nodeLabel)
+  readonly property var recordingInputOptions: Model.recordingInputOptions(
+    displayAudioSources, source, nodeLabel)
 
   // A DSP sink -- a speaker tuning, or EasyEffects -- can be the selected output
   // without being where loudness lives: changing its volume alters the level going
