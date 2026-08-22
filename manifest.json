@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "ssupt.audio-control",
   "name": "Advanced Audio Control",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "author": "ssupt",
-  "description": "Advanced PipeWire and WirePlumber audio mixer for Omarchy: persistent per-application speaker/output and microphone/input routing; app volume, mute, icons, and live playback/recording meters; default device selection; ports and profiles; Bluetooth codecs, headset autoswitch, and quality/latency preference; 150% volume boost; stereo balance; mono audio; pause or mute protection when wired/Bluetooth devices disconnect; starting volumes for new devices and apps; HDMI channel detection; and persistent microphone privacy with a recording badge, app names and count, quick mute, Do Not Disturb-aware capture-start notifications, peak hold and clipping warnings, plus a private five-second record/playback test",
+  "description": "Advanced PipeWire and WirePlumber audio mixer for Omarchy: persistent per-application speaker/output and microphone/input routing; app volume, mute, icons, and live playback/recording meters; default device selection; ports and profiles; Bluetooth codecs, headset autoswitch, and quality/latency preference; 150% volume boost; stereo balance; mono audio; pause or mute protection when wired/Bluetooth devices disconnect; starting volumes for new devices and apps; HDMI channel detection; and persistent microphone privacy with a recording badge, app names and count, quick mute, Do Not Disturb-aware capture-start notifications, peak hold and clipping warnings, plus a private five-second record/playback test; audio scenes that restore defaults, device volumes, balance, ports, and card profiles at once; offline per-application routing rules; and device aliases, favorites, and hidden devices",
   "kinds": [
     "bar-widget",
     "panel"
@@ -15,7 +15,7 @@
   },
   "barWidget": {
     "displayName": "Advanced Audio Control",
-    "description": "Advanced PipeWire and WirePlumber audio mixer for Omarchy: persistent per-application speaker/output and microphone/input routing; app volume, mute, icons, and live playback/recording meters; default device selection; ports and profiles; Bluetooth codecs, headset autoswitch, and quality/latency preference; 150% volume boost; stereo balance; mono audio; pause or mute protection when wired/Bluetooth devices disconnect; starting volumes for new devices and apps; HDMI channel detection; and persistent microphone privacy with a recording badge, app names and count, quick mute, Do Not Disturb-aware capture-start notifications, peak hold and clipping warnings, plus a private five-second record/playback test",
+    "description": "Advanced PipeWire and WirePlumber audio mixer for Omarchy: persistent per-application speaker/output and microphone/input routing; app volume, mute, icons, and live playback/recording meters; default device selection; ports and profiles; Bluetooth codecs, headset autoswitch, and quality/latency preference; 150% volume boost; stereo balance; mono audio; pause or mute protection when wired/Bluetooth devices disconnect; starting volumes for new devices and apps; HDMI channel detection; and persistent microphone privacy with a recording badge, app names and count, quick mute, Do Not Disturb-aware capture-start notifications, peak hold and clipping warnings, plus a private five-second record/playback test; audio scenes that restore defaults, device volumes, balance, ports, and card profiles at once; offline per-application routing rules; and device aliases, favorites, and hidden devices",
     "category": "Audio",
     "allowMultiple": false
   },
