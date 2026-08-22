@@ -27,9 +27,13 @@ CursorSurface {
   signal routeChosen(string optionValue)
   signal popupToggled(bool open)
 
-  readonly property real streamVolume: root.node && root.node.audio ? root.node.audio.volume : 0
-  readonly property bool streamMuted: root.node && root.node.audio ? root.node.audio.muted : false
-  readonly property real meterLevel: Model.audioMeterLevel(
+  // PipeWire nodes publish their audio interface only once bound; reading
+  // it earlier — which happens while streams churn during profile or codec
+  // switches — has historically destabilized Quickshell's Pipewire service.
+  readonly property bool nodeReady: !!root.node && root.node.ready === true
+  readonly property real streamVolume: root.nodeReady && root.node.audio ? root.node.audio.volume : 0
+  readonly property bool streamMuted: root.nodeReady && root.node.audio ? root.node.audio.muted : false
+  readonly property real meterLevel: !root.nodeReady ? 0 : Model.audioMeterLevel(
     streamPeakMonitor.peaks,
     root.node && root.node.audio ? root.node.audio.volumes : [],
     streamPeakMonitor.peak,
@@ -55,7 +59,7 @@ CursorSurface {
   PwNodePeakMonitor {
     id: streamPeakMonitor
     node: root.node
-    enabled: root.monitorEnabled && !!root.node
+    enabled: root.monitorEnabled && root.nodeReady
   }
 
   Column {
@@ -115,7 +119,7 @@ CursorSurface {
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
             onClicked: {
-              if (root.node && root.node.audio)
+              if (root.nodeReady && root.node.audio)
                 root.node.audio.muted = !root.node.audio.muted
             }
           }
@@ -230,10 +234,10 @@ CursorSurface {
       opacity: root.streamMuted ? 0.5 : 1.0
 
       onMoved: function(v) {
-        if (root.node && root.node.audio) root.node.audio.volume = v
+        if (root.nodeReady && root.node.audio) root.node.audio.volume = v
       }
       onRightClicked: {
-        if (root.node && root.node.audio)
+        if (root.nodeReady && root.node.audio)
           root.node.audio.muted = !root.node.audio.muted
       }
     }

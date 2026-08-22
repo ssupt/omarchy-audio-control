@@ -64,6 +64,10 @@ Item {
     return lower === "quickshell" || lower.indexOf("omarchy_audio_test") === 0
   }
 
+  function isMonitorSource(node) {
+    return String(node && node.name || "").toLowerCase().endsWith(".monitor")
+  }
+
   function stereoIndices(node) {
     if (!node || !node.audio || !node.audio.channels || !node.audio.volumes)
       return { left: -1, right: -1 }
@@ -211,12 +215,13 @@ Item {
       var node = nodes[i]
       if (!node || node.isStream || !node.audio || isInstrumentation(node.name)) continue
       var direction = node.isSink ? "output" : (Model.isAudioSource(node) ? "input" : "")
-      if (direction === "") continue
+      if (direction === "" || isMonitorSource(node)) continue
       devices.push({
         name: String(node.name || ""),
         direction: direction,
         volume: Math.max(0, Math.min(1.5, Number(node.audio.volume))),
-        muted: node.audio.muted === true,
+        // Only input muting is a deliberate state worth restoring.
+        muted: direction === "input" && node.audio.muted === true,
         balance: balanceOf(node)
       })
     }
@@ -240,6 +245,9 @@ Item {
     }
 
     busy = false
+    var defaultSource = Pipewire.defaultAudioSource
+    // A monitor source is not a microphone; storing it as the scene's
+    // default input would only produce a skipped entry later.
     captureFinished({
       version: 1,
       name: captureName,
@@ -247,8 +255,8 @@ Item {
       defaults: {
         output: Pipewire.defaultAudioSink && Pipewire.defaultAudioSink.name
           ? String(Pipewire.defaultAudioSink.name) : "",
-        input: Pipewire.defaultAudioSource && Pipewire.defaultAudioSource.name
-          ? String(Pipewire.defaultAudioSource.name) : ""
+        input: defaultSource && defaultSource.name && !isMonitorSource(defaultSource)
+          ? String(defaultSource.name) : ""
       },
       devices: devices,
       ports: ports,

@@ -466,12 +466,12 @@ Panel {
     }
     if (focusSection === "streams" && selectedIndex >= 0 && selectedIndex < displayAudioStreams.length) {
       var s = displayAudioStreams[selectedIndex]
-      if (s && s.audio) s.audio.volume = Math.max(0, Math.min(1.5, s.audio.volume + delta))
+      if (s && s.ready === true && s.audio) s.audio.volume = Math.max(0, Math.min(1.5, s.audio.volume + delta))
       return
     }
     if (focusSection === "recording" && selectedIndex >= 0 && selectedIndex < displayRecordingStreams.length) {
       var recording = displayRecordingStreams[selectedIndex]
-      if (recording && recording.audio)
+      if (recording && recording.ready === true && recording.audio)
         recording.audio.volume = Math.max(0, Math.min(1.5, recording.audio.volume + delta))
     }
   }
@@ -504,7 +504,7 @@ Panel {
       if (row && displayAudioSinks.length > 1) row.toggleOutputMenu()
       else {
         var st = displayAudioStreams[selectedIndex]
-        if (st && st.audio) st.audio.muted = !st.audio.muted
+        if (st && st.ready === true && st.audio) st.audio.muted = !st.audio.muted
       }
       return
     }
@@ -513,7 +513,7 @@ Panel {
       if (recordingRow && displayAudioSources.length > 1) recordingRow.toggleOutputMenu()
       else {
         var recordingStream = displayRecordingStreams[selectedIndex]
-        if (recordingStream && recordingStream.audio)
+        if (recordingStream && recordingStream.ready === true && recordingStream.audio)
           recordingStream.audio.muted = !recordingStream.audio.muted
       }
     }

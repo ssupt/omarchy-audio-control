@@ -137,7 +137,10 @@ function sanitizeSceneEntry(raw) {
       name: deviceName,
       direction: direction,
       volume: clampNumber(device.volume, 1, 0, 1.5),
-      muted: device.muted === true,
+      // Scenes restore playback audibly: a captured output mute would
+      // silently silence an unrelated future session, while microphone
+      // muting is a deliberate privacy state worth restoring.
+      muted: direction === "input" && device.muted === true,
       balance: clampNumber(device.balance, 0, -1, 1)
     })
   }
@@ -162,6 +165,9 @@ function sanitizeSceneEntry(raw) {
     var card = sanitizeSceneString(profile.card, "", 160)
     var profileValue = sanitizeSceneString(profile.profile, "", 160)
     if (card === "" || profileValue === "") continue
+    // Restoring "off" would power down cards the user may have enabled since;
+    // scenes choose how a card behaves when it is used, never whether it is.
+    if (profileValue === "off") continue
     profiles.push({ card: card, profile: profileValue })
   }
 

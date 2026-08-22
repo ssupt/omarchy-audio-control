@@ -41,6 +41,36 @@ assert.deepEqual(model.parseAudioControlSettings('not json'), {
   captureNotifications: true
 })
 assert.equal(model.parseAudioControlSettings('{"captureNotifications":false}').captureNotifications, false)
+assert.deepEqual(
+  model.parseAudioScenes(JSON.stringify({
+    version: 1,
+    scenes: [{
+      name: 'Desk',
+      defaults: { output: 'speakers', input: 'mic' },
+      devices: [
+        { name: 'speakers', direction: 'output', volume: 0.5, muted: true, balance: 0 },
+        { name: 'mic', direction: 'input', volume: 1, muted: true, balance: 0 }
+      ],
+      ports: [],
+      profiles: [
+        { card: 'bluez_card.test', profile: 'a2dp-aac' },
+        { card: 'alsa_card.test', profile: 'off' }
+      ]
+    }]
+  })).scenes[0],
+  {
+    name: 'Desk',
+    savedAt: '',
+    defaults: { output: 'speakers', input: 'mic' },
+    devices: [
+      // Output muting is never restored: a scene must play audibly.
+      { name: 'speakers', direction: 'output', volume: 0.5, muted: false, balance: 0 },
+      { name: 'mic', direction: 'input', volume: 1, muted: true, balance: 0 }
+    ],
+    ports: [],
+    // "off" is never stored: scenes never power cards down.
+    profiles: [{ card: 'bluez_card.test', profile: 'a2dp-aac' }]
+  })
 assert.deepEqual(model.parseAudioPolicySettings(JSON.stringify({
   'node.features.audio.mono': true,
   'linking.pause-playback': 'true',
