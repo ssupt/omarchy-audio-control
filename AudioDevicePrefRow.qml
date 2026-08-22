@@ -57,7 +57,9 @@ CursorSurface {
       }
 
       Text {
+        id: deviceCodeText
         width: parent.width
+        visible: !root.editingAlias
         text: root.deviceName
         color: Qt.darker(root.foreground, 1.5)
         font.family: root.fontFamily
@@ -69,7 +71,10 @@ CursorSurface {
         id: aliasField
         visible: root.editingAlias
         width: parent.width
-        implicitHeight: titleText.implicitHeight + Style.space(6)
+        // Occupy the title and device-code slots together so the outer
+        // rectangle keeps its size while renaming.
+        implicitHeight: titleText.implicitHeight + Style.space(3)
+          + deviceCodeText.implicitHeight
         text: root.aliasValue
         placeholderText: "Custom name"
         color: root.foreground
