@@ -1119,7 +1119,7 @@ Item {
                 { value: "devices", label: "Devices", icon: "󰓃" },
                 { value: "bluetooth", label: "Bluetooth", icon: "󰂯" },
                 { value: "policy", label: "Policy", icon: "󰒃" },
-                { value: "scenes", label: "Scenes", icon: "󰒸" }
+                { value: "scenes", label: "Scenes", icon: "󰌨" }
               ]
               value: root.activeTab === 0 ? "devices"
                 : root.activeTab === 1 ? "bluetooth"
@@ -1648,7 +1648,7 @@ Item {
 
                     PanelActionButton {
                       id: sceneSaveAction
-                      iconText: "󰐭"
+                      iconText: "󰆓"
                       tooltipText: "Save current state as a new scene"
                       foreground: root.foreground
                       fontFamily: root.fontFamily
