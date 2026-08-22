@@ -1955,7 +1955,7 @@ Item {
 
                 Text {
                   width: parent.width
-                  text: "Pin an application to a device so it is routed there every time it starts, even before the device or application exists. Renaming, favorites, and hidden devices apply everywhere."
+                  text: "Pin an application to a device and it is routed there every time it starts, whenever the device is present. Rules keep working while the application or device is offline."
                   color: Qt.darker(root.foreground, 1.35)
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -2186,9 +2186,18 @@ Item {
                 }
 
                 PanelSectionHeader {
-                  text: "DEVICES"
+                  text: "MANAGE DEVICES"
                   foreground: root.foreground
                   fontFamily: root.fontFamily
+                }
+
+                Text {
+                  width: parent.width
+                  text: "Give a device a custom name, favorite it to sort it first, or hide it everywhere."
+                  color: Qt.darker(root.foreground, 1.35)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
                 }
 
                 Repeater {
@@ -2205,6 +2214,7 @@ Item {
                     hidden: modelData ? modelData.hidden === true : false
                     editingAlias: root.aliasEditingDevice === managedDeviceDelegate.deviceName
                       && managedDeviceDelegate.deviceName !== ""
+                    aliasValue: root.deviceAliasFor(managedDeviceDelegate.deviceName)
                     busy: root.routingMutation || routingWriteProc.running
                     hasCursor: root.cursorActive && root.activeTab === 4
                       && root.selectedIndex === 2 + root.audioRules.appRules.length + managedDeviceDelegate.index
