@@ -14,6 +14,7 @@ CursorSurface {
   required property var bar
   required property string preferredName
   required property bool defaultSetBusy
+  required property string label
 
   signal claimed(string section, int index)
   signal activated(var node)
@@ -43,7 +44,7 @@ CursorSurface {
     }
 
     Text {
-      text: Model.nodeLabel(root.node)
+      text: root.label
       color: root.bar.foreground
       font.family: root.bar.fontFamily
       font.pixelSize: Style.font.body

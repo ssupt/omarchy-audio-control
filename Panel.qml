@@ -41,6 +41,11 @@ Panel {
     if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
     return configHome + "/omarchy/audio-scenes.json"
   }
+  readonly property string rulesPath: {
+    var configHome = Quickshell.env("XDG_CONFIG_HOME")
+    if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
+    return configHome + "/omarchy/audio-rules.json"
+  }
   readonly property string scriptsDir: {
     var url = String(Qt.resolvedUrl("scripts/"))
     return decodeURIComponent(url.replace(/^file:\/\//, ""))
@@ -51,6 +56,8 @@ Panel {
   property bool notificationsAvailable: false
   property var audioScenes: []
   property bool scenesLoaded: false
+  property var audioRules: Model.parseAudioRules("")
+  property bool rulesLoaded: false
   property string sceneFeedback: ""
   property bool sceneFeedbackIsError: false
   property var observedRecordingLabels: []
@@ -63,7 +70,7 @@ Panel {
     var list = []
     for (var i = 0; i < nodes.length; i++) {
       var n = nodes[i]
-      if (n && n.isSink && !n.isStream) list.push(n)
+      if (n && n.isSink && !n.isStream && !deviceHidden(n.name)) list.push(n)
     }
     return list
   }
@@ -75,6 +82,7 @@ Panel {
       if (n && !n.isSink && !n.isStream && isAudioSource(n)) {
         var name = String(n.name || "").toLowerCase()
         if (name === "quickshell") continue
+        if (deviceHidden(n.name)) continue
         list.push(n)
       }
     }
@@ -165,13 +173,17 @@ Panel {
     for (var i = 0; i < candidateSinks.length; i++)
       if (sinkAvailable(candidateSinks[i])) list.push(candidateSinks[i])
     if (sink && list.indexOf(sink) < 0) list.unshift(sink)
-    return list
+    var sorted = list.slice()
+    sorted.sort(Model.deviceSortComparator(audioRules.devices.favorites))
+    return sorted
   }
 
   readonly property var rawAudioSources: {
     var list = candidateSources.slice()
     if (source && list.indexOf(source) < 0) list.unshift(source)
-    return list
+    var sorted = list.slice()
+    sorted.sort(Model.deviceSortComparator(audioRules.devices.favorites))
+    return sorted
   }
 
   readonly property var audioSinks: rawAudioSinks.length > 0 ? rawAudioSinks : cachedAudioSinks
@@ -547,10 +559,18 @@ Panel {
   }
 
   // Clamp / repair the cursor whenever any list refreshes underneath us.
+  // Stream changes also re-run routing rules so a pinned application is
+  // routed as soon as it appears, panel open or not.
   onAudioSinksChanged: scheduleDisplayAudioModelRefresh()
   onAudioSourcesChanged: scheduleDisplayAudioModelRefresh()
-  onAudioStreamsChanged: scheduleDisplayAudioModelRefresh()
-  onRecordingStreamsChanged: scheduleDisplayAudioModelRefresh()
+  onAudioStreamsChanged: {
+    scheduleDisplayAudioModelRefresh()
+    Qt.callLater(enforceRoutingRules)
+  }
+  onRecordingStreamsChanged: {
+    scheduleDisplayAudioModelRefresh()
+    Qt.callLater(enforceRoutingRules)
+  }
 
   function listSnapshot(list) {
     return Model.listSnapshot(list)
@@ -660,6 +680,23 @@ Panel {
     var route = Model.parseStreamOutputOption(optionValue)
     if (streamSerialValue === "" || route.sink === "" || route.mode === "" || streamRouteSetProc.running) return
 
+    // Keep the offline rules layer in sync: when the edited application has
+    // a stored rule, a manual choice rewrites that rule instead of being
+    // fought over by enforcement on the next appearance.
+    lastManualRouteSync = null
+    var existingRule = Model.findAppRule(audioRules.appRules, direction, rawStreamLabel(node))
+    if (existingRule) {
+      var targetName = ""
+      if (route.mode === "override")
+        targetName = deviceNameForSerial(direction === "recording" ? audioSources : audioSinks, route.sink)
+      if (route.mode !== "override" || targetName !== "")
+        lastManualRouteSync = {
+          app: existingRule.app,
+          direction: direction,
+          target: route.mode === "override" ? targetName : ""
+        }
+    }
+
     var routes = direction === "recording" ? recordingStreamRoutes : streamRoutes
     var next = ({})
     for (var key in routes) next[key] = routes[key]
@@ -681,6 +718,64 @@ Panel {
       route.mode
     ]
     streamRouteSetProc.running = true
+  }
+
+  property var lastManualRouteSync: null
+
+  function deviceNameForSerial(list, serial) {
+    for (var i = 0; i < list.length; i++) {
+      var node = list[i]
+      if (node && Model.nodeSerial(node) === String(serial)) return String(node.name || "")
+    }
+    return ""
+  }
+
+  // Enforcement runs outside the panel too: rules matter most when an
+  // application starts while the mixer is closed. A per-stream cache keeps
+  // a satisfied rule from issuing repeated moves.
+  readonly property var enforceableGroups: [
+    { nodes: audioStreams, direction: "playback", devices: audioSinks },
+    { nodes: recordingStreams, direction: "recording", devices: audioSources }
+  ]
+  property var enforcedStreamRoutes: ({})
+
+  function enforceRoutingRules() {
+    if (!rulesLoaded || streamRouteSetProc.running || pendingStreamRoute || streamOutputMenuOpen) return
+    for (var g = 0; g < enforceableGroups.length; g++) {
+      var group = enforceableGroups[g]
+      for (var i = 0; i < group.nodes.length; i++) {
+        var node = group.nodes[i]
+        if (!node || !node.audio || node.ready !== true) continue
+        var serial = Model.nodeSerial(node)
+        if (serial === "") continue
+        var rule = Model.findAppRule(audioRules.appRules, group.direction, rawStreamLabel(node))
+        if (!rule) continue
+        var cacheKey = group.direction + ":" + serial
+        if (enforcedStreamRoutes[cacheKey] === rule.target) continue
+
+        var targetNode = null
+        for (var d = 0; d < group.devices.length; d++) {
+          if (group.devices[d] && group.devices[d].name === rule.target) {
+            targetNode = group.devices[d]
+            break
+          }
+        }
+        // An absent target falls back to WirePlumber's own choice; the rule
+        // is enforced the moment the device appears.
+        if (!targetNode || targetNode.ready !== true) continue
+
+        enforcedStreamRoutes[cacheKey] = rule.target
+        streamRouteSetProc.command = [
+          pluginScript("audio-stream-route-set"),
+          group.direction,
+          serial,
+          Model.nodeSerial(targetNode),
+          "override"
+        ]
+        streamRouteSetProc.running = true
+        return
+      }
+    }
   }
 
   // Scroll the mixer back to the top when it reopens. Following the keyboard
@@ -848,7 +943,21 @@ Panel {
     return Model.friendlyDeviceLabel(text)
   }
 
+  function deviceAlias(name) {
+    var key = String(name || "")
+    if (key === "") return ""
+    return audioRules.devices.aliases[key] || ""
+  }
+
+  function deviceHidden(name) {
+    return audioRules.devices.hidden.indexOf(String(name || "")) !== -1
+  }
+
   function nodeLabel(node) {
+    if (node && node.name) {
+      var alias = deviceAlias(node.name)
+      if (alias !== "") return alias
+    }
     return Model.nodeLabel(node)
   }
 
@@ -983,6 +1092,23 @@ Panel {
     onFileChanged: reload()
   }
 
+  FileView {
+    path: root.rulesPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: function() {
+      root.audioRules = Model.parseAudioRules(text())
+      root.rulesLoaded = true
+      Qt.callLater(root.enforceRoutingRules)
+    }
+    onLoadFailed: function() {
+      root.audioRules = Model.parseAudioRules("")
+      root.rulesLoaded = true
+      Qt.callLater(root.enforceRoutingRules)
+    }
+    onFileChanged: reload()
+  }
+
   AudioSceneController {
     id: sceneController
     scriptsDir: root.scriptsDir
@@ -1086,7 +1212,24 @@ Panel {
       if (exitCode !== 0) root.streamRouteSetError = "Could not change the application route"
       else root.streamRouteSetError = ""
       root.pendingStreamRoute = null
+
+      // Persist manual edits of ruled applications; unruled applications
+      // keep WirePlumber's native per-stream restoration.
+      var sync = root.lastManualRouteSync
+      root.lastManualRouteSync = null
+      if (exitCode === 0 && sync) {
+        var args = sync.target === ""
+          ? [root.pluginScript("audio-app-rules"), "del-app", sync.app, sync.direction]
+          : [root.pluginScript("audio-app-rules"), "set-app", sync.app, sync.direction, sync.target]
+        Quickshell.execDetached(args)
+      }
+
+      // A failed enforcement would otherwise stay cached as satisfied.
+      if (exitCode !== 0 && !root.pendingStreamRoute) {
+        for (var key in root.enforcedStreamRoutes) delete root.enforcedStreamRoutes[key]
+      }
       streamRouteRefreshTimer.restart()
+      Qt.callLater(root.enforceRoutingRules)
     }
   }
 
@@ -1521,6 +1664,7 @@ Panel {
                 rowIndex: index
                 bar: root.bar
                 preferredName: root.preferredOutputName
+                label: root.nodeLabel(sinkDelegate.node)
                 defaultSetBusy: defaultSinkProc.running
                 hasCursor: root.cursorActive && root.focusSection === "output"
                   && root.selectedIndex === sinkDelegate.rowIndex
@@ -1656,6 +1800,7 @@ Panel {
                 rowIndex: index
                 bar: root.bar
                 preferredName: root.preferredInputName
+                label: root.nodeLabel(sourceDelegate.node)
                 defaultSetBusy: defaultSourceProc.running
                 hasCursor: root.cursorActive && root.focusSection === "input"
                   && root.selectedIndex === sourceDelegate.rowIndex

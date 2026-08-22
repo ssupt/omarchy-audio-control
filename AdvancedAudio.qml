@@ -41,6 +41,12 @@ Item {
   property string microphoneTestError: ""
   property var audioScenes: []
   property bool scenesLoaded: false
+  property var audioRules: Model.parseAudioRules("")
+  property string newRuleApp: ""
+  property string newRuleDevice: ""
+  property string aliasEditingDevice: ""
+  property bool routingMutation: false
+  property string routingError: ""
   property var pendingSceneSave: null
   property string sceneStatus: ""
   property bool sceneStatusIsError: false
@@ -57,7 +63,7 @@ Item {
     for (var i = 0; i < errors.length; i++) if (errors[i] !== "") return errors[i]
     return ""
   }
-  property int activeTab: 0  // 0 = devices, 1 = Bluetooth, 2 = policy, 3 = scenes
+  property int activeTab: 0  // 0 = devices, 1 = Bluetooth, 2 = policy, 3 = scenes, 4 = routing
   property bool cursorActive: false
   property int selectedIndex: 0
   property bool profileMenuOpen: false
@@ -169,11 +175,13 @@ Item {
     + availablePolicyExperimental.length
   readonly property int captureNotificationIndex: wireplumberPolicyItemCount
   readonly property int policyItemCount: wireplumberPolicyItemCount + 1
-  readonly property int itemCount: activeTab === 3
-    ? 1 + audioScenes.length
-    : (activeTab === 0
-      ? deviceItemCount + (inputDevice ? 1 : 0)
-      : (activeTab === 1 ? 2 + bluetoothCards.length : policyItemCount))
+  readonly property int itemCount: activeTab === 4
+    ? 2 + audioRules.appRules.length + managedDevices.length
+    : (activeTab === 3
+      ? 1 + audioScenes.length
+      : (activeTab === 0
+        ? deviceItemCount + (inputDevice ? 1 : 0)
+        : (activeTab === 1 ? 2 + bluetoothCards.length : policyItemCount)))
   readonly property bool audioMutationBusy: profileSetProc.running || portSetProc.running
     || microphoneTestProc.running || microphoneTestStopProc.running
   readonly property real microphoneTestLevel: inputDevice && inputDevice.audio
@@ -195,6 +203,11 @@ Item {
     if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
     return configHome + "/omarchy/audio-scenes.json"
   }
+  readonly property string rulesPath: {
+    var configHome = Quickshell.env("XDG_CONFIG_HOME")
+    if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
+    return configHome + "/omarchy/audio-rules.json"
+  }
   readonly property string scriptsDir: {
     var url = String(Qt.resolvedUrl("scripts/"))
     return decodeURIComponent(url.replace(/^file:\/\//, ""))
@@ -214,7 +227,8 @@ Item {
     try { payload = JSON.parse(payloadJson || "{}") } catch (e) { payload = ({}) }
     activeTab = payload.tab === "bluetooth" ? 1
       : payload.tab === "policy" ? 2
-      : payload.tab === "scenes" ? 3 : 0
+      : payload.tab === "scenes" ? 3
+      : payload.tab === "routing" ? 4 : 0
     openRequested = true
     closingFromHost = false
     cursorActive = false
@@ -225,6 +239,7 @@ Item {
     bluetoothProfilePreferenceLoaded = false
     policySettingsLoaded = false
     discardMicrophoneTest()
+    cancelAliasEdit()
     if (windowRuleReady) showOnCurrentWorkspace()
     else if (!windowRuleProc.running) windowRuleProc.running = true
   }
@@ -542,7 +557,9 @@ Item {
 
   function closeProfileMenus() {
     if (bluetoothPreferenceRow) bluetoothPreferenceRow.closePreferenceMenu()
-    var repeaters = [deviceProfileRepeater, bluetoothProfileRepeater, audioPortRepeater]
+    if (newRuleAppDropdown) newRuleAppDropdown.close()
+    if (newRuleDeviceDropdown) newRuleDeviceDropdown.close()
+    var repeaters = [deviceProfileRepeater, bluetoothProfileRepeater, audioPortRepeater, routingRuleRepeater]
     for (var r = 0; r < repeaters.length; r++) {
       var repeater = repeaters[r]
       if (!repeater) continue
@@ -551,14 +568,16 @@ Item {
         if (!row) continue
         if (typeof row.closeProfileMenu === "function") row.closeProfileMenu()
         if (typeof row.closePortMenu === "function") row.closePortMenu()
+        if (typeof row.closeTargetMenu === "function") row.closeTargetMenu()
       }
     }
   }
 
   function selectTab(index) {
-    var next = Math.max(0, Math.min(3, index))
+    var next = Math.max(0, Math.min(4, index))
     if (next === activeTab) return
     closeProfileMenus()
+    cancelAliasEdit()
     activeTab = next
     selectedIndex = 0
     clampCursor()
@@ -567,7 +586,7 @@ Item {
   }
 
   function switchTab(direction) {
-    selectTab((activeTab + (direction < 0 ? -1 : 1) + 4) % 4)
+    selectTab((activeTab + (direction < 0 ? -1 : 1) + 5) % 5)
   }
 
   function setCursor(index) {
@@ -577,6 +596,18 @@ Item {
 
   function activateCursor() {
     if (!cursorActive || itemCount === 0) return
+    if (activeTab === 4) {
+      if (selectedIndex === 0) newRuleAppRow.toggleAppMenu()
+      else if (selectedIndex === 1) newRuleDeviceRow.toggleDeviceMenu()
+      else if (selectedIndex < 2 + audioRules.appRules.length) {
+        var ruleRow = routingRuleRepeater.itemAt(selectedIndex - 2)
+        if (ruleRow) ruleRow.toggleTargetMenu()
+      } else {
+        var deviceIndex = selectedIndex - 2 - audioRules.appRules.length
+        toggleDeviceFavorite(managedDevices[deviceIndex].name, managedDevices[deviceIndex].favorite)
+      }
+      return
+    }
     if (activeTab === 3) {
       if (selectedIndex === 0) saveCurrentScene()
       else applySceneAt(selectedIndex - 1)
@@ -723,6 +754,36 @@ Item {
     onFileChanged: reload()
   }
 
+  FileView {
+    path: root.rulesPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: function() {
+      root.audioRules = Model.parseAudioRules(text())
+      root.clampCursor()
+    }
+    onLoadFailed: function() {
+      root.audioRules = Model.parseAudioRules("")
+      root.clampCursor()
+    }
+    onFileChanged: reload()
+  }
+
+  Process {
+    id: routingWriteProc
+    onExited: function(exitCode) {
+      root.routingMutation = false
+      if (exitCode !== 0) root.showSceneStatus("Could not update the audio rules", true)
+    }
+  }
+
+  function runRuleWrite(args) {
+    if (routingMutation || routingWriteProc.running) return
+    routingMutation = true
+    routingWriteProc.command = [root.scriptsDir + "/audio-app-rules"].concat(args)
+    routingWriteProc.running = true
+  }
+
   AudioSceneController {
     id: sceneController
     scriptsDir: root.scriptsDir
@@ -800,8 +861,189 @@ Item {
     sceneStoreProc.running = true
   }
 
+  // ---- Routing tab helpers ----
+
+  function deviceAliasFor(name) {
+    return audioRules.devices.aliases[String(name || "")] || ""
+  }
+
+  function ruleDeviceLabel(name) {
+    if (!name) return ""
+    var alias = deviceAliasFor(name)
+    if (alias !== "") return alias
+    for (var i = 0; i < candidateSinks.length; i++)
+      if (candidateSinks[i] && candidateSinks[i].name === name) return Model.nodeLabel(candidateSinks[i])
+    for (var j = 0; j < candidateSources.length; j++)
+      if (candidateSources[j] && candidateSources[j].name === name) return Model.nodeLabel(candidateSources[j])
+    return name
+  }
+
+  function ruleTargetLive(name) {
+    if (!name) return false
+    for (var i = 0; i < candidateSinks.length; i++)
+      if (candidateSinks[i] && candidateSinks[i].name === name) return true
+    for (var j = 0; j < candidateSources.length; j++)
+      if (candidateSources[j] && candidateSources[j].name === name) return true
+    return false
+  }
+
+  function ruleTargetOptions(storedTarget) {
+    var options = [{ value: "", label: "Follow default output" }]
+    for (var i = 0; i < candidateSinks.length; i++) {
+      var sink = candidateSinks[i]
+      if (sink && sink.name && sink.name !== storedTarget)
+        options.push({ value: String(sink.name), label: ruleDeviceLabel(String(sink.name)) })
+    }
+    if (storedTarget !== "")
+      options.push({ value: storedTarget, label: ruleDeviceLabel(storedTarget) })
+    return options
+  }
+
+  function recordingRuleTargetOptions(storedTarget) {
+    var options = [{ value: "", label: "Follow default input" }]
+    for (var i = 0; i < candidateSources.length; i++) {
+      var source = candidateSources[i]
+      if (source && source.name && source.name !== storedTarget)
+        options.push({ value: String(source.name), label: ruleDeviceLabel(String(source.name)) })
+    }
+    if (storedTarget !== "")
+      options.push({ value: storedTarget, label: ruleDeviceLabel(storedTarget) })
+    return options
+  }
+
+  readonly property var managedDevices: {
+    var out = []
+    var seen = ({})
+    function push(name, liveLabel) {
+      if (!name || seen[name]) return
+      seen[name] = true
+      out.push({
+        name: String(name),
+        title: deviceAliasFor(name) !== "" ? deviceAliasFor(name) : liveLabel,
+        favorite: audioRules.devices.favorites.indexOf(name) !== -1,
+        hidden: audioRules.devices.hidden.indexOf(name) !== -1
+      })
+    }
+    for (var i = 0; i < candidateSinks.length; i++)
+      push(candidateSinks[i] ? candidateSinks[i].name : "", Model.nodeLabel(candidateSinks[i]))
+    for (var j = 0; j < candidateSources.length; j++)
+      push(candidateSources[j] ? candidateSources[j].name : "", Model.nodeLabel(candidateSources[j]))
+    var storedNames = []
+    for (var f = 0; f < audioRules.devices.favorites.length; f++) storedNames.push(audioRules.devices.favorites[f])
+    for (var h = 0; h < audioRules.devices.hidden.length; h++) storedNames.push(audioRules.devices.hidden[h])
+    for (var alias in audioRules.devices.aliases) storedNames.push(alias)
+    for (var s = 0; s < storedNames.length; s++) push(storedNames[s], storedNames[s])
+    // Favorites first, then visible devices, then hidden ones.
+    out.sort(function(a, b) {
+      if (a.favorite !== b.favorite) return a.favorite ? -1 : 1
+      if (a.hidden !== b.hidden) return a.hidden ? 1 : -1
+      return 0
+    })
+    return out
+  }
+
+  readonly property var newRuleAppOptions: {
+    var options = []
+    var seen = ({})
+    function consider(node) {
+      if (!node || !node.audio || node.ready !== true) return
+      var key = String(Model.rawStreamLabel(node) || "").trim()
+      if (key === "" || seen[key.toLowerCase()]) return
+      seen[key.toLowerCase()] = true
+      options.push(key)
+    }
+    for (var i = 0; i < candidateStreams.length; i++) consider(candidateStreams[i])
+    for (var j = 0; j < candidateRecordingStreams.length; j++) consider(candidateRecordingStreams[j])
+    var ruled = ({})
+    for (var r = 0; r < audioRules.appRules.length; r++) ruled[audioRules.appRules[r].app] = true
+    var filtered = []
+    for (var o = 0; o < options.length; o++)
+      if (!ruled[options[o].toLowerCase()]) filtered.push(options[o])
+    return filtered
+  }
+
+  function cancelAliasEdit() {
+    aliasEditingDevice = ""
+  }
+
+  function commitAliasEdit(name, text) {
+    cancelAliasEdit()
+    var trimmed = String(text || "").trim()
+    runRuleWrite(["set-alias", name, trimmed])
+  }
+
+  function toggleDeviceFavorite(name, currentFavorite) {
+    runRuleWrite(["set-flag", name, "favorite", currentFavorite ? "false" : "true"])
+  }
+
+  function toggleDeviceHidden(name, currentHidden) {
+    runRuleWrite(["set-flag", name, "hidden", currentHidden ? "false" : "true"])
+  }
+
+  function deleteAppRule(appKey, direction) {
+    runRuleWrite(["del-app", appKey, direction])
+  }
+
+  function changeAppRuleTarget(appKey, direction, targetName) {
+    if (targetName === "") runRuleWrite(["del-app", appKey, direction])
+    else runRuleWrite(["set-app", appKey, direction, targetName])
+  }
+
   PwObjectTracker { objects: root.outputDevice ? [root.outputDevice] : [] }
   PwObjectTracker { objects: root.inputDevice ? [root.inputDevice] : [] }
+
+  // Live endpoint and stream lists power the Routing tab's pickers. The same
+  // instrumentation filtering as the quick mixer keeps test streams out.
+  readonly property var pipewireNodes: Pipewire.nodes ? Pipewire.nodes.values : []
+  readonly property var candidateSinks: {
+    var list = []
+    for (var i = 0; i < pipewireNodes.length; i++) {
+      var n = pipewireNodes[i]
+      if (n && n.isSink && !n.isStream) list.push(n)
+    }
+    return list
+  }
+  readonly property var candidateSources: {
+    var list = []
+    for (var j = 0; j < pipewireNodes.length; j++) {
+      var s = pipewireNodes[j]
+      if (s && !s.isSink && !s.isStream && Model.isAudioSource(s)) {
+        var lowerName = String(s.name || "").toLowerCase()
+        if (lowerName === "quickshell" || lowerName.indexOf("omarchy_audio_test") === 0) continue
+        list.push(s)
+      }
+    }
+    return list
+  }
+  readonly property var candidateStreams: {
+    var list = []
+    for (var k = 0; k < pipewireNodes.length; k++) {
+      var p = pipewireNodes[k]
+      if (!p || !p.isStream || !Model.isPlaybackStream(p)) continue
+      if (isInstrumentationNode(p.name)) continue
+      list.push(p)
+    }
+    return list
+  }
+  readonly property var candidateRecordingStreams: {
+    var list = []
+    for (var m = 0; m < pipewireNodes.length; m++) {
+      var r = pipewireNodes[m]
+      if (!r || !Model.isRecordingStream(r)) continue
+      if (isInstrumentationNode(r.name)) continue
+      list.push(r)
+    }
+    return list
+  }
+  function isInstrumentationNode(name) {
+    var lower = String(name || "").toLowerCase()
+    return lower === "quickshell" || lower.indexOf("omarchy_audio_test") === 0
+  }
+
+  PwObjectTracker { objects: root.candidateSinks }
+  PwObjectTracker { objects: root.candidateSources }
+  PwObjectTracker { objects: root.candidateStreams }
+  PwObjectTracker { objects: root.candidateRecordingStreams }
 
   PwNodePeakMonitor {
     id: microphoneTestPeakMonitor
@@ -1050,7 +1292,7 @@ Item {
       PanelKeyCatcher {
         id: keyCatcher
         anchors.fill: parent
-        blocked: root.profileMenuOpen
+        blocked: root.profileMenuOpen || root.aliasEditingDevice !== ""
           onMoveRequested: function(dx, dy) {
             if (dx !== 0) {
               root.cursorActive = true
@@ -1119,11 +1361,13 @@ Item {
                 { value: "devices", label: "Devices", icon: "󰓃" },
                 { value: "bluetooth", label: "Bluetooth", icon: "󰂯" },
                 { value: "policy", label: "Policy", icon: "󰒃" },
-                { value: "scenes", label: "Scenes", icon: "󰌨" }
+                { value: "scenes", label: "Scenes", icon: "󰌨" },
+                { value: "routing", label: "Routing", icon: "󰘮" }
               ]
               value: root.activeTab === 0 ? "devices"
                 : root.activeTab === 1 ? "bluetooth"
-                : root.activeTab === 2 ? "policy" : "scenes"
+                : root.activeTab === 2 ? "policy"
+                : root.activeTab === 3 ? "scenes" : "routing"
               focusable: false
               foreground: root.foreground
               background: root.background
@@ -1131,7 +1375,8 @@ Item {
               onChanged: function(value) {
                 root.selectTab(value === "bluetooth" ? 1
                   : value === "policy" ? 2
-                  : value === "scenes" ? 3 : 0)
+                  : value === "scenes" ? 3
+                  : value === "routing" ? 4 : 0)
               }
             }
           }
@@ -1691,6 +1936,295 @@ Item {
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
                   wrapMode: Text.WordWrap
+                }
+
+                Text {
+                  visible: root.sceneStatus !== ""
+                  width: parent.width
+                  text: root.sceneStatus
+                  color: root.sceneStatusIsError ? root.urgent : root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+              }
+
+              Column {
+                visible: root.activeTab === 4
+                width: parent.width
+                spacing: Style.space(8)
+
+                Text {
+                  width: parent.width
+                  text: "Pin an application to a device so it is routed there every time it starts, even before the device or application exists. Renaming, favorites, and hidden devices apply everywhere."
+                  color: Qt.darker(root.foreground, 1.35)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+
+                CursorSurface {
+                  id: newRuleAppRow
+                  width: parent.width
+                  implicitHeight: Math.max(newAppLabels.implicitHeight, newAppDropdown.implicitHeight) + Style.space(18)
+                  hasCursor: root.cursorActive && root.activeTab === 4 && root.selectedIndex === 0
+                  onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(newRuleAppRow)
+                  foreground: root.foreground
+                  fill: root.hoverFill
+                  bordered: true
+
+                  function toggleAppMenu() { if (newAppDropdown.enabled) newAppDropdown.toggle() }
+                  function closeAppMenu() { newAppDropdown.close() }
+
+                  Row {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: Style.space(12)
+                    anchors.rightMargin: Style.space(12)
+                    spacing: Style.space(16)
+
+                    Column {
+                      id: newAppLabels
+                      width: Math.max(Style.space(180), parent.width * 0.4)
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(3)
+
+                      Text {
+                        width: parent.width
+                        text: "Pin application"
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        font.bold: true
+                        elide: Text.ElideRight
+                      }
+
+                      Text {
+                        width: parent.width
+                        text: root.newRuleApp !== "" ? root.newRuleApp : "Pick a running application"
+                        color: Qt.darker(root.foreground, 1.35)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        elide: Text.ElideRight
+                      }
+                    }
+
+                    AudioDropdown {
+                      id: newAppDropdown
+                      width: parent.width - newAppLabels.width - parent.spacing
+                      showLabel: false
+                      popupDirection: "down"
+                      value: root.newRuleApp
+                      options: {
+                        var arr = []
+                        for (var i = 0; i < root.newRuleAppOptions.length; i++)
+                          arr.push({ value: root.newRuleAppOptions[i], label: root.newRuleAppOptions[i] })
+                        return arr
+                      }
+                      hasCursor: newRuleAppRow.hasCursor
+                      enabled: root.newRuleAppOptions.length > 0
+                      opacity: enabled ? 1 : 0.6
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      anchors.verticalCenter: parent.verticalCenter
+
+                      onHovered: function(on) { if (on) root.setCursor(0) }
+                      onChanged: function(value) { root.newRuleApp = value }
+                      onPopupOpenChanged: {
+                        root.profileMenuOpen = popupOpen
+                        if (!popupOpen) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+                      }
+                    }
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.NoButton
+                    hoverEnabled: true
+                    onContainsMouseChanged: if (containsMouse) root.setCursor(0)
+                  }
+                }
+
+                CursorSurface {
+                  id: newRuleDeviceRow
+                  width: parent.width
+                  implicitHeight: Math.max(newDeviceLabels.implicitHeight, newDeviceDropdown.implicitHeight) + Style.space(18)
+                  hasCursor: root.cursorActive && root.activeTab === 4 && root.selectedIndex === 1
+                  onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(newRuleDeviceRow)
+                  foreground: root.foreground
+                  fill: root.hoverFill
+                  bordered: true
+
+                  function toggleDeviceMenu() { if (newDeviceDropdown.enabled) newDeviceDropdown.toggle() }
+                  function closeDeviceMenu() { newDeviceDropdown.close() }
+
+                  Row {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: Style.space(12)
+                    anchors.rightMargin: Style.space(12)
+                    spacing: Style.space(16)
+
+                    Column {
+                      id: newDeviceLabels
+                      width: Math.max(Style.space(180), parent.width * 0.4)
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(3)
+
+                      Text {
+                        width: parent.width
+                        text: "Route it to"
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        font.bold: true
+                        elide: Text.ElideRight
+                      }
+
+                      Text {
+                        width: parent.width
+                        text: root.newRuleDevice !== "" ? root.ruleDeviceLabel(root.newRuleDevice) : "Outputs pin playback, inputs pin recording."
+                        color: Qt.darker(root.foreground, 1.35)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        elide: Text.ElideRight
+                      }
+                    }
+
+                    AudioDropdown {
+                      id: newDeviceDropdown
+                      width: parent.width - newDeviceLabels.width - parent.spacing
+                      showLabel: false
+                      popupDirection: "down"
+                      value: root.newRuleDevice
+                      options: {
+                        var arr = []
+                        for (var i = 0; i < root.candidateSinks.length; i++) {
+                          var sinkName = String(root.candidateSinks[i] ? root.candidateSinks[i].name || "" : "")
+                          if (sinkName !== "") arr.push({ value: sinkName, label: root.ruleDeviceLabel(sinkName) })
+                        }
+                        for (var j = 0; j < root.candidateSources.length; j++) {
+                          var sourceName = String(root.candidateSources[j] ? root.candidateSources[j].name || "" : "")
+                          if (sourceName !== "") arr.push({ value: sourceName, label: root.ruleDeviceLabel(sourceName) })
+                        }
+                        return arr
+                      }
+                      hasCursor: newRuleDeviceRow.hasCursor
+                      enabled: root.newRuleApp !== ""
+                      opacity: enabled ? 1 : 0.6
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      anchors.verticalCenter: parent.verticalCenter
+
+                      onHovered: function(on) { if (on) root.setCursor(1) }
+                      onChanged: function(value) {
+                        if (value === "") return
+                        var direction = "recording"
+                        for (var s = 0; s < root.candidateSinks.length; s++)
+                          if (root.candidateSinks[s] && root.candidateSinks[s].name === value) direction = "playback"
+                        root.runRuleWrite(["set-app", root.newRuleApp, direction, value])
+                        root.showSceneStatus("Pinned '" + root.newRuleApp + "'", false)
+                        root.newRuleApp = ""
+                        root.newRuleDevice = ""
+                      }
+                      onPopupOpenChanged: {
+                        root.profileMenuOpen = popupOpen
+                        if (!popupOpen) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+                      }
+                    }
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.NoButton
+                    hoverEnabled: true
+                    onContainsMouseChanged: if (containsMouse) root.setCursor(1)
+                  }
+                }
+
+                Repeater {
+                  id: routingRuleRepeater
+                  model: root.audioRules.appRules
+
+                  AudioAppRuleRow {
+                    id: routingRuleDelegate
+                    required property var modelData
+                    required property int index
+                    width: parent.width
+                    appLabel: modelData ? String(modelData.app || "") : ""
+                    direction: modelData ? String(modelData.direction || "playback") : "playback"
+                    targetLabel: root.ruleDeviceLabel(modelData ? String(modelData.target || "") : "")
+                    targetAvailable: root.ruleTargetLive(modelData ? String(modelData.target || "") : "")
+                    currentValue: modelData ? String(modelData.target || "") : ""
+                    options: routingRuleDelegate.direction === "recording"
+                      ? root.recordingRuleTargetOptions(routingRuleDelegate.currentValue)
+                      : root.ruleTargetOptions(routingRuleDelegate.currentValue)
+                    menuEnabled: !root.routingMutation && !routingWriteProc.running
+                    hasCursor: root.cursorActive && root.activeTab === 4
+                      && root.selectedIndex === 2 + routingRuleDelegate.index
+                    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(routingRuleDelegate)
+                    foreground: root.foreground
+                    fill: root.hoverFill
+                    urgent: root.urgent
+                    fontFamily: root.fontFamily
+                    onCursorRequested: root.setCursor(2 + routingRuleDelegate.index)
+                    onMenuToggled: function(open) {
+                      root.profileMenuOpen = open
+                      if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+                    }
+                    onTargetChosen: function(value) {
+                      root.changeAppRuleTarget(
+                        routingRuleDelegate.modelData.app,
+                        routingRuleDelegate.modelData.direction,
+                        value)
+                    }
+                    onDeleted: root.deleteAppRule(
+                      routingRuleDelegate.modelData.app,
+                      routingRuleDelegate.modelData.direction)
+                  }
+                }
+
+                PanelSectionHeader {
+                  text: "DEVICES"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Repeater {
+                  model: root.managedDevices
+
+                  AudioDevicePrefRow {
+                    id: managedDeviceDelegate
+                    required property var modelData
+                    required property int index
+                    width: parent.width
+                    deviceName: modelData ? String(modelData.name || "") : ""
+                    title: modelData ? String(modelData.title || "") : ""
+                    favorite: modelData ? modelData.favorite === true : false
+                    hidden: modelData ? modelData.hidden === true : false
+                    editingAlias: root.aliasEditingDevice === managedDeviceDelegate.deviceName
+                      && managedDeviceDelegate.deviceName !== ""
+                    busy: root.routingMutation || routingWriteProc.running
+                    hasCursor: root.cursorActive && root.activeTab === 4
+                      && root.selectedIndex === 2 + root.audioRules.appRules.length + managedDeviceDelegate.index
+                    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(managedDeviceDelegate)
+                    foreground: root.foreground
+                    fill: root.hoverFill
+                    urgent: root.urgent
+                    fontFamily: root.fontFamily
+                    onCursorRequested: root.setCursor(
+                      2 + root.audioRules.appRules.length + managedDeviceDelegate.index)
+                    onAliasEditStarted: root.aliasEditingDevice = managedDeviceDelegate.deviceName
+                    onAliasCommitted: function(text) {
+                      root.commitAliasEdit(managedDeviceDelegate.deviceName, text)
+                    }
+                    onFavoriteToggled: root.toggleDeviceFavorite(
+                      managedDeviceDelegate.deviceName, managedDeviceDelegate.favorite)
+                    onHiddenToggled: root.toggleDeviceHidden(
+                      managedDeviceDelegate.deviceName, managedDeviceDelegate.hidden)
+                  }
                 }
 
                 Text {
