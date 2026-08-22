@@ -1,0 +1,125 @@
+#!/bin/bash
+
+# omarchy:summary=Manage offline application routing rules and device preferences
+# omarchy:group=audio
+# omarchy:args=[set-app <app> <playback|recording> <target> | del-app <app> <playback|recording> | set-alias <node> <label> | set-flag <node> <favorite|hidden> <true|false>]
+
+set -euo pipefail
+
+rules_file=${OMARCHY_AUDIO_RULES_FILE:-${XDG_CONFIG_HOME:-${HOME:?}/.config}/omarchy/audio-rules.json}
+action=${1:-}
+
+usage() {
+  echo "Usage: audio-app-rules set-app <app> <playback|recording> <target>" >&2
+  echo "       audio-app-rules del-app <app> <playback|recording>" >&2
+  echo "       audio-app-rules set-alias <node> <label>" >&2
+  echo "       audio-app-rules set-flag <node> <favorite|hidden> <true|false>" >&2
+  exit 1
+}
+
+read_rules() {
+  if [[ ! -s $rules_file ]]; then
+    printf '%s\n' '{"version":1,"appRules":[],"devices":{"aliases":{},"favorites":[],"hidden":[]}}'
+  elif jq -e 'type == "object"' "$rules_file" >/dev/null 2>&1; then
+    jq -c '
+      .version = 1
+      | .appRules = (if (.appRules | type) == "array" then .appRules else [] end)
+      | .devices = (if (.devices | type) == "object" then .devices else {} end)
+    ' "$rules_file"
+  else
+    echo "Audio rules contain invalid JSON; refusing to overwrite them" >&2
+    return 1
+  fi
+}
+
+write_rules() {
+  local filter=$1
+  shift
+
+  local rules_dir temporary_file
+  rules_dir=$(dirname -- "$rules_file")
+  mkdir -p -- "$rules_dir"
+  exec 9>"${rules_file}.lock"
+  flock 9
+
+  temporary_file=$(mktemp "$rules_dir/.audio-rules.XXXXXX")
+  trap 'rm -f -- "$temporary_file"' EXIT
+  if ! read_rules | jq -c "$filter" "$@" >"$temporary_file"; then
+    rm -f -- "$temporary_file"
+    trap - EXIT
+    return 1
+  fi
+  chmod 600 "$temporary_file"
+  mv -f -- "$temporary_file" "$rules_file"
+  trap - EXIT
+}
+
+normalize_app() {
+  # Rules match against the labels applications publish, compared without
+  # case so Firefox, firefox, and firefox-bin style differences still hit.
+  printf '%s' "${1,,}" | tr -d '[:cntrl:]'
+}
+
+case "$action" in
+  set-app)
+    (( $# == 4 )) || usage
+    app=$(normalize_app "$2")
+    direction=$3
+    target=$4
+    [[ -n $app && -n $target ]] || usage
+    [[ $direction == playback || $direction == recording ]] || usage
+    write_rules '
+      .version = 1
+      | .appRules = (
+          (.appRules | map(select(.direction != $direction or .app != $app)))
+          + [{app: $app, direction: $direction, target: $target}]
+          | .[-64:]
+        )
+    ' --arg app "$app" --arg direction "$direction" --arg target "$target"
+    ;;
+  del-app)
+    (( $# == 3 )) || usage
+    app=$(normalize_app "$2")
+    direction=$3
+    [[ -n $app ]] || usage
+    [[ $direction == playback || $direction == recording ]] || usage
+    write_rules '.version = 1
+      | .appRules |= map(select(.direction != $direction or .app != $app))' \
+      --arg app "$app" --arg direction "$direction"
+    ;;
+  set-alias)
+    (( $# == 3 )) || usage
+    node=${2:-}
+    label=${3:-}
+    [[ -n $node ]] || usage
+    if [[ -n $label ]]; then
+      write_rules '.version = 1 | .devices.aliases[$node] = $label' \
+        --arg node "$node" --arg label "$label"
+    else
+      write_rules '.version = 1 | .devices.aliases |= (delpaths([[$node]]))' \
+        --arg node "$node"
+    fi
+    ;;
+  set-flag)
+    (( $# == 4 )) || usage
+    node=${2:-}
+    flag=$3
+    value=$4
+    [[ -n $node ]] || usage
+    { [[ $flag == favorite || $flag == hidden ]] &&
+      [[ $value == true || $value == false ]]; } || usage
+    # The CLI accepts the singular; storage keeps the plural list names.
+    [[ $flag == favorite ]] && flag_key=favorites || flag_key=hidden
+    write_rules '
+      .version = 1
+      | .devices[$flag] = (
+          (if (.devices[$flag] | type) == "array" then .devices[$flag] else [] end)
+          | (if $on then (map(select(. != $node)) + [$node])
+             else map(select(. != $node)) end)
+          | unique
+        )
+    ' --arg node "$node" --arg flag "$flag_key" \
+      --argjson on "$( [[ $value == true ]] && echo true || echo false )"
+    ;;
+  *) usage ;;
+esac

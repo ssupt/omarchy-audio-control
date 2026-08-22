@@ -225,6 +225,88 @@ function sceneSummary(scene) {
   return parts.join(" · ")
 }
 
+function parseAudioRules(raw) {
+  var parsed
+  try {
+    parsed = JSON.parse(String(raw || "{}"))
+  } catch (e) {
+    parsed = {}
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) parsed = {}
+
+  var appRules = []
+  var rawRules = Array.isArray(parsed.appRules) ? parsed.appRules : []
+  var seen = {}
+  for (var i = 0; i < rawRules.length && appRules.length < 64; i++) {
+    var rule = rawRules[i]
+    if (!rule || typeof rule !== "object") continue
+    var app = sanitizeSceneString(rule.app, "", 120).toLowerCase()
+    var direction = rule.direction === "recording" ? "recording" : "playback"
+    var target = sanitizeSceneString(rule.target, "", 160)
+    if (app === "" || target === "" || seen[direction + ":" + app]) continue
+    seen[direction + ":" + app] = true
+    appRules.push({ app: app, direction: direction, target: target })
+  }
+
+  var devices = parsed.devices && typeof parsed.devices === "object" && !Array.isArray(parsed.devices)
+    ? parsed.devices : {}
+  var aliases = {}
+  if (devices.aliases && typeof devices.aliases === "object" && !Array.isArray(devices.aliases)) {
+    for (var nodeName in devices.aliases) {
+      var alias = sanitizeSceneString(devices.aliases[nodeName], "", 80)
+      var key = String(nodeName || "").trim()
+      if (key !== "" && alias !== "") aliases[key] = alias
+      if (Object.keys(aliases).length >= 128) break
+    }
+  }
+
+  function stringList(value, maximum) {
+    var out = []
+    var rawList = Array.isArray(value) ? value : []
+    for (var j = 0; j < rawList.length && out.length < maximum; j++) {
+      var entry = sanitizeSceneString(rawList[j], "", 160)
+      if (entry !== "") out.push(entry)
+    }
+    return out
+  }
+
+  return {
+    version: 1,
+    appRules: appRules,
+    devices: {
+      aliases: aliases,
+      favorites: stringList(devices.favorites, 64),
+      hidden: stringList(devices.hidden, 64)
+    }
+  }
+}
+
+// Case-insensitive lookup: rules are matched against the labels applications
+// publish, and those spellings vary across launches.
+function findAppRule(rules, direction, appKey) {
+  var key = String(appKey || "").trim().toLowerCase()
+  if (key === "") return null
+  var values = Array.isArray(rules) ? rules : []
+  for (var i = 0; i < values.length; i++)
+    if (values[i].direction === direction && values[i].app === key) return values[i]
+  return null
+}
+
+function deviceSortComparator(favorites) {
+  var ranks = {}
+  var values = Array.isArray(favorites) ? favorites : []
+  for (var i = 0; i < values.length; i++) ranks[values[i]] = i
+  return function(a, b) {
+    var ra = ranks.hasOwnProperty(a) ? ranks[a] : -1
+    var rb = ranks.hasOwnProperty(b) ? ranks[b] : -1
+    var fa = ra >= 0 ? 0 : 1
+    var fb = rb >= 0 ? 0 : 1
+    if (fa !== fb) return fa - fb
+    if (fa === 0 && ra !== rb) return ra - rb
+    return 0
+  }
+}
+
 function parseAudioPolicySettings(raw) {
   var parsed
   try {
@@ -799,6 +881,9 @@ if (typeof module !== "undefined") {
     parseAudioScenes: parseAudioScenes,
     sanitizeSceneEntry: sanitizeSceneEntry,
     sceneSummary: sceneSummary,
+    parseAudioRules: parseAudioRules,
+    findAppRule: findAppRule,
+    deviceSortComparator: deviceSortComparator,
     parseAudioPolicySettings: parseAudioPolicySettings,
     balanceValue: balanceValue,
     applyBalance: applyBalance,

@@ -431,6 +431,40 @@ OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
 jq -e '[.scenes[].name] | index("Headset") | not' "$scenes_file" >/dev/null ||
   fail "audio scene deletion"
 echo "PASS: named audio scene storage"
+
+rules_file="$scenes_dir/audio-rules.json"
+export OMARCHY_AUDIO_RULES_FILE="$rules_file"
+"$ROOT/scripts/audio-app-rules" set-app "Firefox" playback speakers
+"$ROOT/scripts/audio-app-rules" set-app firefox recording usb-microphone
+jq -e '(.appRules | length) == 2 and .appRules[0].target == "speakers"' "$rules_file" >/dev/null ||
+  fail "application rule upsert"
+"$ROOT/scripts/audio-app-rules" set-app FIREFOX playback headphones
+jq -e '(.appRules | length) == 2
+  and ([.appRules[] | select(.direction == "playback")][0].target == "headphones")' "$rules_file" >/dev/null ||
+  fail "application rule replacement"
+if "$ROOT/scripts/audio-app-rules" set-app firefox sideways speakers >/dev/null 2>&1; then
+  fail "invalid application rule direction accepted"
+fi
+"$ROOT/scripts/audio-app-rules" del-app FIREFOX playback
+jq -e '(.appRules | length) == 1 and .appRules[0].direction == "recording"' "$rules_file" >/dev/null ||
+  fail "application rule deletion"
+"$ROOT/scripts/audio-app-rules" set-alias speakers "Desk Speakers"
+"$ROOT/scripts/audio-app-rules" set-flag speakers favorite true
+"$ROOT/scripts/audio-app-rules" set-flag mic hidden true
+jq -e '.devices.aliases.speakers == "Desk Speakers"
+  and (.devices.favorites | index("speakers") != null)
+  and (.devices.hidden | index("mic") != null)' "$rules_file" >/dev/null ||
+  fail "device preference storage"
+if "$ROOT/scripts/audio-app-rules" set-flag mic sideways true >/dev/null 2>&1; then
+  fail "invalid device flag accepted"
+fi
+"$ROOT/scripts/audio-app-rules" set-alias speakers ""
+"$ROOT/scripts/audio-app-rules" set-flag speakers favorite false
+jq -e '(.devices.aliases | has("speakers") | not)
+  and ((.devices.favorites | index("speakers")) == null)' "$rules_file" >/dev/null ||
+  fail "device preference removal"
+unset OMARCHY_AUDIO_RULES_FILE
+echo "PASS: application rules and device preference store"
 rm -rf -- "$scenes_dir"
 
 microphone_test_dir=$(mktemp -d)
