@@ -39,6 +39,11 @@ Item {
   property bool microphoneTestCancelled: false
   property int microphoneTestSecondsRemaining: 0
   property string microphoneTestError: ""
+  property var audioScenes: []
+  property bool scenesLoaded: false
+  property var pendingSceneSave: null
+  property string sceneStatus: ""
+  property bool sceneStatusIsError: false
   property string profileLoadError: ""
   property string portLoadError: ""
   property string profileSetError: ""
@@ -52,7 +57,7 @@ Item {
     for (var i = 0; i < errors.length; i++) if (errors[i] !== "") return errors[i]
     return ""
   }
-  property int activeTab: 0  // 0 = devices, 1 = Bluetooth, 2 = policy
+  property int activeTab: 0  // 0 = devices, 1 = Bluetooth, 2 = policy, 3 = scenes
   property bool cursorActive: false
   property int selectedIndex: 0
   property bool profileMenuOpen: false
@@ -164,9 +169,11 @@ Item {
     + availablePolicyExperimental.length
   readonly property int captureNotificationIndex: wireplumberPolicyItemCount
   readonly property int policyItemCount: wireplumberPolicyItemCount + 1
-  readonly property int itemCount: activeTab === 0
-    ? deviceItemCount + (inputDevice ? 1 : 0)
-    : (activeTab === 1 ? 2 + bluetoothCards.length : policyItemCount)
+  readonly property int itemCount: activeTab === 3
+    ? 1 + audioScenes.length
+    : (activeTab === 0
+      ? deviceItemCount + (inputDevice ? 1 : 0)
+      : (activeTab === 1 ? 2 + bluetoothCards.length : policyItemCount))
   readonly property bool audioMutationBusy: profileSetProc.running || portSetProc.running
     || microphoneTestProc.running || microphoneTestStopProc.running
   readonly property real microphoneTestLevel: inputDevice && inputDevice.audio
@@ -183,6 +190,15 @@ Item {
     if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
     return configHome + "/omarchy/audio-preferences.json"
   }
+  readonly property string scenesPath: {
+    var configHome = Quickshell.env("XDG_CONFIG_HOME")
+    if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
+    return configHome + "/omarchy/audio-scenes.json"
+  }
+  readonly property string scriptsDir: {
+    var url = String(Qt.resolvedUrl("scripts/"))
+    return decodeURIComponent(url.replace(/^file:\/\//, ""))
+  }
   onDefaultOutputDeviceChanged: resolveVolumeSink()
   onInputDeviceChanged: if (microphoneTestState !== "idle") discardMicrophoneTest()
   onInputDeviceMutedChanged: if (inputDeviceMuted && microphoneTestState === "recording")
@@ -196,7 +212,9 @@ Item {
   function open(payloadJson) {
     var payload = ({})
     try { payload = JSON.parse(payloadJson || "{}") } catch (e) { payload = ({}) }
-    activeTab = payload.tab === "bluetooth" ? 1 : (payload.tab === "policy" ? 2 : 0)
+    activeTab = payload.tab === "bluetooth" ? 1
+      : payload.tab === "policy" ? 2
+      : payload.tab === "scenes" ? 3 : 0
     openRequested = true
     closingFromHost = false
     cursorActive = false
@@ -538,7 +556,7 @@ Item {
   }
 
   function selectTab(index) {
-    var next = Math.max(0, Math.min(2, index))
+    var next = Math.max(0, Math.min(3, index))
     if (next === activeTab) return
     closeProfileMenus()
     activeTab = next
@@ -549,7 +567,7 @@ Item {
   }
 
   function switchTab(direction) {
-    selectTab((activeTab + (direction < 0 ? -1 : 1) + 3) % 3)
+    selectTab((activeTab + (direction < 0 ? -1 : 1) + 4) % 4)
   }
 
   function setCursor(index) {
@@ -559,6 +577,11 @@ Item {
 
   function activateCursor() {
     if (!cursorActive || itemCount === 0) return
+    if (activeTab === 3) {
+      if (selectedIndex === 0) saveCurrentScene()
+      else applySceneAt(selectedIndex - 1)
+      return
+    }
     if (activeTab === 2) {
       if (selectedIndex === captureNotificationIndex) {
         setCaptureNotifications(!captureNotifications)
@@ -681,6 +704,100 @@ Item {
     onLoaded: root.loadAudioPreferences(text())
     onLoadFailed: root.loadAudioPreferences("")
     onFileChanged: reload()
+  }
+
+  FileView {
+    path: root.scenesPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: function() {
+      root.audioScenes = Model.parseAudioScenes(text()).scenes
+      root.scenesLoaded = true
+      root.clampCursor()
+    }
+    onLoadFailed: function() {
+      root.audioScenes = []
+      root.scenesLoaded = true
+      root.clampCursor()
+    }
+    onFileChanged: reload()
+  }
+
+  AudioSceneController {
+    id: sceneController
+    scriptsDir: root.scriptsDir
+    onCaptureFinished: function(scene) {
+      root.pendingSceneSave = scene
+      sceneStoreProc.command = [root.scriptsDir + "/audio-scenes", "save", scene.name,
+        JSON.stringify(scene)]
+      sceneStoreProc.running = true
+    }
+    onApplyFinished: function(result) {
+      var text = "Applied scene '" + result.name + "'"
+      if (result.errors.length > 0)
+        root.showSceneStatus(text + ", but some steps failed", true)
+      else if (result.skipped.length > 0)
+        root.showSceneStatus(text + " · skipped: " + result.skipped.join(", "), false)
+      else
+        root.showSceneStatus(text, false)
+    }
+  }
+
+  // Scene store writes go through the helper script so both surfaces stay
+  // readers of the same flock-protected file.
+  Process {
+    id: sceneStoreProc
+    onExited: function(exitCode) {
+      var saving = root.pendingSceneSave !== null
+      var name = saving ? root.pendingSceneSave.name : ""
+      root.pendingSceneSave = null
+      if (exitCode !== 0) {
+        root.showSceneStatus(saving ? "Could not save scene '" + name + "'"
+          : "Could not delete the scene", true)
+        return
+      }
+      if (saving) root.showSceneStatus("Saved scene '" + name + "'", false)
+    }
+  }
+
+  Timer {
+    id: sceneStatusTimer
+    interval: 6000
+    onTriggered: root.sceneStatus = ""
+  }
+
+  function showSceneStatus(text, isError) {
+    sceneStatus = text
+    sceneStatusIsError = isError
+    sceneStatusTimer.restart()
+  }
+
+  function nextSceneName() {
+    var used = ({})
+    for (var i = 0; i < audioScenes.length; i++) used[audioScenes[i].name] = true
+    for (var n = 1; n < 100; n++)
+      if (!used["Scene " + n]) return "Scene " + n
+    return "Scene " + Math.floor(Math.random() * 100000)
+  }
+
+  function saveCurrentScene() {
+    if (sceneController.busy || sceneStoreProc.running) return
+    sceneStatus = ""
+    sceneController.capture(nextSceneName())
+  }
+
+  function applySceneAt(index) {
+    var scene = index >= 0 ? audioScenes[index] : null
+    if (!scene || sceneController.busy || sceneStoreProc.running) return
+    sceneStatus = ""
+    sceneController.apply(scene)
+  }
+
+  function deleteSceneAt(index) {
+    var scene = index >= 0 ? audioScenes[index] : null
+    if (!scene || sceneController.busy || sceneStoreProc.running) return
+    sceneStoreProc.command = [root.scriptsDir + "/audio-scenes", "delete", scene.name]
+    sceneStoreProc.running = true
   }
 
   PwObjectTracker { objects: root.outputDevice ? [root.outputDevice] : [] }
@@ -1001,15 +1118,20 @@ Item {
               options: [
                 { value: "devices", label: "Devices", icon: "󰓃" },
                 { value: "bluetooth", label: "Bluetooth", icon: "󰂯" },
-                { value: "policy", label: "Policy", icon: "󰒃" }
+                { value: "policy", label: "Policy", icon: "󰒃" },
+                { value: "scenes", label: "Scenes", icon: "󰐭" }
               ]
-              value: root.activeTab === 0 ? "devices" : (root.activeTab === 1 ? "bluetooth" : "policy")
+              value: root.activeTab === 0 ? "devices"
+                : root.activeTab === 1 ? "bluetooth"
+                : root.activeTab === 2 ? "policy" : "scenes"
               focusable: false
               foreground: root.foreground
               background: root.background
               fontFamily: root.fontFamily
               onChanged: function(value) {
-                root.selectTab(value === "bluetooth" ? 1 : (value === "policy" ? 2 : 0))
+                root.selectTab(value === "bluetooth" ? 1
+                  : value === "policy" ? 2
+                  : value === "scenes" ? 3 : 0)
               }
             }
           }
@@ -1450,6 +1572,133 @@ Item {
                     onHovered: root.setCursor(root.captureNotificationIndex)
                     onActivated: root.setCaptureNotifications(!root.captureNotifications)
                   }
+                }
+              }
+
+              Column {
+                visible: root.activeTab === 3
+                width: parent.width
+                spacing: Style.space(8)
+
+                Text {
+                  width: parent.width
+                  text: "Scenes snapshot defaults, device volume, mute, balance, ports, and card profiles so you can restore the whole setup at once."
+                  color: Qt.darker(root.foreground, 1.35)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+
+                CursorSurface {
+                  id: sceneSaveRow
+                  width: parent.width
+                  implicitHeight: sceneSaveContent.implicitHeight + Style.space(18)
+                  enabled: !root.sceneController.busy && !root.sceneStoreProc.running
+                  hasCursor: root.cursorActive && root.activeTab === 3 && root.selectedIndex === 0
+                  onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sceneSaveRow)
+                  foreground: root.foreground
+                  fill: root.hoverFill
+                  bordered: true
+
+                  Row {
+                    id: sceneSaveContent
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: Style.space(12)
+                    anchors.rightMargin: Style.space(12)
+                    spacing: Style.space(10)
+
+                    Column {
+                      width: parent.width - sceneSaveAction.width - parent.spacing
+                      spacing: Style.space(3)
+
+                      Text {
+                        width: parent.width
+                        text: "Save current state as a new scene"
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        font.bold: true
+                        elide: Text.ElideRight
+                      }
+
+                      Text {
+                        width: parent.width
+                        text: root.sceneController.busy || root.sceneStoreProc.running
+                          ? "Capturing the current audio state…"
+                          : "Captures every connected device with its current settings."
+                        color: Qt.darker(root.foreground, 1.35)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        elide: Text.ElideRight
+                      }
+                    }
+
+                    PanelActionButton {
+                      id: sceneSaveAction
+                      iconText: "󰐭"
+                      tooltipText: "Save current state as a new scene"
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      bordered: true
+                      enabled: sceneSaveRow.enabled
+                      onClicked: root.saveCurrentScene()
+                    }
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    enabled: root.sceneController.busy === false && root.sceneStoreProc.running === false
+                    hoverEnabled: true
+                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onContainsMouseChanged: if (containsMouse) root.setCursor(0)
+                    onClicked: root.saveCurrentScene()
+                  }
+                }
+
+                Repeater {
+                  model: root.audioScenes
+
+                  AudioSceneRow {
+                    id: sceneListRow
+                    required property var modelData
+                    required property int index
+                    width: parent.width
+                    sceneName: modelData ? String(modelData.name || "") : ""
+                    summary: Model.sceneSummary(modelData)
+                    actionEnabled: !root.sceneController.busy && !root.sceneStoreProc.running
+                    hasCursor: root.cursorActive && root.activeTab === 3
+                      && root.selectedIndex === 1 + sceneListRow.index
+                    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sceneListRow)
+                    foreground: root.foreground
+                    fill: root.hoverFill
+                    urgent: root.urgent
+                    fontFamily: root.fontFamily
+                    onHovered: root.setCursor(1 + sceneListRow.index)
+                    onActivated: root.applySceneAt(sceneListRow.index)
+                    onDeleted: root.deleteSceneAt(sceneListRow.index)
+                  }
+                }
+
+                Text {
+                  visible: root.scenesLoaded && root.audioScenes.length === 0
+                  width: parent.width
+                  text: "No scenes saved yet. Capture the current setup to restore it later from here or from the quick mixer."
+                  color: Qt.darker(root.foreground, 1.35)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+
+                Text {
+                  visible: root.sceneStatus !== ""
+                  width: parent.width
+                  text: root.sceneStatus
+                  color: root.sceneStatusIsError ? root.urgent : root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
                 }
               }
 

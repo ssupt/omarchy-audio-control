@@ -36,10 +36,23 @@ Panel {
     if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
     return configHome + "/omarchy/audio-preferences.json"
   }
+  readonly property string scenesPath: {
+    var configHome = Quickshell.env("XDG_CONFIG_HOME")
+    if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
+    return configHome + "/omarchy/audio-scenes.json"
+  }
+  readonly property string scriptsDir: {
+    var url = String(Qt.resolvedUrl("scripts/"))
+    return decodeURIComponent(url.replace(/^file:\/\//, ""))
+  }
   property var audioPreferences: Model.parseAudioPreferences("")
   property bool outputOverdrive: false
   property bool captureNotifications: true
   property bool notificationsAvailable: false
+  property var audioScenes: []
+  property bool scenesLoaded: false
+  property string sceneFeedback: ""
+  property bool sceneFeedbackIsError: false
   property var observedRecordingLabels: []
   property bool recordingObservationReady: false
   property real inputPeakHold: 0
@@ -305,6 +318,7 @@ Panel {
   onRawAudioSourcesChanged: if (rawAudioSources.length > 0) cachedAudioSources = rawAudioSources
 
   // Single cursor model shared by keyboard and mouse. Sections:
+  //   "scenes"  — saved scene chips (apply on activation)
   //   "output"  — output slider + sink device list
   //   "input"   — input slider + source device list
   //   "streams"   — per-app playback streams
@@ -339,6 +353,7 @@ Panel {
     : "transparent"
 
   function sectionCount(section) {
+    if (section === "scenes") return audioScenes.length
     if (section === "output") return displayAudioSinks.length
     if (section === "input") return displayAudioSources.length
     if (section === "streams") return displayAudioStreams.length
@@ -347,6 +362,7 @@ Panel {
   }
 
   function sectionVisible(section) {
+    if (section === "scenes") return audioScenes.length > 0
     if (section === "output") return true
     if (section === "input") return displayAudioSources.length > 0 || !!source
     if (section === "streams") return displayAudioStreams.length > 0
@@ -364,6 +380,7 @@ Panel {
   // (e.g. no input devices) doesn't leave the cursor pointing at it.
   readonly property var visibleSections: {
     var list = []
+    if (sectionVisible("scenes")) list.push("scenes")
     if (sectionVisible("output")) list.push("output")
     if (sectionVisible("input")) list.push("input")
     if (sectionVisible("streams")) list.push("streams")
@@ -464,6 +481,10 @@ Panel {
     if (focusSection === "header") {
       if (headerIndex === 0) openAdvancedAudio()
       else toggleAllMuted()
+      return
+    }
+    if (focusSection === "scenes") {
+      applySceneAt(selectedIndex)
       return
     }
     if (focusSection === "output") {
@@ -921,6 +942,53 @@ Panel {
     onFileChanged: reload()
   }
 
+  FileView {
+    path: root.scenesPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: function() {
+      root.audioScenes = Model.parseAudioScenes(text()).scenes
+      root.scenesLoaded = true
+    }
+    onLoadFailed: function() {
+      root.audioScenes = []
+      root.scenesLoaded = true
+    }
+    onFileChanged: reload()
+  }
+
+  AudioSceneController {
+    id: sceneController
+    scriptsDir: root.scriptsDir
+    onApplyFinished: function(result) {
+      var text = "Applied scene '" + result.name + "'"
+      if (result.errors.length > 0)
+        root.showSceneFeedback(text + ", but some steps failed", true)
+      else if (result.skipped.length > 0)
+        root.showSceneFeedback(text + " · skipped: " + result.skipped.join(", "), false)
+      else
+        root.showSceneFeedback(text, false)
+    }
+  }
+
+  Timer {
+    id: sceneFeedbackTimer
+    interval: 6000
+    onTriggered: root.sceneFeedback = ""
+  }
+
+  function showSceneFeedback(text, isError) {
+    sceneFeedback = text
+    sceneFeedbackIsError = isError
+    sceneFeedbackTimer.restart()
+  }
+
+  function applySceneAt(index) {
+    var scene = index >= 0 ? audioScenes[index] : null
+    if (!scene || sceneController.busy) return
+    sceneController.apply(scene)
+  }
+
   Process {
     id: sinkAvailabilityProc
     command: ["omarchy-audio-sink-availability"]
@@ -1139,7 +1207,7 @@ Panel {
             if (s && s.audio) s.audio.muted = !s.audio.muted
           } else if (root.focusSection === "input") {
             root.toggleInputMute()
-          } else {
+          } else if (root.focusSection !== "scenes") {
             root.toggleOutputMute()
           }
         }
@@ -1266,6 +1334,81 @@ Panel {
                 elide: Text.ElideRight
                 width: parent.width
               }
+            }
+          }
+
+          // ---- Scenes ----
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+            visible: root.audioScenes.length > 0
+
+            PanelSectionHeader {
+              text: "SCENES"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+            }
+
+            Flow {
+              id: sceneChipFlow
+              width: parent.width
+              spacing: Style.space(4)
+
+              Repeater {
+                model: root.audioScenes
+
+                CursorSurface {
+                  id: sceneChip
+                  required property var modelData
+                  required property int index
+                  readonly property string sceneName: modelData ? String(modelData.name || "") : ""
+                  width: Math.min(sceneChipLabel.implicitWidth + Style.space(16), sceneChipFlow.width)
+                  height: sceneChipLabel.implicitHeight + Style.space(10)
+                  hasCursor: root.cursorActive && root.focusSection === "scenes"
+                    && root.selectedIndex === sceneChip.index
+                  onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sceneChip)
+                  foreground: root.bar.foreground
+                  fill: root.hoverFill
+                  currentFill: root.selectedFill
+                  bordered: true
+
+                  Text {
+                    id: sceneChipLabel
+                    anchors.centerIn: parent
+                    text: sceneChip.sceneName
+                    color: sceneChip.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    elide: Text.ElideRight
+                    width: Math.min(implicitWidth, sceneChip.width - Style.space(12))
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    enabled: !root.sceneController.busy
+                    hoverEnabled: true
+                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onContainsMouseChanged: if (containsMouse) {
+                      root.cursorActive = true
+                      root.focusSection = "scenes"
+                      root.selectedIndex = sceneChip.index
+                    }
+                    onClicked: root.applySceneAt(sceneChip.index)
+                  }
+                }
+              }
+            }
+
+            Text {
+              visible: root.sceneFeedback !== ""
+              width: parent.width
+              text: root.sceneFeedback
+              color: root.sceneFeedbackIsError
+                ? root.urgent : Qt.darker(root.bar.foreground, 1.35)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
           }
 
