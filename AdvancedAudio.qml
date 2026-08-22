@@ -523,7 +523,7 @@ Item {
   }
 
   function closeProfileMenus() {
-    bluetoothPreferenceDropdown.close()
+    if (bluetoothPreferenceRow) bluetoothPreferenceRow.closePreferenceMenu()
     var repeaters = [deviceProfileRepeater, bluetoothProfileRepeater, audioPortRepeater]
     for (var r = 0; r < repeaters.length; r++) {
       var repeater = repeaters[r]
@@ -594,7 +594,7 @@ Item {
       return
     }
     if (activeTab === 1 && selectedIndex === 1) {
-      if (bluetoothPreferenceDropdown.enabled) bluetoothPreferenceDropdown.toggle()
+      bluetoothPreferenceRow.togglePreferenceMenu()
       return
     }
     var row = activeTab === 0
@@ -1134,12 +1134,26 @@ Item {
                   id: audioPortRepeater
                   model: root.audioPorts
 
-                  PortRow {
+                  AudioPortRow {
+                    id: audioPortDelegate
                     required property var modelData
                     required property int index
                     width: parent.width
                     port: modelData
                     rowIndex: root.audioPortStartIndex + index
+                    hasCursor: root.cursorActive && root.activeTab === 0
+                      && root.selectedIndex === audioPortDelegate.rowIndex
+                    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(audioPortDelegate)
+                    foreground: root.foreground
+                    fill: root.hoverFill
+                    fontFamily: root.fontFamily
+                    menuEnabled: !root.audioMutationBusy
+                    onCursorRequested: root.setCursor(audioPortDelegate.rowIndex)
+                    onPortSelected: function(value) { root.setAudioPort(audioPortDelegate.port, value) }
+                    onMenuToggled: function(open) {
+                      root.profileMenuOpen = open
+                      if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+                    }
                   }
                 }
               }
@@ -1224,82 +1238,21 @@ Item {
                   }
                 }
 
-                CursorSurface {
+                AudioBluetoothPreferenceRow {
                   id: bluetoothPreferenceRow
                   width: parent.width
-                  implicitHeight: Math.max(bluetoothPreferenceLabels.implicitHeight,
-                    bluetoothPreferenceDropdown.implicitHeight) + Style.space(18)
                   hasCursor: root.cursorActive && root.selectedIndex === 1
                   onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(bluetoothPreferenceRow)
                   foreground: root.foreground
                   fill: root.hoverFill
-                  bordered: true
-
-                  Row {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.leftMargin: Style.space(12)
-                    anchors.rightMargin: Style.space(12)
-                    spacing: Style.space(16)
-
-                    Column {
-                      id: bluetoothPreferenceLabels
-                      width: Math.max(Style.space(180), parent.width * 0.4)
-                      anchors.verticalCenter: parent.verticalCenter
-                      spacing: Style.space(3)
-
-                      Text {
-                        width: parent.width
-                        text: "Profile preference"
-                        color: root.foreground
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.body
-                        font.bold: true
-                        elide: Text.ElideRight
-                      }
-
-                      Text {
-                        width: parent.width
-                        text: "Automatic profile selection"
-                        color: Qt.darker(root.foreground, 1.35)
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.caption
-                        elide: Text.ElideRight
-                      }
-                    }
-
-                    AudioDropdown {
-                      id: bluetoothPreferenceDropdown
-                      width: parent.width - bluetoothPreferenceLabels.width - parent.spacing
-                      showLabel: false
-                      popupDirection: "down"
-                      value: root.bluetoothProfilePreference
-                      options: [
-                        { value: "quality", label: "Prefer quality" },
-                        { value: "latency", label: "Prefer lower latency" }
-                      ]
-                      hasCursor: bluetoothPreferenceRow.hasCursor
-                      enabled: root.bluetoothProfilePreferenceLoaded && !bluetoothPreferenceProc.running
-                      opacity: enabled ? 1 : 0.6
-                      foreground: root.foreground
-                      fontFamily: root.fontFamily
-                      anchors.verticalCenter: parent.verticalCenter
-
-                      onHovered: function(on) { if (on) root.setCursor(1) }
-                      onChanged: function(value) { root.setBluetoothProfilePreference(value) }
-                      onPopupOpenChanged: {
-                        root.profileMenuOpen = popupOpen
-                        if (!popupOpen) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
-                      }
-                    }
-                  }
-
-                  MouseArea {
-                    anchors.fill: parent
-                    acceptedButtons: Qt.NoButton
-                    hoverEnabled: true
-                    onContainsMouseChanged: if (containsMouse) root.setCursor(1)
+                  fontFamily: root.fontFamily
+                  preference: root.bluetoothProfilePreference
+                  menuEnabled: root.bluetoothProfilePreferenceLoaded && !bluetoothPreferenceProc.running
+                  onCursorRequested: root.setCursor(1)
+                  onPreferenceSelected: function(value) { root.setBluetoothProfilePreference(value) }
+                  onMenuToggled: function(open) {
+                    root.profileMenuOpen = open
+                    if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
                   }
                 }
               }
@@ -1541,12 +1494,30 @@ Item {
                     id: bluetoothProfileRepeater
                     model: root.bluetoothCards
 
-                    ProfileRow {
+                    AudioProfileRow {
+                      id: bluetoothProfileDelegate
                       required property var modelData
                       required property int index
                       width: parent.width
                       card: modelData
                       rowIndex: 2 + index
+                      hasCursor: root.cursorActive
+                        && root.selectedIndex === bluetoothProfileDelegate.rowIndex
+                      onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(bluetoothProfileDelegate)
+                      foreground: root.foreground
+                      fill: root.hoverFill
+                      fontFamily: root.fontFamily
+                      currentProfile: root.selectedAudioProfile(bluetoothProfileDelegate.card)
+                      options: root.profileOptions(bluetoothProfileDelegate.card)
+                      menuEnabled: !root.audioMutationBusy
+                      onCursorRequested: root.setCursor(bluetoothProfileDelegate.rowIndex)
+                      onProfileSelected: function(profile) {
+                        root.setAudioProfile(bluetoothProfileDelegate.card, profile)
+                      }
+                      onMenuToggled: function(open) {
+                        root.profileMenuOpen = open
+                        if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+                      }
                     }
                   }
                 }
@@ -1566,12 +1537,30 @@ Item {
                     id: deviceProfileRepeater
                     model: root.deviceCards
 
-                    ProfileRow {
+                    AudioProfileRow {
+                      id: deviceProfileDelegate
                       required property var modelData
                       required property int index
                       width: parent.width
                       card: modelData
                       rowIndex: root.deviceProfileStartIndex + index
+                      hasCursor: root.cursorActive
+                        && root.selectedIndex === deviceProfileDelegate.rowIndex
+                      onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(deviceProfileDelegate)
+                      foreground: root.foreground
+                      fill: root.hoverFill
+                      fontFamily: root.fontFamily
+                      currentProfile: root.selectedAudioProfile(deviceProfileDelegate.card)
+                      options: root.profileOptions(deviceProfileDelegate.card)
+                      menuEnabled: !root.audioMutationBusy
+                      onCursorRequested: root.setCursor(deviceProfileDelegate.rowIndex)
+                      onProfileSelected: function(profile) {
+                        root.setAudioProfile(deviceProfileDelegate.card, profile)
+                      }
+                      onMenuToggled: function(open) {
+                        root.profileMenuOpen = open
+                        if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+                      }
                     }
                   }
                 }
@@ -1594,18 +1583,40 @@ Item {
                     fontFamily: root.fontFamily
                   }
 
-                  BalanceRow {
+                  AudioBalanceRow {
+                    id: outputBalanceRow
                     visible: root.outputBalanceAvailable
                     node: root.outputDevice
                     label: "Output"
                     rowIndex: root.outputBalanceIndex
+                    deviceLabel: root.nodeLabel(root.outputDevice)
+                    balanceValue: root.balanceFor(root.outputDevice)
+                    foreground: root.foreground
+                    fill: root.hoverFill
+                    fontFamily: root.fontFamily
+                    hasCursor: root.cursorActive && root.activeTab === 0
+                      && root.selectedIndex === root.outputBalanceIndex
+                    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(outputBalanceRow)
+                    onCursorRequested: root.setCursor(outputBalanceRow.rowIndex)
+                    onBalanceMoved: function(value) { root.setBalance(root.outputDevice, value) }
                   }
 
-                  BalanceRow {
+                  AudioBalanceRow {
+                    id: inputBalanceRow
                     visible: root.inputBalanceAvailable
                     node: root.inputDevice
                     label: "Input"
                     rowIndex: root.inputBalanceIndex
+                    deviceLabel: root.nodeLabel(root.inputDevice)
+                    balanceValue: root.balanceFor(root.inputDevice)
+                    foreground: root.foreground
+                    fill: root.hoverFill
+                    fontFamily: root.fontFamily
+                    hasCursor: root.cursorActive && root.activeTab === 0
+                      && root.selectedIndex === root.inputBalanceIndex
+                    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(inputBalanceRow)
+                    onCursorRequested: root.setCursor(inputBalanceRow.rowIndex)
+                    onBalanceMoved: function(value) { root.setBalance(root.inputDevice, value) }
                   }
                 }
 
@@ -1660,262 +1671,6 @@ Item {
               }
             }
           }
-        }
-      }
-    }
-  }
-
-  component PortRow: CursorSurface {
-    id: portRow
-    required property var port
-    required property int rowIndex
-
-    width: parent ? parent.width : 0
-    implicitHeight: Math.max(portLabels.implicitHeight, portDropdown.implicitHeight) + Style.space(18)
-    hasCursor: root.cursorActive && root.activeTab === 0 && root.selectedIndex === rowIndex
-    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(portRow)
-    foreground: root.foreground
-    fill: root.hoverFill
-    bordered: true
-
-    function togglePortMenu() { if (portDropdown.enabled) portDropdown.toggle() }
-    function closePortMenu() { portDropdown.close() }
-
-    Row {
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(12)
-      anchors.rightMargin: Style.space(12)
-      spacing: Style.space(16)
-
-      Column {
-        id: portLabels
-        width: Math.max(Style.space(180), parent.width * 0.4)
-        anchors.verticalCenter: parent.verticalCenter
-        spacing: Style.space(3)
-
-        Text {
-          width: parent.width
-          text: portRow.port.label
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          font.bold: true
-          elide: Text.ElideRight
-        }
-
-        Text {
-          width: parent.width
-          text: portRow.port.direction === "output" ? "Output port" : "Input port"
-          color: Qt.darker(root.foreground, 1.35)
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
-        }
-      }
-
-      AudioDropdown {
-        id: portDropdown
-        width: parent.width - portLabels.width - parent.spacing
-        showLabel: false
-        popupDirection: "down"
-        value: String(portRow.port.activePort || "")
-        options: portRow.port.ports
-        hasCursor: portRow.hasCursor
-        enabled: !root.audioMutationBusy
-        opacity: enabled ? 1 : 0.6
-        foreground: root.foreground
-        fontFamily: root.fontFamily
-        anchors.verticalCenter: parent.verticalCenter
-
-        onHovered: function(on) { if (on) root.setCursor(portRow.rowIndex) }
-        onChanged: function(value) { root.setAudioPort(portRow.port, value) }
-        onPopupOpenChanged: {
-          root.profileMenuOpen = popupOpen
-          if (!popupOpen) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
-        }
-      }
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      acceptedButtons: Qt.NoButton
-      hoverEnabled: true
-      onContainsMouseChanged: if (containsMouse) root.setCursor(portRow.rowIndex)
-    }
-  }
-
-  component BalanceRow: CursorSurface {
-    id: balanceRow
-    required property var node
-    required property string label
-    required property int rowIndex
-
-    width: parent ? parent.width : 0
-    implicitHeight: balanceColumn.implicitHeight + Style.space(18)
-    hasCursor: root.cursorActive && root.activeTab === 0 && root.selectedIndex === rowIndex
-    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(balanceRow)
-    foreground: root.foreground
-    fill: root.hoverFill
-    bordered: true
-
-    Column {
-      id: balanceColumn
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(12)
-      anchors.rightMargin: Style.space(12)
-      spacing: Style.space(4)
-
-      Item {
-        width: parent.width
-        height: Math.max(balanceLabel.implicitHeight, balanceValue.implicitHeight)
-
-        Text {
-          id: balanceLabel
-          text: balanceRow.label + " · " + root.nodeLabel(balanceRow.node)
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          font.bold: true
-          elide: Text.ElideRight
-          width: parent.width - balanceValue.width - Style.space(8)
-          anchors.left: parent.left
-          anchors.verticalCenter: parent.verticalCenter
-        }
-
-        Text {
-          id: balanceValue
-          text: {
-            var value = root.balanceFor(balanceRow.node)
-            if (Math.abs(value) < 0.05) return "CENTER"
-            return value < 0 ? "L " + Math.round(-value * 100) : "R " + Math.round(value * 100)
-          }
-          color: Qt.darker(root.foreground, 1.4)
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          font.bold: true
-          anchors.right: parent.right
-          anchors.verticalCenter: parent.verticalCenter
-        }
-      }
-
-      Row {
-        width: parent.width
-        spacing: Style.space(8)
-
-        Text {
-          text: "L"
-          color: Qt.darker(root.foreground, 1.35)
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          width: Style.space(12)
-          anchors.verticalCenter: parent.verticalCenter
-        }
-
-        PanelSlider {
-          width: parent.width - Style.space(40)
-          minimum: -1
-          maximum: 1
-          step: 0.05
-          value: root.balanceFor(balanceRow.node)
-          tickCount: 3
-          onMoved: function(value) { root.setBalance(balanceRow.node, value) }
-        }
-
-        Text {
-          text: "R"
-          color: Qt.darker(root.foreground, 1.35)
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          width: Style.space(12)
-          anchors.verticalCenter: parent.verticalCenter
-        }
-      }
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      acceptedButtons: Qt.NoButton
-      hoverEnabled: true
-      onContainsMouseChanged: if (containsMouse) root.setCursor(balanceRow.rowIndex)
-    }
-  }
-
-  component ProfileRow: CursorSurface {
-    id: profileRow
-    required property var card
-    required property int rowIndex
-
-    width: parent ? parent.width : 0
-    implicitHeight: Math.max(profileLabels.implicitHeight, profileDropdown.implicitHeight) + Style.space(18)
-    hasCursor: root.cursorActive && root.selectedIndex === rowIndex
-    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(profileRow)
-    foreground: root.foreground
-    fill: root.hoverFill
-    bordered: true
-
-    function toggleProfileMenu() { if (profileDropdown.enabled) profileDropdown.toggle() }
-    function closeProfileMenu() { profileDropdown.close() }
-
-    Component.onDestruction: if (profileDropdown.popupOpen) root.profileMenuOpen = false
-
-    Row {
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(12)
-      anchors.rightMargin: Style.space(12)
-      spacing: Style.space(16)
-
-      Column {
-        id: profileLabels
-        width: Math.max(Style.space(180), parent.width * 0.4)
-        anchors.verticalCenter: parent.verticalCenter
-        spacing: Style.space(3)
-
-        Text {
-          width: parent.width
-          text: profileRow.card.label
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          font.bold: true
-          elide: Text.ElideRight
-        }
-
-        Text {
-          visible: profileRow.card.bluetooth === true
-          width: parent.width
-          text: "Bluetooth audio"
-          color: Qt.darker(root.foreground, 1.35)
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
-        }
-      }
-
-      AudioDropdown {
-        id: profileDropdown
-        width: parent.width - profileLabels.width - parent.spacing
-        showLabel: false
-        popupDirection: "down"
-        value: root.selectedAudioProfile(profileRow.card)
-        options: root.profileOptions(profileRow.card)
-        hasCursor: profileRow.hasCursor
-        enabled: !root.audioMutationBusy
-        opacity: enabled ? 1 : 0.6
-        foreground: root.foreground
-        fontFamily: root.fontFamily
-        anchors.verticalCenter: parent.verticalCenter
-
-        onHovered: function(on) { if (on) root.setCursor(profileRow.rowIndex) }
-        onChanged: function(profile) { root.setAudioProfile(profileRow.card, profile) }
-        onPopupOpenChanged: {
-          root.profileMenuOpen = popupOpen
-          if (!popupOpen) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
         }
       }
     }
