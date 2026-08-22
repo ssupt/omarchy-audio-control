@@ -302,6 +302,8 @@ AUDIO_CONTROL_PORT_LOG="$port_log" PATH="$TEST_DIR/mocks:$PATH" \
 if AUDIO_CONTROL_PORT_LOG="$port_log" PATH="$TEST_DIR/mocks:$PATH" \
   "$ROOT/scripts/audio-port-set" output speakers hdmi-output >/dev/null 2>&1; then
   fail "unavailable audio port accepted"
+else
+  [[ $? == 3 ]] || fail "unavailable audio port reported wrong exit code"
 fi
 echo "PASS: audio port controls"
 
@@ -604,8 +606,31 @@ if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
   "$ROOT/scripts/audio-profile-set" \
     alsa_card.usb-example-headset output:iec958-ac3-surround-51 >/dev/null 2>&1; then
   fail "unsafe profile accepted"
+else
+  [[ $? == 3 ]] || fail "unsafe profile reported wrong exit code"
 fi
 [[ ! -s $profile_log ]] || fail "unsafe profile changed hardware"
+
+# Re-applying the active profile must succeed without touching hardware.
+AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
+  AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
+  AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
+  PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-profile-set" \
+    alsa_card.usb-example-headset output:analog-stereo >/dev/null 2>&1 ||
+  fail "unchanged audio profile rejected"
+[[ ! -s $profile_log ]] || fail "unchanged audio profile touched hardware"
+
+if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
+  AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
+  AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
+  PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-profile-set" \
+    bluez_card.absent_device a2dp-sink >/dev/null 2>&1; then
+  fail "absent audio card accepted"
+else
+  [[ $? == 3 ]] || fail "absent audio card reported wrong exit code"
+fi
 
 AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
   AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
@@ -659,6 +684,29 @@ EOF
 [[ $(<"$profile_log") == "$expected_profile_log" ]] ||
   fail "per-endpoint profile state preservation"
 echo "PASS: per-endpoint profile state preservation"
+
+# When expected endpoints never reappear, the transitional muting must be
+# undone on the endpoints that survived the profile change.
+: >"$profile_log"
+printf 'old\n' >"$profile_state"
+profile_warning="$TEST_DIR/vanish-warning"
+AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
+  AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
+  AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
+  AUDIO_CONTROL_PROFILE_VANISH_SINKS=1 \
+  PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-profile-set" \
+    alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback 2>"$profile_warning" ||
+  fail "vanishing endpoint transition failed outright"
+grep -q "did not reappear" "$profile_warning" || fail "missing vanishing endpoint warning"
+grep -q '^set-sink-input-mute 300 false$' "$profile_log" ||
+  fail "sink input stayed muted after vanished endpoints"
+[[ $(grep -c '^set-source-mute 200 true$' "$profile_log") -ge 2 ]] ||
+  fail "surviving source endpoint not unmuted after vanished endpoints"
+! grep -q '^set-sink-volume ' "$profile_log" ||
+  fail "volume restored onto a nonexistent sink"
+rm -f "$profile_warning"
+echo "PASS: vanished endpoint muting recovery"
 
 menu_tmp=$(mktemp -d)
 menu_file="$menu_tmp/omarchy-menu.jsonc"

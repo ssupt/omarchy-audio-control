@@ -1386,7 +1386,7 @@ Panel {
 
                   MouseArea {
                     anchors.fill: parent
-                    enabled: !root.sceneController.busy
+                    enabled: !sceneController.busy
                     hoverEnabled: true
                     cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                     onContainsMouseChanged: if (containsMouse) {

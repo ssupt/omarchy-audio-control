@@ -1593,7 +1593,7 @@ Item {
                   id: sceneSaveRow
                   width: parent.width
                   implicitHeight: sceneSaveContent.implicitHeight + Style.space(18)
-                  enabled: !root.sceneController.busy && !root.sceneStoreProc.running
+                  enabled: !sceneController.busy && !sceneStoreProc.running
                   hasCursor: root.cursorActive && root.activeTab === 3 && root.selectedIndex === 0
                   onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sceneSaveRow)
                   foreground: root.foreground
@@ -1625,7 +1625,7 @@ Item {
 
                       Text {
                         width: parent.width
-                        text: root.sceneController.busy || root.sceneStoreProc.running
+                        text: sceneController.busy || sceneStoreProc.running
                           ? "Capturing the current audio state…"
                           : "Captures every connected device with its current settings."
                         color: Qt.darker(root.foreground, 1.35)
@@ -1649,7 +1649,7 @@ Item {
 
                   MouseArea {
                     anchors.fill: parent
-                    enabled: root.sceneController.busy === false && root.sceneStoreProc.running === false
+                    enabled: !sceneController.busy && !sceneStoreProc.running
                     hoverEnabled: true
                     cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                     onContainsMouseChanged: if (containsMouse) root.setCursor(0)
@@ -1667,7 +1667,7 @@ Item {
                     width: parent.width
                     sceneName: modelData ? String(modelData.name || "") : ""
                     summary: Model.sceneSummary(modelData)
-                    actionEnabled: !root.sceneController.busy && !root.sceneStoreProc.running
+                    actionEnabled: !sceneController.busy && !sceneStoreProc.running
                     hasCursor: root.cursorActive && root.activeTab === 3
                       && root.selectedIndex === 1 + sceneListRow.index
                     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sceneListRow)

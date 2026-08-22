@@ -27,6 +27,7 @@ Item {
   property var pendingQueue: []
   property string currentLabel: ""
   property var currentResult: null
+  property int stepToken: 0
   property bool capturePortsDone: false
   property bool captureProfilesDone: false
   property string capturePortsRaw: ""
@@ -174,8 +175,11 @@ Item {
     var step = pendingQueue[0]
     pendingQueue = pendingQueue.slice(1)
     currentLabel = step.label
+    stepToken++
+    applyStepProc.token = stepToken
     applyStepProc.command = step.command
     applyStepProc.running = true
+    stepWatchdog.restart()
   }
 
   function finishApply() {
@@ -254,15 +258,40 @@ Item {
 
   Process {
     id: applyStepProc
+    property int token: 0
+
     onExited: function(exitCode) {
-      var label = controller.currentLabel
-      controller.currentLabel = ""
-      // Exit 2 means the change landed but its shared preference could not
-      // be saved; the audible part of the scene still applied.
-      if (exitCode !== 0 && exitCode !== 2)
-        controller.currentResult.errors.push(label)
+      // A watchdog timeout advances the queue itself; ignore the late exit.
+      if (token !== controller.stepToken) return
+      controller.finishStep(exitCode)
+    }
+  }
+
+  Timer {
+    id: stepWatchdog
+    interval: 30000
+    onTriggered: {
+      if (!applyStepProc.running) return
+      applyStepProc.token = -1
+      if (controller.currentResult)
+        controller.currentResult.errors.push(controller.currentLabel + " timed out")
+      applyStepProc.running = false
       controller.runNext()
     }
+  }
+
+  function finishStep(exitCode) {
+    stepWatchdog.stop()
+    var label = currentLabel
+    currentLabel = ""
+    if (currentResult) {
+      // Exit 3 means the target device is absent, which is a skipped item,
+      // not a failure. Exit 2 means the change landed but its shared
+      // preference could not be saved; the audible part still applied.
+      if (exitCode === 3) currentResult.skipped.push(label)
+      else if (exitCode !== 0 && exitCode !== 2) currentResult.errors.push(label)
+    }
+    runNext()
   }
 
   Process {
