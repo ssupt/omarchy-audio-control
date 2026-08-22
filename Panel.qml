@@ -556,12 +556,34 @@ Panel {
     return Model.listSnapshot(list)
   }
 
+  // Repeaters rebuild every delegate when their model array is reassigned,
+  // even if the contents are identical. During device churn those redundant
+  // destroy+incubate cycles are exactly what crashes Quickshell's QJSEngine,
+  // so only reassign when the node membership actually changed. Row sliders
+  // and meters bind nodes directly and stay live without a reassignment.
+  function serialSignature(list) {
+    var parts = []
+    for (var i = 0; i < list.length; i++) {
+      var node = list[i]
+      parts.push(node ? Model.nodeSerial(node) : "")
+    }
+    return parts.join(",")
+  }
+
   function refreshDisplayAudioModels() {
     if (!opened) return
-    displayAudioSinks = listSnapshot(audioSinks)
-    displayAudioSources = listSnapshot(audioSources)
-    displayAudioStreams = listSnapshot(audioStreams)
-    displayRecordingStreams = listSnapshot(recordingStreams)
+    var nextSinks = listSnapshot(audioSinks)
+    var nextSources = listSnapshot(audioSources)
+    var nextStreams = listSnapshot(audioStreams)
+    var nextRecording = listSnapshot(recordingStreams)
+    if (serialSignature(displayAudioSinks) !== serialSignature(nextSinks))
+      displayAudioSinks = nextSinks
+    if (serialSignature(displayAudioSources) !== serialSignature(nextSources))
+      displayAudioSources = nextSources
+    if (serialSignature(displayAudioStreams) !== serialSignature(nextStreams))
+      displayAudioStreams = nextStreams
+    if (serialSignature(displayRecordingStreams) !== serialSignature(nextRecording))
+      displayRecordingStreams = nextRecording
     if (displayAudioStreams.length === 0) streamRoutes = ({})
     if (displayRecordingStreams.length === 0) recordingStreamRoutes = ({})
     refreshStreamRoutes()
