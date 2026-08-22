@@ -973,6 +973,13 @@ Item {
     aliasEditingDevice = ""
   }
 
+  // Renaming pulls keyboard focus into the text field; once the edit ends,
+  // hand focus back so Escape and navigation work again.
+  onAliasEditingDeviceChanged: {
+    if (aliasEditingDevice === "" && window.visible)
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
   function commitAliasEdit(name, text) {
     cancelAliasEdit()
     var trimmed = String(text || "").trim()
