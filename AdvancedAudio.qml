@@ -557,8 +557,8 @@ Item {
 
   function closeProfileMenus() {
     if (bluetoothPreferenceRow) bluetoothPreferenceRow.closePreferenceMenu()
-    if (newRuleAppDropdown) newRuleAppDropdown.close()
-    if (newRuleDeviceDropdown) newRuleDeviceDropdown.close()
+    if (newAppDropdown) newAppDropdown.close()
+    if (newDeviceDropdown) newDeviceDropdown.close()
     var repeaters = [deviceProfileRepeater, bluetoothProfileRepeater, audioPortRepeater, routingRuleRepeater]
     for (var r = 0; r < repeaters.length; r++) {
       var repeater = repeaters[r]
