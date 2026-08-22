@@ -456,6 +456,37 @@ wait "$microphone_test_pid" || microphone_test_exit=$?
   fail "cancelled microphone test left a control file"
 [[ -z $(find "$microphone_test_dir" -type f -name '.microphone-test.*.raw' -print -quit) ]] ||
   fail "cancelled microphone test left a temporary file"
+
+# A hard kill skips the cleanup trap, so clear must reap the orphaned
+# recorder and remove its temporary file itself.
+: >"$microphone_test_log"
+AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
+  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
+  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_WAIT=1 PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-microphone-test" record test-source >/dev/null &
+microphone_test_pid=$!
+for _attempt in {1..100}; do
+  [[ -s $microphone_test_file.pid ]] && break
+  kill -0 "$microphone_test_pid" 2>/dev/null || fail "microphone test stopped before hard kill"
+  sleep 0.01
+done
+[[ -s $microphone_test_file.pid ]] || fail "microphone test hard-kill setup"
+microphone_test_orphan=$(<"$microphone_test_file.pid")
+kill -KILL "$microphone_test_pid"
+wait "$microphone_test_pid" 2>/dev/null || true
+AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
+  "$ROOT/scripts/audio-microphone-test" clear
+for _attempt in {1..50}; do
+  kill -0 "$microphone_test_orphan" 2>/dev/null || break
+  sleep 0.01
+done
+if kill -0 "$microphone_test_orphan" 2>/dev/null; then
+  fail "microphone test clear left the recorder running"
+fi
+[[ ! -e $microphone_test_file.pid && ! -e $microphone_test_file.stop ]] ||
+  fail "hard-killed microphone test left a control file"
+[[ -z $(find "$microphone_test_dir" -type f -name '.microphone-test.*.raw' -print -quit) ]] ||
+  fail "hard-killed microphone test left a temporary file"
 echo "PASS: private microphone record and playback test"
 rm -rf -- "$microphone_test_dir"
 

@@ -39,6 +39,7 @@ Panel {
   property var audioPreferences: Model.parseAudioPreferences("")
   property bool outputOverdrive: false
   property bool captureNotifications: true
+  property bool notificationsAvailable: false
   property var observedRecordingLabels: []
   property bool recordingObservationReady: false
   property real inputPeakHold: 0
@@ -59,7 +60,7 @@ Panel {
     for (var i = 0; i < nodes.length; i++) {
       var n = nodes[i]
       if (n && !n.isSink && !n.isStream && isAudioSource(n)) {
-        var name = n.name || ""
+        var name = String(n.name || "").toLowerCase()
         if (name === "quickshell") continue
         list.push(n)
       }
@@ -126,7 +127,7 @@ Panel {
     var current = listSnapshot(activeRecordingLabels)
     var additions = Model.addedRecordingStreamLabels(observedRecordingLabels, current)
     observedRecordingLabels = current
-    if (!captureNotifications || additions.length === 0) return
+    if (!captureNotifications || additions.length === 0 || !notificationsAvailable) return
 
     var summary = "Microphone access started"
     var body = additions.length === 1
@@ -635,11 +636,8 @@ Panel {
     streamRouteSetProc.running = true
   }
 
-  // Keep the keyboard-focused row inside the visible viewport of the
-  // ScrollView. Each cursor target (slider rows, device rows, application rows)
-  // calls this when it gains hasCursor. Without it, j/k can
-  // walk the selection off-screen — wifi uses ListView.positionViewAtIndex
-  // for this; we don't have that affordance with a multi-section Column.
+  // Scroll the mixer back to the top when it reopens. Following the keyboard
+  // cursor while it moves is handled separately by ensureCursorVisible.
   function resetScroll() {
     if (!scrollArea) return
     var flick = scrollArea.contentItem
@@ -930,6 +928,15 @@ Panel {
       waitForEnd: true
       onStreamFinished: root.updateSinkAvailability(text)
     }
+  }
+
+  // Capture notifications are best-effort; probe once so a missing
+  // notify-send never turns into repeated spawn failures.
+  Process {
+    id: notificationProbeProc
+    running: true
+    command: ["sh", "-c", "command -v notify-send >/dev/null 2>&1"]
+    onExited: function(exitCode) { root.notificationsAvailable = exitCode === 0 }
   }
 
   Process {

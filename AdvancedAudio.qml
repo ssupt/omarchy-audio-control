@@ -856,6 +856,15 @@ Item {
 
   Process {
     id: microphoneTestStopProc
+    onExited: function(exitCode) {
+      // A failed stop request must not strand the row in the stopping state:
+      // if the recorder is still running, tear it down like a cancellation.
+      if (exitCode !== 0 && root.microphoneTestState === "stopping"
+          && root.microphoneTestProc.running) {
+        root.microphoneTestError = "Could not stop the microphone test"
+        root.cancelMicrophoneTest()
+      }
+    }
   }
 
   Timer {
