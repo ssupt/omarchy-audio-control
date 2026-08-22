@@ -1,0 +1,96 @@
+#!/bin/bash
+
+# omarchy:summary=Save or remove named audio scenes in the plugin-owned scene store
+# omarchy:group=audio
+# omarchy:args=[save <name> [scene-json] | delete <name>]
+
+set -euo pipefail
+
+scenes_file=${OMARCHY_AUDIO_SCENES_FILE:-${XDG_CONFIG_HOME:-${HOME:?}/.config}/omarchy/audio-scenes.json}
+action=${1:-}
+maximum_scenes=24
+
+usage() {
+  echo "Usage: audio-scenes save <name> [scene-json] | audio-scenes delete <name>" >&2
+  echo "       scene JSON is read from stdin when not given as an argument" >&2
+  exit 1
+}
+
+read_scenes() {
+  if [[ ! -s $scenes_file ]]; then
+    printf '%s\n' '{"version":1,"scenes":[]}'
+  elif jq -e 'type == "object"' "$scenes_file" >/dev/null 2>&1; then
+    jq -c '
+      .version = 1
+      | .scenes = (if (.scenes | type) == "array" then .scenes else [] end)
+    ' "$scenes_file"
+  else
+    echo "Audio scenes contain invalid JSON; refusing to overwrite them" >&2
+    return 1
+  fi
+}
+
+write_scenes() {
+  local filter=$1
+  shift
+
+  local scenes_dir temporary_file
+  scenes_dir=$(dirname -- "$scenes_file")
+  mkdir -p -- "$scenes_dir"
+  exec 9>"${scenes_file}.lock"
+  flock 9
+
+  temporary_file=$(mktemp "$scenes_dir/.audio-scenes.XXXXXX")
+  trap 'rm -f -- "$temporary_file"' EXIT
+  if ! read_scenes | jq -c "$filter" "$@" >"$temporary_file"; then
+    rm -f -- "$temporary_file"
+    trap - EXIT
+    return 1
+  fi
+  chmod 600 "$temporary_file"
+  mv -f -- "$temporary_file" "$scenes_file"
+  trap - EXIT
+}
+
+case "$action" in
+  save)
+    (( $# == 2 || $# == 3 )) || usage
+    name=$2
+    [[ -n $name ]] || usage
+    if (( $# == 3 )); then
+      scene_json=$(printf '%s' "$3" |
+        jq -c 'if type == "object" then . else empty end' 2>/dev/null) || {
+        echo "Scene must be a JSON object" >&2
+        exit 1
+      }
+      [[ -n $scene_json ]] || {
+        echo "Scene must be a JSON object" >&2
+        exit 1
+      }
+    else
+      scene_json=$(jq -c .) || {
+        echo "Scene is not valid JSON" >&2
+        exit 1
+      }
+      [[ $scene_json == "{"* ]] || {
+        echo "Scene must be a JSON object" >&2
+        exit 1
+      }
+    fi
+    write_scenes '
+      .version = 1
+      | .scenes = (
+          (.scenes | map(select(.name != $name)))
+          + [$scene]
+          | .[-$maximum:]
+        )
+    ' --arg name "$name" --argjson scene "$scene_json" --argjson maximum "$maximum_scenes"
+    ;;
+  delete)
+    (( $# == 2 )) || usage
+    name=$2
+    [[ -n $name ]] || usage
+    write_scenes '.version = 1 | .scenes |= map(select(.name != $name))' --arg name "$name"
+    ;;
+  *) usage ;;
+esac

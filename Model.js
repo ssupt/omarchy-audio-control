@@ -105,6 +105,208 @@ function parseAudioControlSettings(raw) {
   }
 }
 
+function clampNumber(value, fallback, minimum, maximum) {
+  var number = Number(value)
+  if (!isFinite(number)) return fallback
+  return Math.max(minimum, Math.min(maximum, number))
+}
+
+function sanitizeSceneString(value, fallback, maximumLength) {
+  var text = String(value === undefined || value === null ? "" : value).trim()
+  if (text === "") return fallback
+  if (maximumLength && text.length > maximumLength) text = text.substring(0, maximumLength)
+  return text
+}
+
+function sanitizeSceneEntry(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null
+  var name = sanitizeSceneString(raw.name, "", 48)
+  if (name === "") return null
+
+  var defaults = raw.defaults && typeof raw.defaults === "object" && !Array.isArray(raw.defaults)
+    ? raw.defaults : {}
+  var devices = []
+  var rawDevices = Array.isArray(raw.devices) ? raw.devices : []
+  for (var i = 0; i < rawDevices.length && devices.length < 64; i++) {
+    var device = rawDevices[i]
+    if (!device || typeof device !== "object") continue
+    var deviceName = sanitizeSceneString(device.name, "", 160)
+    var direction = device.direction === "input" ? "input" : "output"
+    if (deviceName === "") continue
+    devices.push({
+      name: deviceName,
+      direction: direction,
+      volume: clampNumber(device.volume, 1, 0, 1.5),
+      // Scenes restore playback audibly: a captured output mute would
+      // silently silence an unrelated future session, while microphone
+      // muting is a deliberate privacy state worth restoring.
+      muted: direction === "input" && device.muted === true,
+      balance: clampNumber(device.balance, 0, -1, 1)
+    })
+  }
+
+  var ports = []
+  var rawPorts = Array.isArray(raw.ports) ? raw.ports : []
+  for (var j = 0; j < rawPorts.length && ports.length < 64; j++) {
+    var port = rawPorts[j]
+    if (!port || typeof port !== "object") continue
+    var endpoint = sanitizeSceneString(port.endpoint, "", 160)
+    var portDirection = port.direction === "input" ? "input" : "output"
+    var portValue = sanitizeSceneString(port.value, "", 160)
+    if (endpoint === "" || portValue === "") continue
+    ports.push({ direction: portDirection, endpoint: endpoint, value: portValue })
+  }
+
+  var profiles = []
+  var rawProfiles = Array.isArray(raw.profiles) ? raw.profiles : []
+  for (var k = 0; k < rawProfiles.length && profiles.length < 64; k++) {
+    var profile = rawProfiles[k]
+    if (!profile || typeof profile !== "object") continue
+    var card = sanitizeSceneString(profile.card, "", 160)
+    var profileValue = sanitizeSceneString(profile.profile, "", 160)
+    if (card === "" || profileValue === "") continue
+    // Restoring "off" would power down cards the user may have enabled since;
+    // scenes choose how a card behaves when it is used, never whether it is.
+    if (profileValue === "off") continue
+    profiles.push({ card: card, profile: profileValue })
+  }
+
+  return {
+    name: name,
+    savedAt: sanitizeSceneString(raw.savedAt, "", 32),
+    defaults: {
+      output: sanitizeSceneString(defaults.output, "", 160),
+      input: sanitizeSceneString(defaults.input, "", 160)
+    },
+    devices: devices,
+    ports: ports,
+    profiles: profiles
+  }
+}
+
+function parseAudioScenes(raw) {
+  var parsed
+  try {
+    parsed = JSON.parse(String(raw || "{}"))
+  } catch (e) {
+    parsed = {}
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) parsed = {}
+
+  var scenes = []
+  var rawScenes = Array.isArray(parsed.scenes) ? parsed.scenes : []
+  var seen = {}
+  for (var i = 0; i < rawScenes.length && scenes.length < 24; i++) {
+    var scene = sanitizeSceneEntry(rawScenes[i])
+    if (!scene || seen[scene.name]) continue
+    seen[scene.name] = true
+    scenes.push(scene)
+  }
+  return { version: 1, scenes: scenes }
+}
+
+function sceneSummary(scene) {
+  if (!scene || typeof scene !== "object") return ""
+  var parts = []
+  var deviceCount = scene.devices ? scene.devices.length : 0
+  if (deviceCount > 0)
+    parts.push(deviceCount + (deviceCount === 1 ? " device" : " devices"))
+  if (scene.defaults && scene.defaults.output && scene.defaults.input)
+    parts.push("defaults")
+  else if (scene.defaults && (scene.defaults.output || scene.defaults.input))
+    parts.push("default " + (scene.defaults.output ? "output" : "input"))
+  var portCount = scene.ports ? scene.ports.length : 0
+  if (portCount > 0)
+    parts.push(portCount + (portCount === 1 ? " port" : " ports"))
+  var profileCount = scene.profiles ? scene.profiles.length : 0
+  if (profileCount > 0)
+    parts.push(profileCount + (profileCount === 1 ? " profile" : " profiles"))
+  if (parts.length === 0) return "Empty scene"
+  return parts.join(" · ")
+}
+
+function parseAudioRules(raw) {
+  var parsed
+  try {
+    parsed = JSON.parse(String(raw || "{}"))
+  } catch (e) {
+    parsed = {}
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) parsed = {}
+
+  var appRules = []
+  var rawRules = Array.isArray(parsed.appRules) ? parsed.appRules : []
+  var seen = {}
+  for (var i = 0; i < rawRules.length && appRules.length < 64; i++) {
+    var rule = rawRules[i]
+    if (!rule || typeof rule !== "object") continue
+    var app = sanitizeSceneString(rule.app, "", 120).toLowerCase()
+    var direction = rule.direction === "recording" ? "recording" : "playback"
+    var target = sanitizeSceneString(rule.target, "", 160)
+    if (app === "" || target === "" || seen[direction + ":" + app]) continue
+    seen[direction + ":" + app] = true
+    appRules.push({ app: app, direction: direction, target: target })
+  }
+
+  var devices = parsed.devices && typeof parsed.devices === "object" && !Array.isArray(parsed.devices)
+    ? parsed.devices : {}
+  var aliases = {}
+  if (devices.aliases && typeof devices.aliases === "object" && !Array.isArray(devices.aliases)) {
+    for (var nodeName in devices.aliases) {
+      var alias = sanitizeSceneString(devices.aliases[nodeName], "", 80)
+      var key = String(nodeName || "").trim()
+      if (key !== "" && alias !== "") aliases[key] = alias
+      if (Object.keys(aliases).length >= 128) break
+    }
+  }
+
+  function stringList(value, maximum) {
+    var out = []
+    var rawList = Array.isArray(value) ? value : []
+    for (var j = 0; j < rawList.length && out.length < maximum; j++) {
+      var entry = sanitizeSceneString(rawList[j], "", 160)
+      if (entry !== "") out.push(entry)
+    }
+    return out
+  }
+
+  return {
+    version: 1,
+    appRules: appRules,
+    devices: {
+      aliases: aliases,
+      favorites: stringList(devices.favorites, 64),
+      hidden: stringList(devices.hidden, 64)
+    }
+  }
+}
+
+// Case-insensitive lookup: rules are matched against the labels applications
+// publish, and those spellings vary across launches.
+function findAppRule(rules, direction, appKey) {
+  var key = String(appKey || "").trim().toLowerCase()
+  if (key === "") return null
+  var values = Array.isArray(rules) ? rules : []
+  for (var i = 0; i < values.length; i++)
+    if (values[i].direction === direction && values[i].app === key) return values[i]
+  return null
+}
+
+function deviceSortComparator(favorites) {
+  var ranks = {}
+  var values = Array.isArray(favorites) ? favorites : []
+  for (var i = 0; i < values.length; i++) ranks[values[i]] = i
+  return function(a, b) {
+    var ra = ranks.hasOwnProperty(a) ? ranks[a] : -1
+    var rb = ranks.hasOwnProperty(b) ? ranks[b] : -1
+    var fa = ra >= 0 ? 0 : 1
+    var fb = rb >= 0 ? 0 : 1
+    if (fa !== fb) return fa - fb
+    if (fa === 0 && ra !== rb) return ra - rb
+    return 0
+  }
+}
+
 function parseAudioPolicySettings(raw) {
   var parsed
   try {
@@ -363,7 +565,8 @@ function nodeSerial(node) {
   return serial === undefined || serial === null ? "" : String(serial)
 }
 
-function streamOutputOptions(outputs, defaultOutput) {
+function streamOutputOptions(outputs, defaultOutput, labelFor) {
+  labelFor = labelFor || nodeLabel
   var values = Array.isArray(outputs) ? outputs : []
   var options = []
   var defaultSerial = nodeSerial(defaultOutput)
@@ -373,7 +576,7 @@ function streamOutputOptions(outputs, defaultOutput) {
     var serial = nodeSerial(candidate)
     if (serial !== "" && serial === defaultSerial) {
       options.push({ value: "default:" + serial, label: "Follow default output" })
-      options.push({ value: "override:" + serial, label: "Always use " + nodeLabel(candidate) })
+      options.push({ value: "override:" + serial, label: "Always use " + labelFor(candidate) })
       break
     }
   }
@@ -382,12 +585,13 @@ function streamOutputOptions(outputs, defaultOutput) {
     var output = values[j]
     var outputSerial = nodeSerial(output)
     if (outputSerial === "" || outputSerial === defaultSerial) continue
-    options.push({ value: "override:" + outputSerial, label: "Always use " + nodeLabel(output) })
+    options.push({ value: "override:" + outputSerial, label: "Always use " + labelFor(output) })
   }
   return options
 }
 
-function recordingInputOptions(inputs, defaultInput) {
+function recordingInputOptions(inputs, defaultInput, labelFor) {
+  labelFor = labelFor || nodeLabel
   var values = Array.isArray(inputs) ? inputs : []
   var options = []
   var defaultSerial = nodeSerial(defaultInput)
@@ -397,7 +601,7 @@ function recordingInputOptions(inputs, defaultInput) {
     var serial = nodeSerial(candidate)
     if (serial !== "" && serial === defaultSerial) {
       options.push({ value: "default:" + serial, label: "Follow default input" })
-      options.push({ value: "override:" + serial, label: "Always use " + nodeLabel(candidate) })
+      options.push({ value: "override:" + serial, label: "Always use " + labelFor(candidate) })
       break
     }
   }
@@ -406,7 +610,7 @@ function recordingInputOptions(inputs, defaultInput) {
     var input = values[j]
     var inputSerial = nodeSerial(input)
     if (inputSerial === "" || inputSerial === defaultSerial) continue
-    options.push({ value: "override:" + inputSerial, label: "Always use " + nodeLabel(input) })
+    options.push({ value: "override:" + inputSerial, label: "Always use " + labelFor(input) })
   }
   return options
 }
@@ -676,6 +880,12 @@ if (typeof module !== "undefined") {
     preferredAudioProfile: preferredAudioProfile,
     preferredAudioNodeName: preferredAudioNodeName,
     parseAudioControlSettings: parseAudioControlSettings,
+    parseAudioScenes: parseAudioScenes,
+    sanitizeSceneEntry: sanitizeSceneEntry,
+    sceneSummary: sceneSummary,
+    parseAudioRules: parseAudioRules,
+    findAppRule: findAppRule,
+    deviceSortComparator: deviceSortComparator,
     parseAudioPolicySettings: parseAudioPolicySettings,
     balanceValue: balanceValue,
     applyBalance: applyBalance,

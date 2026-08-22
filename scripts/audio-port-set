@@ -31,8 +31,10 @@ if ! timeout 2 pactl -f json list "$list" 2>/dev/null | jq -e \
             .name == $port
             and (.availability != "not available" or $port == $audio_endpoint.active_port))))
   ' >/dev/null; then
+  # Exit 3 tells callers the target is absent rather than broken, so scenes
+  # can report it as a skipped device instead of a failed step.
   echo "Audio port is not available" >&2
-  exit 1
+  exit 3
 fi
 
 timeout 2 pactl "$command" "$endpoint" "$port"

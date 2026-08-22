@@ -27,6 +27,14 @@ instead of introducing a separate mixer application.
   and recording badge.
 - Record a private five-second microphone test, then explicitly play it back or
   discard it; the temporary clip is removed when the Audio window closes.
+- Save the whole setup as an audio scene and restore it with one click from the
+  quick mixer: defaults, device volumes and balance, ports, and card profiles.
+  Scenes never restore output mutes and never power cards off; devices that are
+  absent are skipped and reported.
+- Pin any application to a device with offline routing rules that are enforced
+  whenever the application starts and the device is present.
+- Rename devices with aliases, mark favorites so they sort first, and hide
+  devices everywhere.
 
 The bar audio icon uses left-click for the quick mixer, middle-click to mute or
 unmute the microphone, right-click to mute or unmute all audio, and the wheel to
@@ -68,6 +76,12 @@ Disturb. The microphone test records only after an explicit action, stores its
 clip with private permissions in the user's runtime directory, never plays it
 automatically, and deletes it on discard or when the Audio window closes. Stopping
 before five seconds keeps the audio recorded so far and makes it ready to play.
+
+Scenes live in `~/.config/omarchy/audio-scenes.json` and routing rules and device
+preferences in `~/.config/omarchy/audio-rules.json`; both are plugin-owned and
+edited through the **Scenes** and **Routing** tabs. Manual route changes on a
+pinned application update its rule, and choosing follow-default deletes it.
+Hidden devices disappear from the mixer until shown again in the Routing tab.
 
 ## Installation
 

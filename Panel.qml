@@ -36,9 +36,30 @@ Panel {
     if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
     return configHome + "/omarchy/audio-preferences.json"
   }
+  readonly property string scenesPath: {
+    var configHome = Quickshell.env("XDG_CONFIG_HOME")
+    if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
+    return configHome + "/omarchy/audio-scenes.json"
+  }
+  readonly property string rulesPath: {
+    var configHome = Quickshell.env("XDG_CONFIG_HOME")
+    if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
+    return configHome + "/omarchy/audio-rules.json"
+  }
+  readonly property string scriptsDir: {
+    var url = String(Qt.resolvedUrl("scripts/"))
+    return decodeURIComponent(url.replace(/^file:\/\//, ""))
+  }
   property var audioPreferences: Model.parseAudioPreferences("")
   property bool outputOverdrive: false
   property bool captureNotifications: true
+  property bool notificationsAvailable: false
+  property var audioScenes: []
+  property bool scenesLoaded: false
+  property var audioRules: Model.parseAudioRules("")
+  property bool rulesLoaded: false
+  property string sceneFeedback: ""
+  property bool sceneFeedbackIsError: false
   property var observedRecordingLabels: []
   property bool recordingObservationReady: false
   property real inputPeakHold: 0
@@ -49,7 +70,7 @@ Panel {
     var list = []
     for (var i = 0; i < nodes.length; i++) {
       var n = nodes[i]
-      if (n && n.isSink && !n.isStream) list.push(n)
+      if (n && n.isSink && !n.isStream && !deviceHidden(n.name)) list.push(n)
     }
     return list
   }
@@ -59,8 +80,9 @@ Panel {
     for (var i = 0; i < nodes.length; i++) {
       var n = nodes[i]
       if (n && !n.isSink && !n.isStream && isAudioSource(n)) {
-        var name = n.name || ""
+        var name = String(n.name || "").toLowerCase()
         if (name === "quickshell") continue
+        if (deviceHidden(n.name)) continue
         list.push(n)
       }
     }
@@ -126,7 +148,7 @@ Panel {
     var current = listSnapshot(activeRecordingLabels)
     var additions = Model.addedRecordingStreamLabels(observedRecordingLabels, current)
     observedRecordingLabels = current
-    if (!captureNotifications || additions.length === 0) return
+    if (!captureNotifications || additions.length === 0 || !notificationsAvailable) return
 
     var summary = "Microphone access started"
     var body = additions.length === 1
@@ -151,13 +173,17 @@ Panel {
     for (var i = 0; i < candidateSinks.length; i++)
       if (sinkAvailable(candidateSinks[i])) list.push(candidateSinks[i])
     if (sink && list.indexOf(sink) < 0) list.unshift(sink)
-    return list
+    var sorted = list.slice()
+    sorted.sort(Model.deviceSortComparator(audioRules.devices.favorites))
+    return sorted
   }
 
   readonly property var rawAudioSources: {
     var list = candidateSources.slice()
     if (source && list.indexOf(source) < 0) list.unshift(source)
-    return list
+    var sorted = list.slice()
+    sorted.sort(Model.deviceSortComparator(audioRules.devices.favorites))
+    return sorted
   }
 
   readonly property var audioSinks: rawAudioSinks.length > 0 ? rawAudioSinks : cachedAudioSinks
@@ -257,8 +283,10 @@ Panel {
 
   // The default is ordered first and named by behavior. Applications on that
   // option follow later default changes; all other choices are persistent.
-  readonly property var streamOutputOptions: Model.streamOutputOptions(displayAudioSinks, sink)
-  readonly property var recordingInputOptions: Model.recordingInputOptions(displayAudioSources, source)
+  readonly property var streamOutputOptions: Model.streamOutputOptions(
+    displayAudioSinks, sink, nodeLabel)
+  readonly property var recordingInputOptions: Model.recordingInputOptions(
+    displayAudioSources, source, nodeLabel)
 
   // A DSP sink -- a speaker tuning, or EasyEffects -- can be the selected output
   // without being where loudness lives: changing its volume alters the level going
@@ -304,6 +332,7 @@ Panel {
   onRawAudioSourcesChanged: if (rawAudioSources.length > 0) cachedAudioSources = rawAudioSources
 
   // Single cursor model shared by keyboard and mouse. Sections:
+  //   "scenes"  — saved scene chips (apply on activation)
   //   "output"  — output slider + sink device list
   //   "input"   — input slider + source device list
   //   "streams"   — per-app playback streams
@@ -338,6 +367,7 @@ Panel {
     : "transparent"
 
   function sectionCount(section) {
+    if (section === "scenes") return audioScenes.length
     if (section === "output") return displayAudioSinks.length
     if (section === "input") return displayAudioSources.length
     if (section === "streams") return displayAudioStreams.length
@@ -346,6 +376,7 @@ Panel {
   }
 
   function sectionVisible(section) {
+    if (section === "scenes") return audioScenes.length > 0
     if (section === "output") return true
     if (section === "input") return displayAudioSources.length > 0 || !!source
     if (section === "streams") return displayAudioStreams.length > 0
@@ -363,6 +394,7 @@ Panel {
   // (e.g. no input devices) doesn't leave the cursor pointing at it.
   readonly property var visibleSections: {
     var list = []
+    if (sectionVisible("scenes")) list.push("scenes")
     if (sectionVisible("output")) list.push("output")
     if (sectionVisible("input")) list.push("input")
     if (sectionVisible("streams")) list.push("streams")
@@ -448,12 +480,12 @@ Panel {
     }
     if (focusSection === "streams" && selectedIndex >= 0 && selectedIndex < displayAudioStreams.length) {
       var s = displayAudioStreams[selectedIndex]
-      if (s && s.audio) s.audio.volume = Math.max(0, Math.min(1.5, s.audio.volume + delta))
+      if (s && s.ready === true && s.audio) s.audio.volume = Math.max(0, Math.min(1.5, s.audio.volume + delta))
       return
     }
     if (focusSection === "recording" && selectedIndex >= 0 && selectedIndex < displayRecordingStreams.length) {
       var recording = displayRecordingStreams[selectedIndex]
-      if (recording && recording.audio)
+      if (recording && recording.ready === true && recording.audio)
         recording.audio.volume = Math.max(0, Math.min(1.5, recording.audio.volume + delta))
     }
   }
@@ -463,6 +495,10 @@ Panel {
     if (focusSection === "header") {
       if (headerIndex === 0) openAdvancedAudio()
       else toggleAllMuted()
+      return
+    }
+    if (focusSection === "scenes") {
+      applySceneAt(selectedIndex)
       return
     }
     if (focusSection === "output") {
@@ -482,7 +518,7 @@ Panel {
       if (row && displayAudioSinks.length > 1) row.toggleOutputMenu()
       else {
         var st = displayAudioStreams[selectedIndex]
-        if (st && st.audio) st.audio.muted = !st.audio.muted
+        if (st && st.ready === true && st.audio) st.audio.muted = !st.audio.muted
       }
       return
     }
@@ -491,7 +527,7 @@ Panel {
       if (recordingRow && displayAudioSources.length > 1) recordingRow.toggleOutputMenu()
       else {
         var recordingStream = displayRecordingStreams[selectedIndex]
-        if (recordingStream && recordingStream.audio)
+        if (recordingStream && recordingStream.ready === true && recordingStream.audio)
           recordingStream.audio.muted = !recordingStream.audio.muted
       }
     }
@@ -508,7 +544,11 @@ Panel {
   onOpenedChanged: {
     if (opened) {
       if (appLibrary && typeof appLibrary.refreshIcons === "function") appLibrary.refreshIcons()
-      refreshDisplayAudioModels()
+      // Populate through the debounced refresh: assigning the display models
+      // synchronously inside this signal regenerates every Repeater while
+      // PipeWire nodes may still be churning from a device change, which has
+      // crashed Quickshell during delegate incubation.
+      scheduleDisplayAudioModelRefresh()
       focusSection = "output"
       headerIndex = 1
       selectedIndex = -1  // first keyboard cursor reveal starts on the output slider
@@ -521,21 +561,51 @@ Panel {
   }
 
   // Clamp / repair the cursor whenever any list refreshes underneath us.
+  // Stream changes also re-run routing rules so a pinned application is
+  // routed as soon as it appears, panel open or not.
   onAudioSinksChanged: scheduleDisplayAudioModelRefresh()
   onAudioSourcesChanged: scheduleDisplayAudioModelRefresh()
-  onAudioStreamsChanged: scheduleDisplayAudioModelRefresh()
-  onRecordingStreamsChanged: scheduleDisplayAudioModelRefresh()
+  onAudioStreamsChanged: {
+    scheduleDisplayAudioModelRefresh()
+    Qt.callLater(enforceRoutingRules)
+  }
+  onRecordingStreamsChanged: {
+    scheduleDisplayAudioModelRefresh()
+    Qt.callLater(enforceRoutingRules)
+  }
 
   function listSnapshot(list) {
     return Model.listSnapshot(list)
   }
 
+  // Repeaters rebuild every delegate when their model array is reassigned,
+  // even if the contents are identical. During device churn those redundant
+  // destroy+incubate cycles are exactly what crashes Quickshell's QJSEngine,
+  // so only reassign when the node membership actually changed. Row sliders
+  // and meters bind nodes directly and stay live without a reassignment.
+  function serialSignature(list) {
+    var parts = []
+    for (var i = 0; i < list.length; i++) {
+      var node = list[i]
+      parts.push(node ? Model.nodeSerial(node) : "")
+    }
+    return parts.join(",")
+  }
+
   function refreshDisplayAudioModels() {
     if (!opened) return
-    displayAudioSinks = listSnapshot(audioSinks)
-    displayAudioSources = listSnapshot(audioSources)
-    displayAudioStreams = listSnapshot(audioStreams)
-    displayRecordingStreams = listSnapshot(recordingStreams)
+    var nextSinks = listSnapshot(audioSinks)
+    var nextSources = listSnapshot(audioSources)
+    var nextStreams = listSnapshot(audioStreams)
+    var nextRecording = listSnapshot(recordingStreams)
+    if (serialSignature(displayAudioSinks) !== serialSignature(nextSinks))
+      displayAudioSinks = nextSinks
+    if (serialSignature(displayAudioSources) !== serialSignature(nextSources))
+      displayAudioSources = nextSources
+    if (serialSignature(displayAudioStreams) !== serialSignature(nextStreams))
+      displayAudioStreams = nextStreams
+    if (serialSignature(displayRecordingStreams) !== serialSignature(nextRecording))
+      displayRecordingStreams = nextRecording
     if (displayAudioStreams.length === 0) streamRoutes = ({})
     if (displayRecordingStreams.length === 0) recordingStreamRoutes = ({})
     refreshStreamRoutes()
@@ -612,6 +682,23 @@ Panel {
     var route = Model.parseStreamOutputOption(optionValue)
     if (streamSerialValue === "" || route.sink === "" || route.mode === "" || streamRouteSetProc.running) return
 
+    // Keep the offline rules layer in sync: when the edited application has
+    // a stored rule, a manual choice rewrites that rule instead of being
+    // fought over by enforcement on the next appearance.
+    lastManualRouteSync = null
+    var existingRule = Model.findAppRule(audioRules.appRules, direction, rawStreamLabel(node))
+    if (existingRule) {
+      var targetName = ""
+      if (route.mode === "override")
+        targetName = deviceNameForSerial(direction === "recording" ? audioSources : audioSinks, route.sink)
+      if (route.mode !== "override" || targetName !== "")
+        lastManualRouteSync = {
+          app: existingRule.app,
+          direction: direction,
+          target: route.mode === "override" ? targetName : ""
+        }
+    }
+
     var routes = direction === "recording" ? recordingStreamRoutes : streamRoutes
     var next = ({})
     for (var key in routes) next[key] = routes[key]
@@ -635,11 +722,66 @@ Panel {
     streamRouteSetProc.running = true
   }
 
-  // Keep the keyboard-focused row inside the visible viewport of the
-  // ScrollView. Each cursor target (slider rows, device rows, application rows)
-  // calls this when it gains hasCursor. Without it, j/k can
-  // walk the selection off-screen — wifi uses ListView.positionViewAtIndex
-  // for this; we don't have that affordance with a multi-section Column.
+  property var lastManualRouteSync: null
+
+  function deviceNameForSerial(list, serial) {
+    for (var i = 0; i < list.length; i++) {
+      var node = list[i]
+      if (node && Model.nodeSerial(node) === String(serial)) return String(node.name || "")
+    }
+    return ""
+  }
+
+  // Enforcement runs outside the panel too: rules matter most when an
+  // application starts while the mixer is closed. A per-stream cache keeps
+  // a satisfied rule from issuing repeated moves.
+  readonly property var enforceableGroups: [
+    { nodes: audioStreams, direction: "playback", devices: audioSinks },
+    { nodes: recordingStreams, direction: "recording", devices: audioSources }
+  ]
+  property var enforcedStreamRoutes: ({})
+
+  function enforceRoutingRules() {
+    if (!rulesLoaded || streamRouteSetProc.running || pendingStreamRoute || streamOutputMenuOpen) return
+    for (var g = 0; g < enforceableGroups.length; g++) {
+      var group = enforceableGroups[g]
+      for (var i = 0; i < group.nodes.length; i++) {
+        var node = group.nodes[i]
+        if (!node || !node.audio || node.ready !== true) continue
+        var serial = Model.nodeSerial(node)
+        if (serial === "") continue
+        var rule = Model.findAppRule(audioRules.appRules, group.direction, rawStreamLabel(node))
+        if (!rule) continue
+        var cacheKey = group.direction + ":" + serial
+        if (enforcedStreamRoutes[cacheKey] === rule.target) continue
+
+        var targetNode = null
+        for (var d = 0; d < group.devices.length; d++) {
+          if (group.devices[d] && group.devices[d].name === rule.target) {
+            targetNode = group.devices[d]
+            break
+          }
+        }
+        // An absent target falls back to WirePlumber's own choice; the rule
+        // is enforced the moment the device appears.
+        if (!targetNode || targetNode.ready !== true) continue
+
+        enforcedStreamRoutes[cacheKey] = rule.target
+        streamRouteSetProc.command = [
+          pluginScript("audio-stream-route-set"),
+          group.direction,
+          serial,
+          Model.nodeSerial(targetNode),
+          "override"
+        ]
+        streamRouteSetProc.running = true
+        return
+      }
+    }
+  }
+
+  // Scroll the mixer back to the top when it reopens. Following the keyboard
+  // cursor while it moves is handled separately by ensureCursorVisible.
   function resetScroll() {
     if (!scrollArea) return
     var flick = scrollArea.contentItem
@@ -803,7 +945,21 @@ Panel {
     return Model.friendlyDeviceLabel(text)
   }
 
+  function deviceAlias(name) {
+    var key = String(name || "")
+    if (key === "") return ""
+    return audioRules.devices.aliases[key] || ""
+  }
+
+  function deviceHidden(name) {
+    return audioRules.devices.hidden.indexOf(String(name || "")) !== -1
+  }
+
   function nodeLabel(node) {
+    if (node && node.name) {
+      var alias = deviceAlias(node.name)
+      if (alias !== "") return alias
+    }
     return Model.nodeLabel(node)
   }
 
@@ -923,6 +1079,70 @@ Panel {
     onFileChanged: reload()
   }
 
+  FileView {
+    path: root.scenesPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: function() {
+      root.audioScenes = Model.parseAudioScenes(text()).scenes
+      root.scenesLoaded = true
+    }
+    onLoadFailed: function() {
+      root.audioScenes = []
+      root.scenesLoaded = true
+    }
+    onFileChanged: reload()
+  }
+
+  FileView {
+    path: root.rulesPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: function() {
+      root.audioRules = Model.parseAudioRules(text())
+      root.rulesLoaded = true
+      Qt.callLater(root.enforceRoutingRules)
+    }
+    onLoadFailed: function() {
+      root.audioRules = Model.parseAudioRules("")
+      root.rulesLoaded = true
+      Qt.callLater(root.enforceRoutingRules)
+    }
+    onFileChanged: reload()
+  }
+
+  AudioSceneController {
+    id: sceneController
+    scriptsDir: root.scriptsDir
+    onApplyFinished: function(result) {
+      var text = "Applied scene '" + result.name + "'"
+      if (result.errors.length > 0)
+        root.showSceneFeedback(text + ", but some steps failed", true)
+      else if (result.skipped.length > 0)
+        root.showSceneFeedback(text + " · skipped: " + result.skipped.join(", "), false)
+      else
+        root.showSceneFeedback(text, false)
+    }
+  }
+
+  Timer {
+    id: sceneFeedbackTimer
+    interval: 6000
+    onTriggered: root.sceneFeedback = ""
+  }
+
+  function showSceneFeedback(text, isError) {
+    sceneFeedback = text
+    sceneFeedbackIsError = isError
+    sceneFeedbackTimer.restart()
+  }
+
+  function applySceneAt(index) {
+    var scene = index >= 0 ? audioScenes[index] : null
+    if (!scene || sceneController.busy) return
+    sceneController.apply(scene)
+  }
+
   Process {
     id: sinkAvailabilityProc
     command: ["omarchy-audio-sink-availability"]
@@ -930,6 +1150,15 @@ Panel {
       waitForEnd: true
       onStreamFinished: root.updateSinkAvailability(text)
     }
+  }
+
+  // Capture notifications are best-effort; probe once so a missing
+  // notify-send never turns into repeated spawn failures.
+  Process {
+    id: notificationProbeProc
+    running: true
+    command: ["sh", "-c", "command -v notify-send >/dev/null 2>&1"]
+    onExited: function(exitCode) { root.notificationsAvailable = exitCode === 0 }
   }
 
   Process {
@@ -985,7 +1214,24 @@ Panel {
       if (exitCode !== 0) root.streamRouteSetError = "Could not change the application route"
       else root.streamRouteSetError = ""
       root.pendingStreamRoute = null
+
+      // Persist manual edits of ruled applications; unruled applications
+      // keep WirePlumber's native per-stream restoration.
+      var sync = root.lastManualRouteSync
+      root.lastManualRouteSync = null
+      if (exitCode === 0 && sync) {
+        var args = sync.target === ""
+          ? [root.pluginScript("audio-app-rules"), "del-app", sync.app, sync.direction]
+          : [root.pluginScript("audio-app-rules"), "set-app", sync.app, sync.direction, sync.target]
+        Quickshell.execDetached(args)
+      }
+
+      // A failed enforcement would otherwise stay cached as satisfied.
+      if (exitCode !== 0 && !root.pendingStreamRoute) {
+        for (var key in root.enforcedStreamRoutes) delete root.enforcedStreamRoutes[key]
+      }
       streamRouteRefreshTimer.restart()
+      Qt.callLater(root.enforceRoutingRules)
     }
   }
 
@@ -1132,7 +1378,7 @@ Panel {
             if (s && s.audio) s.audio.muted = !s.audio.muted
           } else if (root.focusSection === "input") {
             root.toggleInputMute()
-          } else {
+          } else if (root.focusSection !== "scenes") {
             root.toggleOutputMute()
           }
         }
@@ -1262,6 +1508,81 @@ Panel {
             }
           }
 
+          // ---- Scenes ----
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+            visible: root.audioScenes.length > 0
+
+            PanelSectionHeader {
+              text: "SCENES"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+            }
+
+            Flow {
+              id: sceneChipFlow
+              width: parent.width
+              spacing: Style.space(4)
+
+              Repeater {
+                model: root.audioScenes
+
+                CursorSurface {
+                  id: sceneChip
+                  required property var modelData
+                  required property int index
+                  readonly property string sceneName: modelData ? String(modelData.name || "") : ""
+                  width: Math.min(sceneChipLabel.implicitWidth + Style.space(16), sceneChipFlow.width)
+                  height: sceneChipLabel.implicitHeight + Style.space(10)
+                  hasCursor: root.cursorActive && root.focusSection === "scenes"
+                    && root.selectedIndex === sceneChip.index
+                  onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sceneChip)
+                  foreground: root.bar.foreground
+                  fill: root.hoverFill
+                  currentFill: root.selectedFill
+                  bordered: true
+
+                  Text {
+                    id: sceneChipLabel
+                    anchors.centerIn: parent
+                    text: sceneChip.sceneName
+                    color: sceneChip.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    elide: Text.ElideRight
+                    width: Math.min(implicitWidth, sceneChip.width - Style.space(12))
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    enabled: !sceneController.busy
+                    hoverEnabled: true
+                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onContainsMouseChanged: if (containsMouse) {
+                      root.cursorActive = true
+                      root.focusSection = "scenes"
+                      root.selectedIndex = sceneChip.index
+                    }
+                    onClicked: root.applySceneAt(sceneChip.index)
+                  }
+                }
+              }
+            }
+
+            Text {
+              visible: root.sceneFeedback !== ""
+              width: parent.width
+              text: root.sceneFeedback
+              color: root.sceneFeedbackIsError
+                ? root.urgent : Qt.darker(root.bar.foreground, 1.35)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+          }
+
           // ---- Output devices ----
           PanelSeparator {
             foreground: root.bar.foreground
@@ -1336,12 +1657,29 @@ Panel {
             Repeater {
               model: root.displayAudioSinks
 
-              SinkRow {
+              AudioSinkRow {
+                id: sinkDelegate
                 required property var modelData
                 required property int index
                 width: panelColumn.width
                 node: modelData
                 rowIndex: index
+                bar: root.bar
+                preferredName: root.preferredOutputName
+                label: root.nodeLabel(sinkDelegate.node)
+                defaultSetBusy: defaultSinkProc.running
+                hasCursor: root.cursorActive && root.focusSection === "output"
+                  && root.selectedIndex === sinkDelegate.rowIndex
+                onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sinkDelegate)
+                foreground: root.bar.foreground
+                fill: root.hoverFill
+                currentFill: root.selectedFill
+                onClaimed: function(section, index) {
+                  root.cursorActive = true
+                  root.focusSection = section
+                  root.selectedIndex = index
+                }
+                onActivated: function(node) { root.setDefaultSink(node) }
               }
             }
           }
@@ -1455,12 +1793,29 @@ Panel {
             Repeater {
               model: root.displayAudioSources
 
-              SourceRow {
+              AudioSourceRow {
+                id: sourceDelegate
                 required property var modelData
                 required property int index
                 width: panelColumn.width
                 node: modelData
                 rowIndex: index
+                bar: root.bar
+                preferredName: root.preferredInputName
+                label: root.nodeLabel(sourceDelegate.node)
+                defaultSetBusy: defaultSourceProc.running
+                hasCursor: root.cursorActive && root.focusSection === "input"
+                  && root.selectedIndex === sourceDelegate.rowIndex
+                onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sourceDelegate)
+                foreground: root.bar.foreground
+                fill: root.hoverFill
+                currentFill: root.selectedFill
+                onClaimed: function(section, index) {
+                  root.cursorActive = true
+                  root.focusSection = section
+                  root.selectedIndex = index
+                }
+                onActivated: function(node) { root.setDefaultSource(node) }
               }
             }
           }
@@ -1486,13 +1841,49 @@ Panel {
               id: streamRepeater
               model: root.displayAudioStreams
 
-              ApplicationStreamRow {
+              AudioStreamRow {
+                id: streamDelegate
                 required property var modelData
                 required property int index
                 width: panelColumn.width
                 node: modelData
                 rowIndex: index
                 recording: false
+                bar: root.bar
+                monitorEnabled: root.opened
+                representsPlayer: root.streamRepresentsPlayer(streamDelegate.node, root.activeMediaPlayer)
+                currentRoute: streamDelegate.recording
+                  ? root.recordingStreamRoute(streamDelegate.node)
+                  : root.streamRoute(streamDelegate.node)
+                targetCount: streamDelegate.recording
+                  ? root.displayAudioSources.length : root.displayAudioSinks.length
+                routeOptions: streamDelegate.recording
+                  ? root.recordingInputOptions : root.streamOutputOptions
+                streamLabel: streamDelegate.recording
+                  ? root.recordingStreamLabel(streamDelegate.node)
+                  : root.streamLabel(streamDelegate.node)
+                iconSource: root.streamIconSource(streamDelegate.node)
+                routeAvailable: root.streamSerial(streamDelegate.node) !== ""
+                routeSetBusy: streamRouteSetProc.running
+                hasCursor: root.cursorActive
+                  && root.focusSection === (streamDelegate.recording ? "recording" : "streams")
+                  && root.selectedIndex === streamDelegate.rowIndex
+                onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(streamDelegate)
+                foreground: root.bar.foreground
+                fill: root.hoverFill
+                onClaimed: function(section, index) {
+                  root.cursorActive = true
+                  root.focusSection = section
+                  root.selectedIndex = index
+                }
+                onRouteChosen: function(route) {
+                  root.setStreamRoute(streamDelegate.node, route,
+                    streamDelegate.recording ? "recording" : "playback")
+                }
+                onPopupToggled: function(open) {
+                  root.streamOutputMenuOpen = open
+                  if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+                }
               }
             }
           }
@@ -1517,13 +1908,49 @@ Panel {
               id: recordingStreamRepeater
               model: root.displayRecordingStreams
 
-              ApplicationStreamRow {
+              AudioStreamRow {
+                id: recordingStreamDelegate
                 required property var modelData
                 required property int index
                 width: panelColumn.width
                 node: modelData
                 rowIndex: index
                 recording: true
+                bar: root.bar
+                monitorEnabled: root.opened
+                representsPlayer: root.streamRepresentsPlayer(recordingStreamDelegate.node, root.activeMediaPlayer)
+                currentRoute: recordingStreamDelegate.recording
+                  ? root.recordingStreamRoute(recordingStreamDelegate.node)
+                  : root.streamRoute(recordingStreamDelegate.node)
+                targetCount: recordingStreamDelegate.recording
+                  ? root.displayAudioSources.length : root.displayAudioSinks.length
+                routeOptions: recordingStreamDelegate.recording
+                  ? root.recordingInputOptions : root.streamOutputOptions
+                streamLabel: recordingStreamDelegate.recording
+                  ? root.recordingStreamLabel(recordingStreamDelegate.node)
+                  : root.streamLabel(recordingStreamDelegate.node)
+                iconSource: root.streamIconSource(recordingStreamDelegate.node)
+                routeAvailable: root.streamSerial(recordingStreamDelegate.node) !== ""
+                routeSetBusy: streamRouteSetProc.running
+                hasCursor: root.cursorActive
+                  && root.focusSection === (recordingStreamDelegate.recording ? "recording" : "streams")
+                  && root.selectedIndex === recordingStreamDelegate.rowIndex
+                onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(recordingStreamDelegate)
+                foreground: root.bar.foreground
+                fill: root.hoverFill
+                onClaimed: function(section, index) {
+                  root.cursorActive = true
+                  root.focusSection = section
+                  root.selectedIndex = index
+                }
+                onRouteChosen: function(route) {
+                  root.setStreamRoute(recordingStreamDelegate.node, route,
+                    recordingStreamDelegate.recording ? "recording" : "playback")
+                }
+                onPopupToggled: function(open) {
+                  root.streamOutputMenuOpen = open
+                  if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+                }
               }
             }
           }
@@ -1542,394 +1969,4 @@ Panel {
     }
   }
 
-  // ---- Reusable inline components ----
-
-  // Output device row — cursor target inside the "output" section. Mouse
-  // hover updates the panel cursor at the root; visuals come entirely
-  // from hasCursor/current via CursorSurface, never from containsMouse.
-  component SinkRow: CursorSurface {
-    id: sinkRow
-    required property var node
-    required property int rowIndex
-
-    readonly property bool isActive: node && String(node.name || "") === root.preferredOutputName
-    hasCursor: root.cursorActive && root.focusSection === "output" && root.selectedIndex === rowIndex
-    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sinkRow)
-    current: isActive
-    foreground: root.bar.foreground
-    fill: root.hoverFill
-    currentFill: root.selectedFill
-    implicitHeight: sinkInner.implicitHeight + Style.spacing.xl
-
-    Row {
-      id: sinkInner
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(6)
-      anchors.rightMargin: Style.space(6)
-      spacing: Style.space(8)
-
-      Text {
-        text: root.sinkGlyph(sinkRow.node)
-        color: root.bar.foreground
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.title
-        width: Style.space(22)
-        horizontalAlignment: Text.AlignHCenter
-        anchors.verticalCenter: parent.verticalCenter
-      }
-
-      Text {
-        text: root.nodeLabel(sinkRow.node)
-        color: root.bar.foreground
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.body
-        font.bold: sinkRow.isActive
-        elide: Text.ElideRight
-        width: parent.width - Style.space(22) - Style.space(8)
-        anchors.verticalCenter: parent.verticalCenter
-      }
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      enabled: !defaultSinkProc.running
-      hoverEnabled: true
-      cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-      onContainsMouseChanged: if (containsMouse) {
-        root.cursorActive = true
-        root.focusSection = "output"
-        root.selectedIndex = sinkRow.rowIndex
-      }
-      onClicked: root.setDefaultSink(sinkRow.node)
-    }
-  }
-
-  // Input device row — sibling of SinkRow for the "input" section.
-  component SourceRow: CursorSurface {
-    id: sourceRow
-    required property var node
-    required property int rowIndex
-
-    readonly property bool isActive: node && String(node.name || "") === root.preferredInputName
-    hasCursor: root.cursorActive && root.focusSection === "input" && root.selectedIndex === rowIndex
-    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sourceRow)
-    current: isActive
-    foreground: root.bar.foreground
-    fill: root.hoverFill
-    currentFill: root.selectedFill
-    implicitHeight: sourceInner.implicitHeight + Style.spacing.xl
-
-    Row {
-      id: sourceInner
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(6)
-      anchors.rightMargin: Style.space(6)
-      spacing: Style.space(8)
-
-      Text {
-        text: root.sourceGlyph(sourceRow.node)
-        color: root.bar.foreground
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.title
-        width: Style.space(22)
-        horizontalAlignment: Text.AlignHCenter
-        anchors.verticalCenter: parent.verticalCenter
-      }
-
-      Text {
-        text: root.nodeLabel(sourceRow.node)
-        color: root.bar.foreground
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.body
-        font.bold: sourceRow.isActive
-        elide: Text.ElideRight
-        width: parent.width - Style.space(22) - Style.space(8)
-        anchors.verticalCenter: parent.verticalCenter
-      }
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      enabled: !defaultSourceProc.running
-      hoverEnabled: true
-      cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-      onContainsMouseChanged: if (containsMouse) {
-        root.cursorActive = true
-        root.focusSection = "input"
-        root.selectedIndex = sourceRow.rowIndex
-      }
-      onClicked: root.setDefaultSource(sourceRow.node)
-    }
-  }
-
-  // Playback and recording applications share interaction and volume controls;
-  // only their endpoint list, route map, label, and icon differ.
-  component ApplicationStreamRow: CursorSurface {
-    id: streamRow
-    required property var node
-    required property int rowIndex
-    property bool recording: false
-
-    readonly property real streamVolume: node && node.audio ? node.audio.volume : 0
-    readonly property bool streamMuted: node && node.audio ? node.audio.muted : false
-    readonly property real meterLevel: Model.audioMeterLevel(
-      streamPeakMonitor.peaks,
-      node && node.audio ? node.audio.volumes : [],
-      streamPeakMonitor.peak,
-      streamVolume,
-      streamMuted)
-    readonly property bool isActive: !recording && root.streamRepresentsPlayer(node, root.activeMediaPlayer)
-    readonly property string streamSerial: root.streamSerial(node)
-    readonly property var currentRoute: recording
-      ? root.recordingStreamRoute(node) : root.streamRoute(node)
-    readonly property string targetSerial: currentRoute ? String(currentRoute.target || "") : ""
-    readonly property string routeMode: currentRoute ? String(currentRoute.mode || "") : ""
-    readonly property string routeOptionValue: routeMode !== "" && targetSerial !== ""
-      ? routeMode + ":" + targetSerial : ""
-    readonly property bool routeIsExplicit: routeMode === "override"
-    readonly property string routeSection: recording ? "recording" : "streams"
-    readonly property int targetCount: recording
-      ? root.displayAudioSources.length : root.displayAudioSinks.length
-    readonly property var routeOptions: recording
-      ? root.recordingInputOptions : root.streamOutputOptions
-    hasCursor: root.cursorActive && root.focusSection === routeSection && root.selectedIndex === rowIndex
-    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(streamRow)
-    foreground: root.bar.foreground
-    fill: root.hoverFill
-    implicitHeight: streamColumn.implicitHeight + Style.spacing.xl
-
-    PwNodePeakMonitor {
-      id: streamPeakMonitor
-      node: streamRow.node
-      enabled: root.opened && !!streamRow.node
-    }
-
-    function toggleOutputMenu() {
-      if (streamRow.targetCount > 1 && streamRow.targetSerial !== "" && routeDropdown.enabled)
-        routeDropdown.toggle()
-    }
-
-    Component.onDestruction: if (routeDropdown.popupOpen) root.streamOutputMenuOpen = false
-
-    Column {
-      id: streamColumn
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(6)
-      anchors.rightMargin: Style.space(6)
-      spacing: Style.space(2)
-
-      Item {
-        id: streamHeader
-        width: parent.width
-        height: streamHeaderContent.implicitHeight
-
-        Row {
-          id: streamHeaderContent
-          anchors.fill: parent
-          spacing: Style.space(8)
-
-          Item {
-            id: streamMuteIcon
-            width: Style.space(22)
-            height: Style.font.title
-            anchors.verticalCenter: parent.verticalCenter
-
-            Image {
-              id: streamAppIcon
-              anchors.centerIn: parent
-              width: Style.font.title
-              height: Style.font.title
-              fillMode: Image.PreserveAspectFit
-              sourceSize.width: Math.round(width * Screen.devicePixelRatio)
-              sourceSize.height: Math.round(height * Screen.devicePixelRatio)
-              source: root.streamIconSource(streamRow.node)
-              asynchronous: true
-              visible: status === Image.Ready
-              opacity: streamRow.streamMuted ? 0.5 : 1.0
-            }
-
-            Text {
-              visible: !streamAppIcon.visible
-              anchors.fill: parent
-              text: streamRow.recording
-                ? (streamRow.streamMuted ? "󰍭" : "󰍬")
-                : (streamRow.streamMuted ? "󰝟" : "󰕾")
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.title
-              horizontalAlignment: Text.AlignHCenter
-              verticalAlignment: Text.AlignVCenter
-              opacity: streamRow.streamMuted ? 0.5 : 1.0
-            }
-
-            MouseArea {
-              anchors.fill: parent
-              cursorShape: Qt.PointingHandCursor
-              onClicked: {
-                if (streamRow.node && streamRow.node.audio)
-                  streamRow.node.audio.muted = !streamRow.node.audio.muted
-              }
-            }
-          }
-
-          Item {
-            id: streamNameArea
-            width: parent.width - streamMuteIcon.width - streamPct.width - Style.space(16)
-            height: Math.max(streamName.implicitHeight, routeChevron.visible ? routeChevron.height : 0)
-
-            Text {
-              id: streamName
-              text: streamRow.recording
-                ? root.recordingStreamLabel(streamRow.node) : root.streamLabel(streamRow.node)
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.body
-              font.bold: streamRow.isActive
-              elide: Text.ElideRight
-              width: Math.min(implicitWidth, parent.width
-                - (routeChevron.visible ? routeChevron.width + Style.space(4) : 0))
-              anchors.left: parent.left
-              anchors.verticalCenter: parent.verticalCenter
-            }
-
-            Text {
-              id: routeChevron
-              visible: streamRow.targetCount > 1 && streamRow.targetSerial !== ""
-              width: Style.space(22)
-              text: {
-                var position = root.bar ? root.bar.position : "left"
-                if (position === "top") return "󰅀"
-                if (position === "bottom") return "󰅃"
-                return position === "right" ? "󰅁" : "󰅂"
-              }
-              color: streamRow.routeIsExplicit
-                ? Style.selectedStateColor(root.bar.foreground, Color.accent)
-                : Qt.darker(root.bar.foreground, 1.2)
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.body
-              horizontalAlignment: Text.AlignHCenter
-              anchors.left: streamName.right
-              anchors.leftMargin: Style.space(4)
-              anchors.verticalCenter: parent.verticalCenter
-            }
-          }
-
-          Text {
-            id: streamPct
-            text: Math.round(streamRow.streamVolume * 100) + "%"
-            color: Qt.darker(root.bar.foreground, 1.5)
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.caption
-            font.bold: true
-            width: Style.space(36)
-            horizontalAlignment: Text.AlignRight
-            anchors.verticalCenter: parent.verticalCenter
-            opacity: streamRow.streamMuted ? 0.5 : 1.0
-          }
-        }
-
-        // Routing is a property of the application, so the dropdown's actual
-        // trigger spans the whole header. Its chrome is hidden: the adjacent
-        // chevron communicates the submenu while the leading icon owns mute
-        // and the slider below continues to own volume changes.
-        AudioDropdown {
-          id: routeDropdown
-          anchors.left: parent.left
-          anchors.leftMargin: streamMuteIcon.width
-          anchors.right: parent.right
-          anchors.top: parent.top
-          anchors.bottom: parent.bottom
-          z: 1
-          visible: streamRow.targetCount > 1 && streamRow.targetSerial !== ""
-          rowHeight: height
-          popupRowHeight: Style.space(34)
-          popupDirection: {
-            var position = root.bar ? root.bar.position : "left"
-            if (position === "top") return "down"
-            if (position === "bottom") return "up"
-            return position === "right" ? "left" : "right"
-          }
-          popupGap: popupDirection === "left"
-            ? Style.space(6) + streamMuteIcon.width
-            : (popupDirection === "right" ? Style.space(6) : Style.spacing.xxs)
-          popupOffsetX: popupDirection === "down" || popupDirection === "up"
-            ? -Style.space(6) - streamMuteIcon.width : 0
-          popupSideAlignment: "center"
-          popupAnchorHeight: streamColumn.height
-          popupWidth: streamRow.width
-          chevronOnly: true
-          showChevron: false
-          triggerChrome: false
-          value: streamRow.routeOptionValue
-          options: streamRow.routeOptions
-          enabled: streamRow.streamSerial !== "" && !streamRouteSetProc.running
-          foreground: root.bar.foreground
-          fontFamily: root.bar.fontFamily
-
-          onHovered: function(on) { if (on) {
-            root.cursorActive = true
-            root.focusSection = streamRow.routeSection
-            root.selectedIndex = streamRow.rowIndex
-          } }
-          onChanged: function(route) {
-            root.setStreamRoute(streamRow.node, route, streamRow.recording ? "recording" : "playback")
-          }
-          onPopupOpenChanged: {
-            root.streamOutputMenuOpen = popupOpen
-            if (!popupOpen) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
-          }
-        }
-      }
-
-      PanelSlider {
-        bar: root.bar
-        width: parent.width
-        minimum: 0
-        maximum: 1.5
-        step: 0.05
-        value: streamRow.streamVolume
-        opacity: streamRow.streamMuted ? 0.5 : 1.0
-
-        onMoved: function(v) {
-          if (streamRow.node && streamRow.node.audio) streamRow.node.audio.volume = v
-        }
-        onRightClicked: {
-          if (streamRow.node && streamRow.node.audio)
-            streamRow.node.audio.muted = !streamRow.node.audio.muted
-        }
-      }
-
-      Rectangle {
-        width: parent.width
-        height: Math.max(Style.space(4), Style.spacing.xs)
-        color: Util.alpha(root.bar.foreground, 0.18)
-        opacity: streamRow.streamMuted ? 0.35 : 1.0
-
-        Rectangle {
-          height: parent.height
-          width: parent.width * streamRow.meterLevel
-          color: root.bar.foreground
-          Behavior on width { NumberAnimation { duration: 70 } }
-        }
-      }
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      hoverEnabled: true
-      acceptedButtons: Qt.NoButton
-      propagateComposedEvents: true
-      onContainsMouseChanged: if (containsMouse) {
-        root.cursorActive = true
-        root.focusSection = streamRow.routeSection
-        root.selectedIndex = streamRow.rowIndex
-      }
-    }
-  }
 }

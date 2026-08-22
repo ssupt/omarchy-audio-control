@@ -22,16 +22,31 @@ profile_state=$(jq -c --arg card "$card" --arg profile "$profile" '
 ' <<<"$profiles") || exit 1
 if [[ -z $profile_state ]]; then
   echo "Profile is not available for this device" >&2
-  exit 1
+  exit 3
 fi
 expected_sinks=$(jq -r '.sinks // 0' <<<"$profile_state")
 expected_sources=$(jq -r '.sources // 0' <<<"$profile_state")
 [[ $expected_sinks =~ ^[0-9]+$ ]] || expected_sinks=0
 [[ $expected_sources =~ ^[0-9]+$ ]] || expected_sources=0
 
-card_index=$(timeout 2 pactl -f json list cards 2>/dev/null |
-  jq -r --arg card "$card" 'map(select(.name == $card))[0].index // empty') || exit 1
+# Exit codes: 0 changed (or was already active), 2 saved but preference lost,
+# 3 target card or profile absent, 1 everything else.
+card_info=$(timeout 2 pactl -f json list cards 2>/dev/null |
+  jq -c --arg card "$card" 'map(select(.name == $card))[0] // empty') || exit 1
+[[ -n $card_info ]] || {
+  echo "Audio card is not available" >&2
+  exit 3
+}
+card_index=$(jq -r '.index // empty' <<<"$card_info") || exit 1
 [[ $card_index =~ ^[0-9]+$ ]] || exit 1
+
+# Re-applying the active profile would run the whole mute-restore dance for
+# nothing, which briefly silences playback and can leave endpoints muted if
+# endpoints never come back. Treat it as done.
+active_profile=$(jq -r '.active_profile // empty' <<<"$card_info")
+if [[ -n $active_profile && $active_profile == "$profile" ]]; then
+  exit 0
+fi
 
 read_endpoint_states() {
   local endpoint_type=$1
@@ -118,12 +133,17 @@ fi
 
 new_sink_states='[]'
 new_source_states='[]'
+# Bound the wait in wall-clock time: each poll spawns two pactl calls whose
+# own timeouts already cost up to four seconds, so an attempt cap alone can
+# stretch into minutes when endpoints never appear.
+wait_deadline=$(( $(date +%s%3N) + 2500 ))
 for (( attempt = 0; attempt < 40; attempt++ )); do
   new_sink_states=$(read_endpoint_states sinks) || new_sink_states='[]'
   new_source_states=$(read_endpoint_states sources) || new_source_states='[]'
   new_sink_count=$(jq 'length' <<<"$new_sink_states")
   new_source_count=$(jq 'length' <<<"$new_source_states")
   (( new_sink_count >= expected_sinks && new_source_count >= expected_sources )) && break
+  (( $(date +%s%3N) >= wait_deadline )) && break
   sleep 0.05
 done
 
@@ -181,6 +201,31 @@ restore_new_endpoint_states() {
 
 restore_new_endpoint_states sink "$sink_states" "$new_sink_states"
 restore_new_endpoint_states source "$source_states" "$new_source_states"
+
+restore_surviving_endpoint_mutes() {
+  local endpoint_kind=$1 old_states=$2 new_states=$3
+  local count index endpoint_index endpoint_muted
+  count=$(jq 'length' <<<"$old_states")
+  for (( index = 0; index < count; index++ )); do
+    endpoint_index=$(jq -r --argjson index "$index" '.[$index].index // empty' <<<"$old_states")
+    [[ $endpoint_index =~ ^[0-9]+$ ]] || continue
+    # Only endpoints that never got recreated still carry the transitional
+    # mute; vanished ones need nothing and recreated ones were just restored.
+    jq -e --argjson idx "$endpoint_index" 'any(.[].index; . == $idx)' \
+      <<<"$new_states" >/dev/null 2>&1 || continue
+    endpoint_muted=$(jq -r --argjson index "$index" '.[$index].mute // false' <<<"$old_states")
+    timeout 2 pactl "set-${endpoint_kind}-mute" "$endpoint_index" "$endpoint_muted" >/dev/null 2>&1 || true
+  done
+}
+
+if (( new_sink_count < expected_sinks || new_source_count < expected_sources )); then
+  # Endpoints that were expected after the profile change never appeared.
+  # Undo the transitional muting on every endpoint that survived it, so a
+  # slow or refused transition cannot leave playback silently muted.
+  echo "Audio endpoints did not reappear after the profile change" >&2
+  restore_surviving_endpoint_mutes sink "$sink_states" "$new_sink_states"
+  restore_surviving_endpoint_mutes source "$source_states" "$new_source_states"
+fi
 
 restore_sink_inputs
 exit 0

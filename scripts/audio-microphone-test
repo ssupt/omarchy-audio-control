@@ -143,7 +143,20 @@ case "$action" in
     ;;
   clear)
     (( $# == 1 )) || usage
-    rm -f -- "$test_file" "$record_pid_file" "$stop_request_file"
+    test_dir=$(dirname -- "$test_file")
+    if [[ -d $test_dir ]]; then
+      # A record helper killed hard skips its cleanup trap, leaving pw-record
+      # running and its temporary file behind. Reap both so a cancelled test
+      # never keeps the microphone open or stray audio on disk.
+      orphan_pid=""
+      if [[ -s $record_pid_file && ! -L $record_pid_file ]]; then
+        read -r orphan_pid <"$record_pid_file" || true
+      fi
+      if [[ $orphan_pid =~ ^[1-9][0-9]*$ ]] && kill -0 "$orphan_pid" 2>/dev/null; then
+        kill -KILL "$orphan_pid" 2>/dev/null || true
+      fi
+      rm -f -- "$test_dir"/.microphone-test.*.raw "$test_file" "$record_pid_file" "$stop_request_file"
+    fi
     ;;
   *) usage ;;
 esac

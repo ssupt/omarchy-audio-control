@@ -41,6 +41,36 @@ assert.deepEqual(model.parseAudioControlSettings('not json'), {
   captureNotifications: true
 })
 assert.equal(model.parseAudioControlSettings('{"captureNotifications":false}').captureNotifications, false)
+assert.deepEqual(
+  model.parseAudioScenes(JSON.stringify({
+    version: 1,
+    scenes: [{
+      name: 'Desk',
+      defaults: { output: 'speakers', input: 'mic' },
+      devices: [
+        { name: 'speakers', direction: 'output', volume: 0.5, muted: true, balance: 0 },
+        { name: 'mic', direction: 'input', volume: 1, muted: true, balance: 0 }
+      ],
+      ports: [],
+      profiles: [
+        { card: 'bluez_card.test', profile: 'a2dp-aac' },
+        { card: 'alsa_card.test', profile: 'off' }
+      ]
+    }]
+  })).scenes[0],
+  {
+    name: 'Desk',
+    savedAt: '',
+    defaults: { output: 'speakers', input: 'mic' },
+    devices: [
+      // Output muting is never restored: a scene must play audibly.
+      { name: 'speakers', direction: 'output', volume: 0.5, muted: false, balance: 0 },
+      { name: 'mic', direction: 'input', volume: 1, muted: true, balance: 0 }
+    ],
+    ports: [],
+    // "off" is never stored: scenes never power cards down.
+    profiles: [{ card: 'bluez_card.test', profile: 'a2dp-aac' }]
+  })
 assert.deepEqual(model.parseAudioPolicySettings(JSON.stringify({
   'node.features.audio.mono': true,
   'linking.pause-playback': 'true',
@@ -302,6 +332,8 @@ AUDIO_CONTROL_PORT_LOG="$port_log" PATH="$TEST_DIR/mocks:$PATH" \
 if AUDIO_CONTROL_PORT_LOG="$port_log" PATH="$TEST_DIR/mocks:$PATH" \
   "$ROOT/scripts/audio-port-set" output speakers hdmi-output >/dev/null 2>&1; then
   fail "unavailable audio port accepted"
+else
+  [[ $? == 3 ]] || fail "unavailable audio port reported wrong exit code"
 fi
 echo "PASS: audio port controls"
 
@@ -360,6 +392,80 @@ jq -e 'has("monitor.alsa.autodetect-hdmi-channels") | not' <<<"$policy" >/dev/nu
   fail "unsupported audio policy exposed"
 echo "PASS: capability-aware audio safety policies"
 rm -f -- "$policy_log" "$policy_state"
+
+scenes_dir=$(mktemp -d)
+scenes_file="$scenes_dir/audio-scenes.json"
+trap 'rm -f "$route_log" "$input_default_log" "$port_log"; rm -rf "$microphone_test_dir" "$scenes_dir"' EXIT
+
+scene_one='{"name":"Desk","defaults":{"output":"speakers","input":"mic"},"devices":[{"name":"speakers","direction":"output","volume":0.5,"muted":false,"balance":0}],"ports":[],"profiles":[]}'
+scene_two='{"name":"Headset","defaults":{"output":"headphones","input":"headset-mic"},"devices":[],"ports":[],"profiles":[]}'
+if OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-scenes" save Desk <<<'' >/dev/null 2>&1; then
+  fail "empty audio scene accepted"
+fi
+if printf '%s\n' '[1,2]' | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-scenes" save Desk >/dev/null 2>&1; then
+  fail "non-object audio scene accepted"
+fi
+printf '%s\n' "$scene_one" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-scenes" save Desk >/dev/null
+[[ -s $scenes_file ]] || fail "audio scene not saved"
+[[ $(stat -c '%a' "$scenes_file") == 600 ]] || fail "audio scene store permissions"
+jq -e '.scenes[0].name == "Desk" and .scenes[0].defaults.output == "speakers"' "$scenes_file" >/dev/null ||
+  fail "audio scene content"
+scene_replacement='{"name":"Desk","defaults":{"output":"line-out","input":"mic"},"devices":[],"ports":[],"profiles":[]}'
+printf '%s\n' "$scene_two" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-scenes" save Headset >/dev/null
+printf '%s\n' "$scene_replacement" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-scenes" save Desk >/dev/null
+jq -e '(.scenes | length) == 2 and .scenes[1].defaults.output == "line-out"' "$scenes_file" >/dev/null ||
+  fail "audio scene replacement"
+for _index in $(seq 1 30); do
+  printf '%s\n' "{\"name\":\"Scene $_index\"}" |
+    OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+    "$ROOT/scripts/audio-scenes" save "Scene $_index" >/dev/null
+done
+jq -e '(.scenes | length) <= 24' "$scenes_file" >/dev/null || fail "audio scene cap"
+OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-scenes" delete Headset >/dev/null
+jq -e '[.scenes[].name] | index("Headset") | not' "$scenes_file" >/dev/null ||
+  fail "audio scene deletion"
+echo "PASS: named audio scene storage"
+
+rules_file="$scenes_dir/audio-rules.json"
+export OMARCHY_AUDIO_RULES_FILE="$rules_file"
+"$ROOT/scripts/audio-app-rules" set-app "Firefox" playback speakers
+"$ROOT/scripts/audio-app-rules" set-app firefox recording usb-microphone
+jq -e '(.appRules | length) == 2 and .appRules[0].target == "speakers"' "$rules_file" >/dev/null ||
+  fail "application rule upsert"
+"$ROOT/scripts/audio-app-rules" set-app FIREFOX playback headphones
+jq -e '(.appRules | length) == 2
+  and ([.appRules[] | select(.direction == "playback")][0].target == "headphones")' "$rules_file" >/dev/null ||
+  fail "application rule replacement"
+if "$ROOT/scripts/audio-app-rules" set-app firefox sideways speakers >/dev/null 2>&1; then
+  fail "invalid application rule direction accepted"
+fi
+"$ROOT/scripts/audio-app-rules" del-app FIREFOX playback
+jq -e '(.appRules | length) == 1 and .appRules[0].direction == "recording"' "$rules_file" >/dev/null ||
+  fail "application rule deletion"
+"$ROOT/scripts/audio-app-rules" set-alias speakers "Desk Speakers"
+"$ROOT/scripts/audio-app-rules" set-flag speakers favorite true
+"$ROOT/scripts/audio-app-rules" set-flag mic hidden true
+jq -e '.devices.aliases.speakers == "Desk Speakers"
+  and (.devices.favorites | index("speakers") != null)
+  and (.devices.hidden | index("mic") != null)' "$rules_file" >/dev/null ||
+  fail "device preference storage"
+if "$ROOT/scripts/audio-app-rules" set-flag mic sideways true >/dev/null 2>&1; then
+  fail "invalid device flag accepted"
+fi
+"$ROOT/scripts/audio-app-rules" set-alias speakers ""
+"$ROOT/scripts/audio-app-rules" set-flag speakers favorite false
+jq -e '(.devices.aliases | has("speakers") | not)
+  and ((.devices.favorites | index("speakers")) == null)' "$rules_file" >/dev/null ||
+  fail "device preference removal"
+unset OMARCHY_AUDIO_RULES_FILE
+echo "PASS: application rules and device preference store"
+rm -rf -- "$scenes_dir"
 
 microphone_test_dir=$(mktemp -d)
 microphone_test_log="$microphone_test_dir/commands.log"
@@ -456,6 +562,37 @@ wait "$microphone_test_pid" || microphone_test_exit=$?
   fail "cancelled microphone test left a control file"
 [[ -z $(find "$microphone_test_dir" -type f -name '.microphone-test.*.raw' -print -quit) ]] ||
   fail "cancelled microphone test left a temporary file"
+
+# A hard kill skips the cleanup trap, so clear must reap the orphaned
+# recorder and remove its temporary file itself.
+: >"$microphone_test_log"
+AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
+  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
+  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_WAIT=1 PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-microphone-test" record test-source >/dev/null &
+microphone_test_pid=$!
+for _attempt in {1..100}; do
+  [[ -s $microphone_test_file.pid ]] && break
+  kill -0 "$microphone_test_pid" 2>/dev/null || fail "microphone test stopped before hard kill"
+  sleep 0.01
+done
+[[ -s $microphone_test_file.pid ]] || fail "microphone test hard-kill setup"
+microphone_test_orphan=$(<"$microphone_test_file.pid")
+kill -KILL "$microphone_test_pid"
+wait "$microphone_test_pid" 2>/dev/null || true
+AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
+  "$ROOT/scripts/audio-microphone-test" clear
+for _attempt in {1..50}; do
+  kill -0 "$microphone_test_orphan" 2>/dev/null || break
+  sleep 0.01
+done
+if kill -0 "$microphone_test_orphan" 2>/dev/null; then
+  fail "microphone test clear left the recorder running"
+fi
+[[ ! -e $microphone_test_file.pid && ! -e $microphone_test_file.stop ]] ||
+  fail "hard-killed microphone test left a control file"
+[[ -z $(find "$microphone_test_dir" -type f -name '.microphone-test.*.raw' -print -quit) ]] ||
+  fail "hard-killed microphone test left a temporary file"
 echo "PASS: private microphone record and playback test"
 rm -rf -- "$microphone_test_dir"
 
@@ -533,8 +670,31 @@ if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
   "$ROOT/scripts/audio-profile-set" \
     alsa_card.usb-example-headset output:iec958-ac3-surround-51 >/dev/null 2>&1; then
   fail "unsafe profile accepted"
+else
+  [[ $? == 3 ]] || fail "unsafe profile reported wrong exit code"
 fi
 [[ ! -s $profile_log ]] || fail "unsafe profile changed hardware"
+
+# Re-applying the active profile must succeed without touching hardware.
+AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
+  AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
+  AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
+  PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-profile-set" \
+    alsa_card.usb-example-headset output:analog-stereo >/dev/null 2>&1 ||
+  fail "unchanged audio profile rejected"
+[[ ! -s $profile_log ]] || fail "unchanged audio profile touched hardware"
+
+if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
+  AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
+  AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
+  PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-profile-set" \
+    bluez_card.absent_device a2dp-sink >/dev/null 2>&1; then
+  fail "absent audio card accepted"
+else
+  [[ $? == 3 ]] || fail "absent audio card reported wrong exit code"
+fi
 
 AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
   AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
@@ -589,6 +749,29 @@ EOF
   fail "per-endpoint profile state preservation"
 echo "PASS: per-endpoint profile state preservation"
 
+# When expected endpoints never reappear, the transitional muting must be
+# undone on the endpoints that survived the profile change.
+: >"$profile_log"
+printf 'old\n' >"$profile_state"
+profile_warning="$TEST_DIR/vanish-warning"
+AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
+  AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
+  AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
+  AUDIO_CONTROL_PROFILE_VANISH_SINKS=1 \
+  PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-profile-set" \
+    alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback 2>"$profile_warning" ||
+  fail "vanishing endpoint transition failed outright"
+grep -q "did not reappear" "$profile_warning" || fail "missing vanishing endpoint warning"
+grep -q '^set-sink-input-mute 300 false$' "$profile_log" ||
+  fail "sink input stayed muted after vanished endpoints"
+[[ $(grep -c '^set-source-mute 200 true$' "$profile_log") -ge 2 ]] ||
+  fail "surviving source endpoint not unmuted after vanished endpoints"
+! grep -q '^set-sink-volume ' "$profile_log" ||
+  fail "volume restored onto a nonexistent sink"
+rm -f "$profile_warning"
+echo "PASS: vanished endpoint muting recovery"
+
 menu_tmp=$(mktemp -d)
 menu_file="$menu_tmp/omarchy-menu.jsonc"
 trap 'rm -f "$route_log" "$input_default_log" "$port_log" "$bluetooth_preference_log" "$bluetooth_preference_state" "$profile_log" "$profile_state"; rm -rf "$menu_tmp"' EXIT
@@ -623,7 +806,7 @@ echo "PASS: menu integration"
 jq -e '
   .schemaVersion == 1
   and .id == "ssupt.audio-control"
-  and .version == "0.5.1"
+  and .version == "0.6.0"
   and .author == "ssupt"
   and (.kinds | index("bar-widget") != null)
   and (.kinds | index("panel") != null)
