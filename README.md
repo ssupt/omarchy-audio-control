@@ -123,6 +123,13 @@ plugin code before enabling it.
 omarchy-plugin-validate .
 ```
 
+The two entry points own presentation and keyboard navigation. Shared behavior
+stays outside them: `Model.js` contains pure, Node-tested transformations;
+`AudioRuntime.qml` owns paths; focused controllers own policy, saved-rule,
+scene, and microphone-test lifecycles; and `scripts/` contains the guarded
+system mutations. Keep new diagnostics and recovery work behind the same
+controller boundary so it can be tested without growing either main view.
+
 Advanced Audio Control is derived from Omarchy's built-in audio widget and is
 distributed under the same MIT license.
 

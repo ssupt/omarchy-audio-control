@@ -28,6 +28,43 @@ function isAudioSource(node) {
     || mediaClass.indexOf("Source") !== -1
 }
 
+function isInternalAudioNode(name) {
+  var value = String(name || "").trim().toLowerCase()
+  return value === "quickshell"
+    || value.indexOf("omarchy_audio_test") === 0
+    || value.indexOf("omarchy_speaker_tuning") === 0
+}
+
+function isMonitorSource(node) {
+  if (!node) return false
+  var name = String(node.name || "").toLowerCase()
+  var properties = nodeProps(node)
+  return name.endsWith(".monitor")
+    || String(properties["device.class"] || "").toLowerCase() === "monitor"
+}
+
+// Keep PipeWire classification in one place so every surface excludes the
+// plugin's own streams and monitor sources consistently. QML list properties
+// are array-like rather than true Arrays, hence the length-based input check.
+function classifyAudioNodes(nodes) {
+  var values = nodes && typeof nodes.length === "number" ? nodes : []
+  var result = { sinks: [], sources: [], playbackStreams: [], recordingStreams: [] }
+  for (var i = 0; i < values.length; i++) {
+    var node = values[i]
+    if (!node) continue
+    if (node.isStream) {
+      if (isInternalAudioNode(node.name)) continue
+      if (isPlaybackStream(node)) result.playbackStreams.push(node)
+      else if (isRecordingStream(node)) result.recordingStreams.push(node)
+      continue
+    }
+    if (node.isSink === true) result.sinks.push(node)
+    else if (isAudioSource(node) && !isInternalAudioNode(node.name) && !isMonitorSource(node))
+      result.sources.push(node)
+  }
+  return result
+}
+
 function listSnapshot(list) {
   return list && list.slice ? list.slice() : []
 }
@@ -265,7 +302,7 @@ function parseAudioRules(raw) {
     var rawList = Array.isArray(value) ? value : []
     for (var j = 0; j < rawList.length && out.length < maximum; j++) {
       var entry = sanitizeSceneString(rawList[j], "", 160)
-      if (entry !== "") out.push(entry)
+      if (entry !== "" && out.indexOf(entry) === -1) out.push(entry)
     }
     return out
   }
@@ -292,13 +329,53 @@ function findAppRule(rules, direction, appKey) {
   return null
 }
 
+function availableRuleApplicationLabels(playbackStreams, recordingStreams, rules) {
+  var candidates = []
+
+  function consider(node, direction) {
+    if (!node || node.ready !== true || !node.audio) return
+    var label = String(rawStreamLabel(node) || "").trim()
+    if (label === "") return
+    var key = label.toLowerCase()
+    var candidate = null
+    for (var i = 0; i < candidates.length; i++) {
+      if (candidates[i].key === key) {
+        candidate = candidates[i]
+        break
+      }
+    }
+    if (!candidate) {
+      candidate = { key: key, label: label, playback: false, recording: false }
+      candidates.push(candidate)
+    }
+    candidate[direction] = true
+  }
+
+  var playback = playbackStreams && typeof playbackStreams.length === "number"
+    ? playbackStreams : []
+  var recording = recordingStreams && typeof recordingStreams.length === "number"
+    ? recordingStreams : []
+  var i
+  for (i = 0; i < playback.length; i++) consider(playback[i], "playback")
+  for (i = 0; i < recording.length; i++) consider(recording[i], "recording")
+
+  var available = []
+  for (i = 0; i < candidates.length; i++) {
+    var value = candidates[i]
+    if ((value.playback && !findAppRule(rules, "playback", value.key))
+        || (value.recording && !findAppRule(rules, "recording", value.key)))
+      available.push(value.label)
+  }
+  return available
+}
+
 function deviceSortComparator(favorites) {
-  var ranks = {}
   var values = Array.isArray(favorites) ? favorites : []
-  for (var i = 0; i < values.length; i++) ranks[values[i]] = i
   return function(a, b) {
-    var ra = ranks.hasOwnProperty(a) ? ranks[a] : -1
-    var rb = ranks.hasOwnProperty(b) ? ranks[b] : -1
+    var aKey = String(a && typeof a === "object" ? a.name || "" : a || "")
+    var bKey = String(b && typeof b === "object" ? b.name || "" : b || "")
+    var ra = values.indexOf(aKey)
+    var rb = values.indexOf(bKey)
     var fa = ra >= 0 ? 0 : 1
     var fb = rb >= 0 ? 0 : 1
     if (fa !== fb) return fa - fb
@@ -565,54 +642,43 @@ function nodeSerial(node) {
   return serial === undefined || serial === null ? "" : String(serial)
 }
 
-function streamOutputOptions(outputs, defaultOutput, labelFor) {
+function deviceRouteOptions(devices, defaultDevice, followLabel, overridePrefix, labelFor) {
   labelFor = labelFor || nodeLabel
-  var values = Array.isArray(outputs) ? outputs : []
+  var values = Array.isArray(devices) ? devices : []
   var options = []
-  var defaultSerial = nodeSerial(defaultOutput)
+  var defaultSerial = nodeSerial(defaultDevice)
+  if (defaultSerial !== "")
+    options.push({ value: "default:" + defaultSerial, label: followLabel })
 
+  var seen = []
   for (var i = 0; i < values.length; i++) {
-    var candidate = values[i]
-    var serial = nodeSerial(candidate)
-    if (serial !== "" && serial === defaultSerial) {
-      options.push({ value: "default:" + serial, label: "Follow default output" })
-      options.push({ value: "override:" + serial, label: "Always use " + labelFor(candidate) })
-      break
-    }
+    var defaultCandidate = values[i]
+    if (nodeSerial(defaultCandidate) !== defaultSerial || defaultSerial === "") continue
+    seen.push(defaultSerial)
+    options.push({
+      value: "override:" + defaultSerial,
+      label: overridePrefix + labelFor(defaultCandidate)
+    })
+    break
   }
-
-  for (var j = 0; j < values.length; j++) {
-    var output = values[j]
-    var outputSerial = nodeSerial(output)
-    if (outputSerial === "" || outputSerial === defaultSerial) continue
-    options.push({ value: "override:" + outputSerial, label: "Always use " + labelFor(output) })
+  for (i = 0; i < values.length; i++) {
+    var device = values[i]
+    var serial = nodeSerial(device)
+    if (serial === "" || seen.indexOf(serial) !== -1) continue
+    seen.push(serial)
+    options.push({ value: "override:" + serial, label: overridePrefix + labelFor(device) })
   }
   return options
 }
 
+function streamOutputOptions(outputs, defaultOutput, labelFor) {
+  return deviceRouteOptions(outputs, defaultOutput,
+    "Follow default output", "Always use ", labelFor)
+}
+
 function recordingInputOptions(inputs, defaultInput, labelFor) {
-  labelFor = labelFor || nodeLabel
-  var values = Array.isArray(inputs) ? inputs : []
-  var options = []
-  var defaultSerial = nodeSerial(defaultInput)
-
-  for (var i = 0; i < values.length; i++) {
-    var candidate = values[i]
-    var serial = nodeSerial(candidate)
-    if (serial !== "" && serial === defaultSerial) {
-      options.push({ value: "default:" + serial, label: "Follow default input" })
-      options.push({ value: "override:" + serial, label: "Always use " + labelFor(candidate) })
-      break
-    }
-  }
-
-  for (var j = 0; j < values.length; j++) {
-    var input = values[j]
-    var inputSerial = nodeSerial(input)
-    if (inputSerial === "" || inputSerial === defaultSerial) continue
-    options.push({ value: "override:" + inputSerial, label: "Always use " + labelFor(input) })
-  }
-  return options
+  return deviceRouteOptions(inputs, defaultInput,
+    "Follow default input", "Always use ", labelFor)
 }
 
 function parseStreamOutputOption(value) {
@@ -874,6 +940,9 @@ if (typeof module !== "undefined") {
     isPlaybackStream: isPlaybackStream,
     isRecordingStream: isRecordingStream,
     isAudioSource: isAudioSource,
+    isInternalAudioNode: isInternalAudioNode,
+    isMonitorSource: isMonitorSource,
+    classifyAudioNodes: classifyAudioNodes,
     listSnapshot: listSnapshot,
     normalizedBluetoothAddress: normalizedBluetoothAddress,
     parseAudioPreferences: parseAudioPreferences,
@@ -885,6 +954,7 @@ if (typeof module !== "undefined") {
     sceneSummary: sceneSummary,
     parseAudioRules: parseAudioRules,
     findAppRule: findAppRule,
+    availableRuleApplicationLabels: availableRuleApplicationLabels,
     deviceSortComparator: deviceSortComparator,
     parseAudioPolicySettings: parseAudioPolicySettings,
     balanceValue: balanceValue,

@@ -169,6 +169,56 @@ assert.deepEqual(model.recordingInputOptions([defaultInput, headsetInput], defau
   { value: 'override:20', label: 'Always use Desk Microphone' },
   { value: 'override:21', label: 'Always use Headset Microphone' }
 ])
+// Following the default remains available when that device is hidden from the
+// picker; only the explicit "Always use" choice disappears.
+assert.deepEqual(model.streamOutputOptions([headphones], defaultOutput), [
+  { value: 'default:10', label: 'Follow default output' },
+  { value: 'override:11', label: 'Always use Headphones' }
+])
+
+const playbackStream = {
+  name: 'firefox', isStream: true, isSink: true, ready: true, audio: {},
+  properties: { 'application.name': 'Firefox' }
+}
+const recordingStream = {
+  name: 'firefox-capture', isStream: true, isSink: false, ready: true, audio: {},
+  properties: { 'application.name': 'Firefox' }
+}
+const vlcStream = {
+  name: 'vlc', isStream: true, isSink: true, ready: true, audio: {},
+  properties: { 'application.name': 'VLC' }
+}
+const obsStream = {
+  name: 'obs', isStream: true, isSink: false, ready: true, audio: {},
+  properties: { 'application.name': 'OBS' }
+}
+const classified = model.classifyAudioNodes([
+  { name: 'speakers', isStream: false, isSink: true },
+  { name: 'microphone', isStream: false, isSink: false, ready: true, audio: {} },
+  { name: 'speakers.monitor', isStream: false, isSink: false, ready: true, audio: {} },
+  playbackStream,
+  recordingStream,
+  { name: 'omarchy_speaker_tuning_output', isStream: true, isSink: true },
+  { name: 'omarchy_audio_test_record', isStream: true, isSink: false }
+])
+assert.deepEqual(classified.sinks.map(node => node.name), ['speakers'])
+assert.deepEqual(classified.sources.map(node => node.name), ['microphone'])
+assert.deepEqual(classified.playbackStreams.map(node => node.name), ['firefox'])
+assert.deepEqual(classified.recordingStreams.map(node => node.name), ['firefox-capture'])
+
+assert.deepEqual(model.availableRuleApplicationLabels(
+  [playbackStream, vlcStream], [recordingStream, obsStream], [
+    { app: 'firefox', direction: 'playback', target: 'speakers' },
+    { app: 'obs', direction: 'recording', target: 'microphone' }
+  ]
+), ['Firefox', 'VLC'])
+assert.deepEqual(model.parseAudioRules(JSON.stringify({
+  devices: { favorites: ['speakers', 'speakers'], hidden: ['mic', 'mic'] }
+})).devices, { aliases: {}, favorites: ['speakers'], hidden: ['mic'] })
+assert.deepEqual(['other', 'hasOwnProperty'].sort(
+  model.deviceSortComparator(['hasOwnProperty'])), ['hasOwnProperty', 'other'])
+assert.deepEqual([{ name: 'speakers' }, { name: 'headphones' }].sort(
+  model.deviceSortComparator(['headphones'])).map(node => node.name), ['headphones', 'speakers'])
 assert.equal(model.isRecordingStream({ isStream: true, isSink: false }), true)
 assert.equal(model.isRecordingStream({ isStream: true, isSink: true }), false)
 assert.deepEqual(model.uniqueRecordingStreamLabels([
@@ -413,6 +463,18 @@ printf '%s\n' "$scene_one" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TES
 [[ $(stat -c '%a' "$scenes_file") == 600 ]] || fail "audio scene store permissions"
 jq -e '.scenes[0].name == "Desk" and .scenes[0].defaults.output == "speakers"' "$scenes_file" >/dev/null ||
   fail "audio scene content"
+unsafe_scene='{"name":"Wrong name","devices":[{"name":"speakers","direction":"output","muted":true},{"name":"mic","direction":"input","muted":true}],"profiles":[{"card":"card.live","profile":"stereo"},{"card":"card.off","profile":"off"}]}'
+OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-scenes" save SafeName "$unsafe_scene" >/dev/null
+jq -e '
+  ([.scenes[] | select(.name == "SafeName")][0]) as $scene
+  | $scene.devices[0].muted == false
+    and $scene.devices[1].muted == true
+    and $scene.profiles == [{"card":"card.live","profile":"stereo"}]
+    and ([.scenes[].name] | index("Wrong name") | not)
+' "$scenes_file" >/dev/null || fail "audio scene storage safety normalization"
+OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-scenes" delete SafeName >/dev/null
 scene_replacement='{"name":"Desk","defaults":{"output":"line-out","input":"mic"},"devices":[],"ports":[],"profiles":[]}'
 printf '%s\n' "$scene_two" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
   "$ROOT/scripts/audio-scenes" save Headset >/dev/null
@@ -463,6 +525,10 @@ fi
 jq -e '(.devices.aliases | has("speakers") | not)
   and ((.devices.favorites | index("speakers")) == null)' "$rules_file" >/dev/null ||
   fail "device preference removal"
+printf '%s\n' '{}' >"$rules_file"
+"$ROOT/scripts/audio-app-rules" set-alias missing ""
+jq -e '.appRules == [] and .devices == {"aliases":{},"favorites":[],"hidden":[]}' \
+  "$rules_file" >/dev/null || fail "sparse audio rules normalization"
 unset OMARCHY_AUDIO_RULES_FILE
 echo "PASS: application rules and device preference store"
 rm -rf -- "$scenes_dir"

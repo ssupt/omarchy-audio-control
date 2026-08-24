@@ -77,6 +77,23 @@ case "$action" in
         exit 1
       }
     fi
+    # The command argument is authoritative, and safety invariants belong in
+    # the store as well as in the QML parser. This keeps hand-written/imported
+    # scenes from persisting output mutes or card power-off profiles.
+    scene_json=$(jq -c --arg name "$name" '
+      .name = $name
+      | .devices = (
+          if (.devices | type) == "array" then
+            [.devices[] | if type == "object" and .direction == "output"
+              then .muted = false else . end]
+          else [] end
+        )
+      | .profiles = (
+          if (.profiles | type) == "array" then
+            [.profiles[] | select(type != "object" or (.profile? // "") != "off")]
+          else [] end
+        )
+    ' <<<"$scene_json") || exit 1
     write_scenes '
       .version = 1
       | .scenes = (
