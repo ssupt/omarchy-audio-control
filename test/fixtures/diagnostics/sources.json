@@ -1,0 +1,24 @@
+[
+  {
+    "index": 200,
+    "name": "alsa_input.usb-microphone",
+    "description": "USB Microphone",
+    "state": "IDLE",
+    "sample_specification": "s16le 1ch 48000Hz",
+    "channel_map": "mono",
+    "active_port": "analog-input-mic",
+    "monitor_source": "",
+    "properties": {"device.profile.description": "Mono Input"}
+  },
+  {
+    "index": 201,
+    "name": "bluez_output.test.monitor",
+    "description": "Monitor of Wireless Headphones",
+    "state": "RUNNING",
+    "sample_specification": "s24le 2ch 48000Hz",
+    "channel_map": "front-left,front-right",
+    "active_port": "headphones-output",
+    "monitor_source": "bluez_output.test",
+    "properties": {"device.class": "monitor"}
+  }
+]

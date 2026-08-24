@@ -1,0 +1,3 @@
+wireplumber
+Compiled with libwireplumber 0.5.15
+Linked with libwireplumber 0.5.15

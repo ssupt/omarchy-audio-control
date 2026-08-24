@@ -1,0 +1,20 @@
+#!/bin/bash
+
+# omarchy:summary=Open Omarchy's official audio recovery in a visible terminal
+# omarchy:group=audio
+
+set -euo pipefail
+
+(( $# == 0 )) || {
+  echo "Usage: audio-recovery" >&2
+  exit 1
+}
+
+recovery_command=${AUDIO_CONTROL_RECOVERY_COMMAND:-omarchy-restart-audio}
+recovery_launcher=${AUDIO_CONTROL_RECOVERY_LAUNCHER:-omarchy-launch-floating-terminal-with-presentation}
+recovery_path=$(command -v "$recovery_command")
+launcher_path=$(command -v "$recovery_launcher")
+
+# The official recovery may need to explain a stuck USB device or request
+# authorization for usbreset. Never hide that interaction inside the shell.
+"$launcher_path" "$recovery_path" >/dev/null 2>&1 &

@@ -1,0 +1,26 @@
+[
+  {
+    "index": 100,
+    "name": "bluez_output.test",
+    "description": "Wireless Headphones 00:11:22:33:44:55",
+    "state": "RUNNING",
+    "sample_specification": "s24le 2ch 48000Hz",
+    "channel_map": "front-left,front-right",
+    "active_port": "headphones-output",
+    "properties": {
+      "device.bus": "bluetooth",
+      "device.profile.description": "High Fidelity Playback",
+      "bluetooth.codec": "AAC"
+    }
+  },
+  {
+    "index": 101,
+    "name": "alsa_output.hdmi",
+    "description": "HDMI Receiver",
+    "state": "SUSPENDED",
+    "sample_specification": "s32le 6ch 48000Hz",
+    "channel_map": "front-left,front-right,rear-left,rear-right,front-center,lfe",
+    "active_port": {"name": "hdmi-output-0", "description": "HDMI / DisplayPort"},
+    "properties": {"device.profile.description": "Digital Surround 5.1"}
+  }
+]

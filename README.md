@@ -35,6 +35,13 @@ instead of introducing a separate mixer application.
   whenever the application starts and the device is present.
 - Rename devices with aliases, mark favorites so they sort first, and hide
   devices everywhere.
+- Inspect PipeWire and WirePlumber health from a Diagnostics tab: graph rate,
+  quantum-derived scheduling latency, DSP load, XRUN/error counters, service
+  state, negotiated device formats and channel maps, and active routes through
+  filters to hardware.
+- Identify every reported speaker channel at a conservative level, copy a
+  privacy-conscious support report, and launch Omarchy's official audio
+  recovery behind an explicit confirmation.
 
 The bar audio icon uses left-click for the quick mixer, middle-click to mute or
 unmute the microphone, right-click to mute or unmute all audio, and the wheel to
@@ -51,13 +58,16 @@ More plugins by `ssupt`: [omarchy-plugins](https://github.com/ssupt/omarchy-plug
 ## Requirements
 
 - Omarchy Quattro
-- PipeWire with WirePlumber (`pactl`, `wpctl`, `pw-metadata`, `pw-record`, and
-  `pw-play`)
+- PipeWire with WirePlumber (`pactl`, `wpctl`, `pw-metadata`, `pw-dump`,
+  `pw-top`, `pw-record`, and `pw-play`)
+- ALSA utilities (`speaker-test`) and systemd user services (`systemctl`)
 - `notify-send` for optional capture-start notifications
-- `jq`, `hyprctl`, `timeout`, and `flock`
+- `jq`, `hyprctl`, `timeout`, `flock`, and `wl-copy`
 
-These commands are present in a standard Omarchy installation. The plugin does
-not require `sudo` or install a background service.
+These commands are present in a standard Omarchy installation. Routine controls
+do not require `sudo`, and the plugin does not install a background service.
+Omarchy recovery may request authorization only when it needs to reset a stuck
+USB audio device.
 
 Application routes use WirePlumber's native stream-target restoration. Choosing
 **Follow default output** removes the remembered target; choosing **Always use**
@@ -82,6 +92,15 @@ preferences in `~/.config/omarchy/audio-rules.json`; both are plugin-owned and
 edited through the **Scenes** and **Routing** tabs. Manual route changes on a
 pinned application update its rule, and choosing follow-default deletes it.
 Hidden devices disappear from the mixer until shown again in the Routing tab.
+
+The Diagnostics tab refreshes only while it is visible. Its support report
+contains versions, health counters, human-readable device formats, service
+states, and active route labels; it excludes logs, usernames, hostnames,
+configuration files, and internal device names. The speaker test performs one
+finite channel-identification pass on the current default output and can be
+stopped immediately. Recovery never runs silently: after confirmation it opens
+`omarchy-restart-audio` in Omarchy's visible presentation terminal so USB-reset
+messages or authorization requests cannot be hidden by the shell.
 
 ## Installation
 
@@ -126,9 +145,9 @@ omarchy-plugin-validate .
 The two entry points own presentation and keyboard navigation. Shared behavior
 stays outside them: `Model.js` contains pure, Node-tested transformations;
 `AudioRuntime.qml` owns paths; focused controllers own policy, saved-rule,
-scene, and microphone-test lifecycles; and `scripts/` contains the guarded
-system mutations. Keep new diagnostics and recovery work behind the same
-controller boundary so it can be tested without growing either main view.
+scene, microphone-test, and diagnostics lifecycles; and `scripts/` contains
+the guarded system interactions. Diagnostics remain read-only until a user
+chooses a finite speaker test or confirms the official Omarchy recovery.
 
 Advanced Audio Control is derived from Omarchy's built-in audio widget and is
 distributed under the same MIT license.

@@ -29,11 +29,19 @@ Item {
       if (!success) root.showSceneStatus(rulesStore.error, true)
     }
   }
+  AudioDiagnosticsController {
+    id: diagnostics
+    diagnosticsPath: runtime.script("audio-diagnostics")
+    speakerTestPath: runtime.script("audio-speaker-test")
+    recoveryPath: runtime.script("audio-recovery")
+    sessionActive: window.visible && root.activeTab === 5
+  }
 
   property var shell: null
   property bool closingFromHost: false
   property bool openRequested: false
   property bool windowRuleReady: false
+  property bool recoveryConfirmOpen: false
   readonly property bool opened: window.visible
 
   property var audioCards: []
@@ -70,7 +78,9 @@ Item {
     for (var i = 0; i < errors.length; i++) if (errors[i] !== "") return errors[i]
     return ""
   }
-  property int activeTab: 0  // 0 = devices, 1 = Bluetooth, 2 = policy, 3 = scenes, 4 = routing
+  // 0 = devices, 1 = Bluetooth, 2 = policy, 3 = scenes, 4 = routing,
+  // 5 = diagnostics
+  property int activeTab: 0
   property bool cursorActive: false
   property int selectedIndex: 0
   property bool profileMenuOpen: false
@@ -131,13 +141,15 @@ Item {
     + availablePolicyExperimental.length
   readonly property int captureNotificationIndex: wireplumberPolicyItemCount
   readonly property int policyItemCount: wireplumberPolicyItemCount + 1
-  readonly property int itemCount: activeTab === 4
-    ? 2 + audioRules.appRules.length + managedDevices.length
-    : (activeTab === 3
-      ? 1 + audioScenes.length
-      : (activeTab === 0
-        ? deviceItemCount + (inputDevice ? 1 : 0)
-        : (activeTab === 1 ? 2 + bluetoothCards.length : policyItemCount)))
+  readonly property int itemCount: activeTab === 5
+    ? diagnosticsView.itemCount
+    : (activeTab === 4
+      ? 2 + audioRules.appRules.length + managedDevices.length
+      : (activeTab === 3
+        ? 1 + audioScenes.length
+        : (activeTab === 0
+          ? deviceItemCount + (inputDevice ? 1 : 0)
+          : (activeTab === 1 ? 2 + bluetoothCards.length : policyItemCount))))
   readonly property bool audioMutationBusy: profileSetProc.running || portSetProc.running
     || microphoneTest.busy
   readonly property color hoverFill: Style.hoverFillFor(foreground, Color.accent)
@@ -149,7 +161,8 @@ Item {
     activeTab = payload.tab === "bluetooth" ? 1
       : payload.tab === "policy" ? 2
       : payload.tab === "scenes" ? 3
-      : payload.tab === "routing" ? 4 : 0
+      : payload.tab === "routing" ? 4
+      : payload.tab === "diagnostics" ? 5 : 0
     openRequested = true
     closingFromHost = false
     cursorActive = false
@@ -158,6 +171,7 @@ Item {
     profilesLoaded = false
     bluetoothAutoSwitchLoaded = false
     bluetoothProfilePreferenceLoaded = false
+    recoveryConfirmOpen = false
     microphoneTest.discard()
     cancelAliasEdit()
     if (windowRuleReady) showOnCurrentWorkspace()
@@ -189,6 +203,7 @@ Item {
     openRequested = false
     closingFromHost = true
     profileMenuOpen = false
+    recoveryConfirmOpen = false
     microphoneTest.discard()
     window.visible = false
     closingFromHost = false
@@ -196,6 +211,7 @@ Item {
 
   function requestClose() {
     openRequested = false
+    recoveryConfirmOpen = false
     microphoneTest.discard()
     if (shell && typeof shell.hide === "function") shell.hide("ssupt.audio-control")
     else window.visible = false
@@ -370,7 +386,7 @@ Item {
   }
 
   function selectTab(index) {
-    var next = Math.max(0, Math.min(4, index))
+    var next = Math.max(0, Math.min(5, index))
     if (next === activeTab) return
     closeProfileMenus()
     cancelAliasEdit()
@@ -382,7 +398,7 @@ Item {
   }
 
   function switchTab(direction) {
-    selectTab((activeTab + (direction < 0 ? -1 : 1) + 5) % 5)
+    selectTab((activeTab + (direction < 0 ? -1 : 1) + 6) % 6)
   }
 
   function setCursor(index) {
@@ -394,6 +410,10 @@ Item {
 
   function activateCursor() {
     if (!cursorActive || itemCount === 0) return
+    if (activeTab === 5) {
+      diagnosticsView.activate(selectedIndex)
+      return
+    }
     if (activeTab === 4) {
       if (selectedIndex === 0) newRuleAppRow.toggleAppMenu()
       else if (selectedIndex === 1) newRuleDeviceRow.toggleDeviceMenu()
@@ -453,6 +473,23 @@ Item {
       ? deviceProfileRepeater.itemAt(selectedIndex - deviceProfileStartIndex)
       : bluetoothProfileRepeater.itemAt(selectedIndex - 2)
     if (row) row.toggleProfileMenu()
+  }
+
+  function requestRecovery() {
+    if (!diagnostics.snapshot.capabilities.recovery) return
+    recoveryConfirm.selectedIndex = 1
+    recoveryConfirmOpen = true
+  }
+
+  function cancelRecovery() {
+    recoveryConfirmOpen = false
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
+  function confirmRecovery() {
+    recoveryConfirmOpen = false
+    diagnostics.runRecovery()
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
   // Mouse hovering claims the cursor without scrolling: the wheel and the
@@ -855,7 +892,7 @@ Item {
     color: root.background
     implicitWidth: 680
     implicitHeight: 560
-    minimumSize: Qt.size(520, 440)
+    minimumSize: Qt.size(640, 440)
 
     onVisibleChanged: {
       if (!visible && !root.closingFromHost) {
@@ -873,6 +910,10 @@ Item {
         anchors.fill: parent
         blocked: root.profileMenuOpen || root.aliasEditingDevice !== ""
           onMoveRequested: function(dx, dy) {
+            if (root.recoveryConfirmOpen) {
+              if (dx !== 0) recoveryConfirm.selectedIndex = recoveryConfirm.selectedIndex === 0 ? 1 : 0
+              return
+            }
             root.keyboardScrolling = true
             if (dx !== 0) {
               root.cursorActive = true
@@ -885,11 +926,23 @@ Item {
           if (dy !== 0) root.moveCursor(dy)
         }
         onTabRequested: function(direction) {
+          if (root.recoveryConfirmOpen) {
+            recoveryConfirm.selectedIndex = recoveryConfirm.selectedIndex === 0 ? 1 : 0
+            return
+          }
           root.keyboardScrolling = true
           root.switchTab(direction)
         }
-        onActivateRequested: root.activateCursor()
-        onCloseRequested: root.requestClose()
+        onActivateRequested: {
+          if (root.recoveryConfirmOpen) {
+            if (recoveryConfirm.selectedIndex === 0) root.cancelRecovery()
+            else root.confirmRecovery()
+          } else root.activateCursor()
+        }
+        onCloseRequested: {
+          if (root.recoveryConfirmOpen) root.cancelRecovery()
+          else root.requestClose()
+        }
 
         Column {
           id: frame
@@ -928,7 +981,7 @@ Item {
 
                 Text {
                   width: parent.width
-                  text: "Configure devices, Bluetooth behavior, and system-wide audio safety."
+                  text: "Configure devices, automation, safety, and live audio diagnostics."
                   color: Qt.darker(root.foreground, 1.35)
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -945,12 +998,14 @@ Item {
                 { value: "bluetooth", label: "Bluetooth", icon: "󰂯" },
                 { value: "policy", label: "Policy", icon: "󰒃" },
                 { value: "scenes", label: "Scenes", icon: "󰌨" },
-                { value: "routing", label: "Routing", icon: "󰘮" }
+                { value: "routing", label: "Routing", icon: "󰘮" },
+                { value: "diagnostics", label: "Diagnostics", icon: "󰒓" }
               ]
               value: root.activeTab === 0 ? "devices"
                 : root.activeTab === 1 ? "bluetooth"
                 : root.activeTab === 2 ? "policy"
-                : root.activeTab === 3 ? "scenes" : "routing"
+                : root.activeTab === 3 ? "scenes"
+                : root.activeTab === 4 ? "routing" : "diagnostics"
               focusable: false
               foreground: root.foreground
               background: root.background
@@ -959,7 +1014,8 @@ Item {
                 root.selectTab(value === "bluetooth" ? 1
                   : value === "policy" ? 2
                   : value === "scenes" ? 3
-                  : value === "routing" ? 4 : 0)
+                  : value === "routing" ? 4
+                  : value === "diagnostics" ? 5 : 0)
               }
             }
           }
@@ -1822,6 +1878,23 @@ Item {
                 }
               }
 
+              AudioDiagnosticsView {
+                id: diagnosticsView
+                visible: root.activeTab === 5
+                width: parent.width
+                controller: diagnostics
+                tabActive: root.activeTab === 5
+                cursorActive: root.cursorActive
+                selectedIndex: root.selectedIndex
+                foreground: root.foreground
+                urgent: root.urgent
+                fill: root.hoverFill
+                fontFamily: root.fontFamily
+                onCursorRequested: function(index) { root.setCursor(index) }
+                onEnsureVisible: function(item) { root.ensureCursorVisible(item) }
+                onRecoveryRequested: root.requestRecovery()
+              }
+
               Column {
                 width: parent.width
                 spacing: Style.space(12)
@@ -2040,6 +2113,22 @@ Item {
               }
             }
           }
+        }
+
+        ConfirmDialog {
+          id: recoveryConfirm
+          anchors.fill: parent
+          opened: root.recoveryConfirmOpen
+          z: 20
+          message: "Restart PipeWire and WirePlumber with Omarchy audio recovery? Playback and recording will be interrupted, and a stuck USB device may require authorization to reset."
+          confirmText: "Restart audio"
+          background: root.background
+          foreground: root.foreground
+          selectedText: Color.accent
+          fontFamily: root.fontFamily
+          cornerRadius: Style.cornerRadius
+          onCanceled: root.cancelRecovery()
+          onConfirmed: root.confirmRecovery()
         }
       }
     }

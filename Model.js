@@ -28,11 +28,13 @@ function isAudioSource(node) {
     || mediaClass.indexOf("Source") !== -1
 }
 
-function isInternalAudioNode(name) {
+function isInternalAudioNode(name, properties) {
   var value = String(name || "").trim().toLowerCase()
+  var props = properties && typeof properties === "object" ? properties : {}
   return value === "quickshell"
     || value.indexOf("omarchy_audio_test") === 0
     || value.indexOf("omarchy_speaker_tuning") === 0
+    || String(props["application.id"] || "") === "ssupt.audio-control"
 }
 
 function isMonitorSource(node) {
@@ -53,7 +55,7 @@ function classifyAudioNodes(nodes) {
     var node = values[i]
     if (!node) continue
     if (node.isStream) {
-      if (isInternalAudioNode(node.name)) continue
+      if (isInternalAudioNode(node.name, nodeProps(node))) continue
       if (isPlaybackStream(node)) result.playbackStreams.push(node)
       else if (isRecordingStream(node)) result.recordingStreams.push(node)
       continue
@@ -420,6 +422,160 @@ function parseAudioPolicySettings(raw) {
       values[volumeKey] = volume
   }
   return { valid: true, values: values }
+}
+
+function emptyAudioDiagnostics() {
+  return {
+    version: 1,
+    generatedAt: "",
+    healthy: false,
+    versions: { plugin: "", pipewire: "", wireplumber: "" },
+    graph: {
+      available: false,
+      active: false,
+      source: "configured",
+      rate: 0,
+      quantum: 0,
+      latencyMs: 0,
+      loadPercent: -1,
+      errors: 0,
+      activeNodes: 0
+    },
+    defaults: { output: "", input: "" },
+    services: [],
+    devices: [],
+    routes: [],
+    capabilities: {
+      speakerTest: false,
+      supportReport: false,
+      clipboard: false,
+      recovery: false,
+      topology: false
+    },
+    warnings: []
+  }
+}
+
+function parseAudioDiagnostics(raw) {
+  var parsed
+  try {
+    parsed = JSON.parse(String(raw || ""))
+  } catch (e) {
+    return { valid: false, value: emptyAudioDiagnostics() }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+      || parsed.version !== 1 || !parsed.graph || typeof parsed.graph !== "object"
+      || !Array.isArray(parsed.services) || !Array.isArray(parsed.devices)
+      || !Array.isArray(parsed.routes) || !Array.isArray(parsed.warnings))
+    return { valid: false, value: emptyAudioDiagnostics() }
+
+  var value = emptyAudioDiagnostics()
+  value.generatedAt = sanitizeSceneString(parsed.generatedAt, "", 64)
+  value.healthy = parsed.healthy === true
+
+  var versions = parsed.versions && typeof parsed.versions === "object"
+    ? parsed.versions : {}
+  value.versions = {
+    plugin: sanitizeSceneString(versions.plugin, "", 32),
+    pipewire: sanitizeSceneString(versions.pipewire, "", 32),
+    wireplumber: sanitizeSceneString(versions.wireplumber, "", 32)
+  }
+
+  var graph = parsed.graph && typeof parsed.graph === "object" ? parsed.graph : {}
+  value.graph = {
+    available: graph.available === true,
+    active: graph.active === true,
+    source: graph.source === "active" ? "active" : "configured",
+    rate: Math.round(clampNumber(graph.rate, 0, 0, 768000)),
+    quantum: Math.round(clampNumber(graph.quantum, 0, 0, 1048576)),
+    latencyMs: clampNumber(graph.latencyMs, 0, 0, 60000),
+    loadPercent: clampNumber(graph.loadPercent, -1, -1, 100000),
+    errors: Math.round(clampNumber(graph.errors, 0, 0, 1000000000)),
+    activeNodes: Math.round(clampNumber(graph.activeNodes, 0, 0, 1000000))
+  }
+
+  var defaults = parsed.defaults && typeof parsed.defaults === "object"
+    ? parsed.defaults : {}
+  value.defaults = {
+    output: sanitizeSceneString(defaults.output, "", 240),
+    input: sanitizeSceneString(defaults.input, "", 240)
+  }
+
+  var rawServices = Array.isArray(parsed.services) ? parsed.services : []
+  for (var i = 0; i < rawServices.length && value.services.length < 8; i++) {
+    var service = rawServices[i]
+    if (!service || typeof service !== "object") continue
+    var serviceName = sanitizeSceneString(service.name, "", 80)
+    if (serviceName === "") continue
+    value.services.push({
+      name: serviceName,
+      label: sanitizeSceneString(service.label, serviceName, 80),
+      loadState: sanitizeSceneString(service.loadState, "unknown", 32),
+      activeState: sanitizeSceneString(service.activeState, "unknown", 32),
+      subState: sanitizeSceneString(service.subState, "unknown", 32),
+      active: service.active === true,
+      restarts: Math.round(clampNumber(service.restarts, 0, 0, 1000000))
+    })
+  }
+
+  var rawDevices = Array.isArray(parsed.devices) ? parsed.devices : []
+  for (var j = 0; j < rawDevices.length && value.devices.length < 64; j++) {
+    var device = rawDevices[j]
+    if (!device || typeof device !== "object") continue
+    var deviceName = sanitizeSceneString(device.name, "", 240)
+    var label = sanitizeSceneString(device.label, deviceName, 160)
+    if (deviceName === "" || label === "") continue
+    value.devices.push({
+      direction: device.direction === "input" ? "input" : "output",
+      name: deviceName,
+      label: label,
+      state: sanitizeSceneString(device.state, "unknown", 32),
+      format: sanitizeSceneString(device.format, "", 96),
+      channelMap: sanitizeSceneString(device.channelMap, "", 240),
+      channels: Math.round(clampNumber(device.channels, 0, 0, 64)),
+      port: sanitizeSceneString(device.port, "", 160),
+      profile: sanitizeSceneString(device.profile, "", 160),
+      codec: sanitizeSceneString(device.codec, "", 64),
+      bluetooth: device.bluetooth === true,
+      default: device.default === true
+    })
+  }
+
+  var rawRoutes = Array.isArray(parsed.routes) ? parsed.routes : []
+  for (var k = 0; k < rawRoutes.length && value.routes.length < 64; k++) {
+    var route = rawRoutes[k]
+    if (!route || typeof route !== "object" || !Array.isArray(route.labels)) continue
+    var labels = []
+    for (var l = 0; l < route.labels.length && labels.length < 16; l++) {
+      var routeLabel = sanitizeSceneString(route.labels[l], "", 160)
+      if (routeLabel !== "" && labels[labels.length - 1] !== routeLabel)
+        labels.push(routeLabel)
+    }
+    if (labels.length < 2) continue
+    value.routes.push({
+      direction: route.direction === "recording" ? "recording" : "playback",
+      labels: labels
+    })
+  }
+
+  var capabilities = parsed.capabilities && typeof parsed.capabilities === "object"
+    ? parsed.capabilities : {}
+  value.capabilities = {
+    speakerTest: capabilities.speakerTest === true,
+    supportReport: capabilities.supportReport === true,
+    clipboard: capabilities.clipboard === true,
+    recovery: capabilities.recovery === true,
+    topology: capabilities.topology === true
+  }
+
+  var rawWarnings = Array.isArray(parsed.warnings) ? parsed.warnings : []
+  for (var m = 0; m < rawWarnings.length && value.warnings.length < 32; m++) {
+    var warning = sanitizeSceneString(rawWarnings[m], "", 240)
+    if (warning !== "" && value.warnings.indexOf(warning) === -1)
+      value.warnings.push(warning)
+  }
+
+  return { valid: true, value: value }
 }
 
 function balanceValue(left, right) {
@@ -957,6 +1113,8 @@ if (typeof module !== "undefined") {
     availableRuleApplicationLabels: availableRuleApplicationLabels,
     deviceSortComparator: deviceSortComparator,
     parseAudioPolicySettings: parseAudioPolicySettings,
+    emptyAudioDiagnostics: emptyAudioDiagnostics,
+    parseAudioDiagnostics: parseAudioDiagnostics,
     balanceValue: balanceValue,
     applyBalance: applyBalance,
     audioMeterLevel: audioMeterLevel,

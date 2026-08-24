@@ -1,0 +1,42 @@
+#!/bin/bash
+
+# omarchy:summary=Play one guarded channel-identification pass on an audio output
+# omarchy:group=audio
+# omarchy:args=<sink-name>
+
+set -euo pipefail
+
+(( $# == 1 )) || {
+  echo "Usage: audio-speaker-test <sink-name>" >&2
+  exit 1
+}
+
+sink_name=$1
+speaker_command=${AUDIO_CONTROL_SPEAKER_TEST_COMMAND:-speaker-test}
+[[ -n $sink_name && $sink_name != *.monitor ]] || exit 1
+command -v jq >/dev/null
+speaker_path=$(command -v "$speaker_command")
+
+sink=$(pactl -f json list sinks | jq -cer --arg sink "$sink_name" '
+  first(.[] | select(.name == $sink))
+') || {
+  echo "The selected output is no longer available" >&2
+  exit 2
+}
+
+channels=$(jq -er '
+  try ((.sample_specification // "")
+    | capture("(?<count>[0-9]+)ch").count | tonumber) catch 0
+' <<<"$sink")
+[[ $channels =~ ^[1-9][0-9]*$ ]] || {
+  echo "The selected output does not report a testable channel layout" >&2
+  exit 2
+}
+
+# This core diagnostic deliberately caps the test at 7.1. Larger mappings
+# belong to the optional studio plugin, where remapping is explicit.
+(( channels > 8 )) && channels=8
+
+export PULSE_SINK=$sink_name
+export PULSE_PROP="application.id=ssupt.audio-control application.name='Advanced Audio Control' media.name='Speaker channel test'"
+exec "$speaker_path" -D pulse -c "$channels" -t wav -l 1 -S 35

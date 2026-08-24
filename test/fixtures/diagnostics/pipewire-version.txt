@@ -1,0 +1,3 @@
+pw-top
+Compiled with libpipewire 1.6.8
+Linked with libpipewire 1.6.8

@@ -1,0 +1,3 @@
+Server Name: PulseAudio (on PipeWire 1.6.8)
+Default Sink: bluez_output.test
+Default Source: alsa_input.usb-microphone

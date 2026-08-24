@@ -1,0 +1,52 @@
+[
+  {
+    "id": 20,
+    "type": "PipeWire:Interface:Node",
+    "info": {"props": {"media.class": "Stream/Output/Audio", "application.name": "Browser"}}
+  },
+  {
+    "id": 30,
+    "type": "PipeWire:Interface:Node",
+    "info": {"props": {"media.class": "Audio/Sink", "node.description": "Output Filter"}}
+  },
+  {
+    "id": 40,
+    "type": "PipeWire:Interface:Node",
+    "info": {"props": {"media.class": "Audio/Sink", "node.description": "Wireless Headphones"}}
+  },
+  {
+    "id": 50,
+    "type": "PipeWire:Interface:Node",
+    "info": {"props": {"media.class": "Audio/Source", "node.description": "USB Microphone"}}
+  },
+  {
+    "id": 60,
+    "type": "PipeWire:Interface:Node",
+    "info": {"props": {"media.class": "Stream/Input/Audio", "application.name": "Recorder"}}
+  },
+  {
+    "id": 80,
+    "type": "PipeWire:Interface:Node",
+    "info": {"props": {"media.class": "Stream/Output/Audio", "application.id": "ssupt.audio-control", "application.name": "Advanced Audio Control"}}
+  },
+  {
+    "id": 70,
+    "type": "PipeWire:Interface:Link",
+    "info": {"state": "active", "output-node-id": 20, "input-node-id": 30}
+  },
+  {
+    "id": 71,
+    "type": "PipeWire:Interface:Link",
+    "info": {"state": "paused", "output-node-id": 30, "input-node-id": 40}
+  },
+  {
+    "id": 72,
+    "type": "PipeWire:Interface:Link",
+    "info": {"state": "active", "output-node-id": 50, "input-node-id": 60}
+  },
+  {
+    "id": 81,
+    "type": "PipeWire:Interface:Link",
+    "info": {"state": "active", "output-node-id": 80, "input-node-id": 40}
+  }
+]
