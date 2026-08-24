@@ -13,51 +13,30 @@ Panel {
   moduleName: "omarchy.audio"
   ipcTarget: "omarchy.audio"
 
-  function pluginScript(name) {
-    var url = String(Qt.resolvedUrl("scripts/" + name))
-    return decodeURIComponent(url.replace(/^file:\/\//, ""))
-  }
+  AudioRuntime { id: runtime }
 
   readonly property var sink: Pipewire.defaultAudioSink
   readonly property var source: Pipewire.defaultAudioSource
   readonly property var nodes: Pipewire.nodes ? Pipewire.nodes.values : []
+  AudioRulesController {
+    id: rulesStore
+    nodes: root.nodes
+    rulesPath: runtime.rulesPath
+    scriptPath: runtime.script("audio-app-rules")
+    onRulesChanged: Qt.callLater(root.enforceRoutingRules)
+  }
   readonly property var mprisPlayers: Mpris.players ? Mpris.players.values : []
   readonly property var appLibrary: bar && bar.shell ? bar.shell.appLibrary : null
   readonly property var mediaService: bar && bar.shell
     ? bar.shell.firstPartyServiceFor("omarchy.media") : null
   readonly property var activeMediaPlayer: mediaService ? mediaService.activePlayer : null
-  readonly property string settingsPath: {
-    var configHome = Quickshell.env("XDG_CONFIG_HOME")
-    if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
-    return configHome + "/omarchy/audio-control.json"
-  }
-  readonly property string audioPreferencesPath: {
-    var configHome = Quickshell.env("XDG_CONFIG_HOME")
-    if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
-    return configHome + "/omarchy/audio-preferences.json"
-  }
-  readonly property string scenesPath: {
-    var configHome = Quickshell.env("XDG_CONFIG_HOME")
-    if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
-    return configHome + "/omarchy/audio-scenes.json"
-  }
-  readonly property string rulesPath: {
-    var configHome = Quickshell.env("XDG_CONFIG_HOME")
-    if (!configHome) configHome = Quickshell.env("HOME") + "/.config"
-    return configHome + "/omarchy/audio-rules.json"
-  }
-  readonly property string scriptsDir: {
-    var url = String(Qt.resolvedUrl("scripts/"))
-    return decodeURIComponent(url.replace(/^file:\/\//, ""))
-  }
   property var audioPreferences: Model.parseAudioPreferences("")
   property bool outputOverdrive: false
   property bool captureNotifications: true
   property bool notificationsAvailable: false
   property var audioScenes: []
-  property bool scenesLoaded: false
-  property var audioRules: Model.parseAudioRules("")
-  property bool rulesLoaded: false
+  readonly property var audioRules: rulesStore.rules
+  readonly property bool rulesLoaded: rulesStore.loaded
   property string sceneFeedback: ""
   property bool sceneFeedbackIsError: false
   property var observedRecordingLabels: []
@@ -66,79 +45,13 @@ Panel {
   property bool inputClipping: false
   readonly property real outputVolumeMaximum: outputOverdrive ? 1.5 : 1.0
 
-  readonly property var candidateSinks: {
-    var list = []
-    for (var i = 0; i < nodes.length; i++) {
-      var n = nodes[i]
-      if (n && n.isSink && !n.isStream && !deviceHidden(n.name)) list.push(n)
-    }
-    return list
-  }
-
-  readonly property var candidateSources: {
-    var list = []
-    for (var i = 0; i < nodes.length; i++) {
-      var n = nodes[i]
-      if (n && !n.isSink && !n.isStream && isAudioSource(n)) {
-        var name = String(n.name || "").toLowerCase()
-        if (name === "quickshell") continue
-        if (deviceHidden(n.name)) continue
-        list.push(n)
-      }
-    }
-    return list
-  }
-
-  readonly property var candidateStreams: {
-    var list = []
-    for (var i = 0; i < nodes.length; i++) {
-      var n = nodes[i]
-      if (!n || !n.isStream || !isPlaybackStream(n)) continue
-      // A tuning's output is a playback stream too, but it is the processing
-      // itself rather than an application, so it does not belong in the list.
-      var nodeName = String(n.name || "")
-      if (nodeName.indexOf("omarchy_speaker_tuning") === 0
-          || nodeName.indexOf("omarchy_audio_test") === 0) continue
-      list.push(n)
-    }
-    return list
-  }
-
-  readonly property var candidateRecordingStreams: {
-    var list = []
-    for (var i = 0; i < nodes.length; i++) {
-      var n = nodes[i]
-      if (!n || !isRecordingStream(n)) continue
-      // The microphone peak meter creates its own capture stream while this
-      // panel is open; it is instrumentation, not a recording application.
-      var nodeName = String(n.name || "").toLowerCase()
-      if (nodeName === "quickshell" || nodeName.indexOf("omarchy_audio_test") === 0) continue
-      list.push(n)
-    }
-    return list
-  }
+  readonly property var candidateSinks: rulesStore.sinks
+  readonly property var candidateSources: rulesStore.sources
+  readonly property var candidateStreams: rulesStore.playbackStreams
+  readonly property var candidateRecordingStreams: rulesStore.recordingStreams
 
   property var sinkAvailability: ({})
   property bool sinkAvailabilityLoaded: false
-
-  // Identify true playback streams without reading node.properties here:
-  // PwNode.properties is invalid until the node is bound, and reading it while
-  // capture streams are appearing (for example, when Voxtype starts recording)
-  // can destabilize Quickshell's Pipewire service. Quickshell versions differ
-  // in how `type` is exposed (media.class, enum name, or numeric enum), but
-  // playback streams consistently accept audio input from clients and publish
-  // `isSink: true`; capture streams publish as stream sources.
-  function isPlaybackStream(node) {
-    return Model.isPlaybackStream(node)
-  }
-
-  function isRecordingStream(node) {
-    return Model.isRecordingStream(node)
-  }
-
-  function isAudioSource(node) {
-    return Model.isAudioSource(node)
-  }
 
   function loadAudioPreferences(raw) {
     audioPreferences = Model.parseAudioPreferences(raw)
@@ -171,23 +84,39 @@ Panel {
   readonly property var rawAudioSinks: {
     var list = []
     for (var i = 0; i < candidateSinks.length; i++)
-      if (sinkAvailable(candidateSinks[i])) list.push(candidateSinks[i])
-    if (sink && list.indexOf(sink) < 0) list.unshift(sink)
+      if (sinkAvailable(candidateSinks[i]) && !deviceHidden(candidateSinks[i].name))
+        list.push(candidateSinks[i])
+    if (sink && !deviceHidden(sink.name) && list.indexOf(sink) < 0) list.unshift(sink)
     var sorted = list.slice()
     sorted.sort(Model.deviceSortComparator(audioRules.devices.favorites))
     return sorted
   }
 
   readonly property var rawAudioSources: {
-    var list = candidateSources.slice()
-    if (source && list.indexOf(source) < 0) list.unshift(source)
+    var list = []
+    for (var i = 0; i < candidateSources.length; i++)
+      if (!deviceHidden(candidateSources[i].name)) list.push(candidateSources[i])
+    if (source && !Model.isMonitorSource(source) && !deviceHidden(source.name)
+        && list.indexOf(source) < 0) list.unshift(source)
     var sorted = list.slice()
     sorted.sort(Model.deviceSortComparator(audioRules.devices.favorites))
     return sorted
   }
 
-  readonly property var audioSinks: rawAudioSinks.length > 0 ? rawAudioSinks : cachedAudioSinks
-  readonly property var audioSources: rawAudioSources.length > 0 ? rawAudioSources : cachedAudioSources
+  readonly property var cachedVisibleAudioSinks: cachedAudioSinks.filter(function(node) {
+    return node && !deviceHidden(node.name)
+  })
+  readonly property var cachedVisibleAudioSources: cachedAudioSources.filter(function(node) {
+    return node && !deviceHidden(node.name) && !Model.isMonitorSource(node)
+  })
+  readonly property var audioSinks: rawAudioSinks.length > 0
+    ? rawAudioSinks : cachedVisibleAudioSinks
+  readonly property var audioSources: rawAudioSources.length > 0
+    ? rawAudioSources : cachedVisibleAudioSources
+  readonly property var routingSinks: candidateSinks.filter(function(node) {
+    return root.sinkAvailable(node)
+  })
+  readonly property var routingSources: candidateSources
   readonly property string preferredOutputName: Model.preferredAudioNodeName(
     audioPreferences, "output", sink, audioSinks)
   readonly property string preferredInputName: Model.preferredAudioNodeName(
@@ -713,7 +642,7 @@ Panel {
       mode: route.mode
     }
     streamRouteSetProc.command = [
-      pluginScript("audio-stream-route-set"),
+      runtime.script("audio-stream-route-set"),
       direction,
       streamSerialValue,
       route.sink,
@@ -736,8 +665,8 @@ Panel {
   // application starts while the mixer is closed. A per-stream cache keeps
   // a satisfied rule from issuing repeated moves.
   readonly property var enforceableGroups: [
-    { nodes: audioStreams, direction: "playback", devices: audioSinks },
-    { nodes: recordingStreams, direction: "recording", devices: audioSources }
+    { nodes: audioStreams, direction: "playback", devices: routingSinks },
+    { nodes: recordingStreams, direction: "recording", devices: routingSources }
   ]
   property var enforcedStreamRoutes: ({})
 
@@ -768,7 +697,7 @@ Panel {
 
         enforcedStreamRoutes[cacheKey] = rule.target
         streamRouteSetProc.command = [
-          pluginScript("audio-stream-route-set"),
+          runtime.script("audio-stream-route-set"),
           group.direction,
           serial,
           Model.nodeSerial(targetNode),
@@ -907,7 +836,7 @@ Panel {
     Pipewire.preferredDefaultAudioSink = node
     defaultOutputError = ""
     defaultSinkProc.command = [
-      pluginScript("audio-output-set-default"),
+      runtime.script("audio-output-set-default"),
       String(node.id),
       String(node.name),
       previousSinkName
@@ -922,7 +851,7 @@ Panel {
     Pipewire.preferredDefaultAudioSource = node
     defaultInputError = ""
     defaultSourceProc.command = [
-      pluginScript("audio-input-set-default"),
+      runtime.script("audio-input-set-default"),
       String(node.id),
       String(node.name),
       previousSourceName
@@ -946,13 +875,11 @@ Panel {
   }
 
   function deviceAlias(name) {
-    var key = String(name || "")
-    if (key === "") return ""
-    return audioRules.devices.aliases[key] || ""
+    return rulesStore.aliasFor(name)
   }
 
   function deviceHidden(name) {
-    return audioRules.devices.hidden.indexOf(String(name || "")) !== -1
+    return rulesStore.isHidden(name)
   }
 
   function nodeLabel(node) {
@@ -1049,11 +976,6 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  PwObjectTracker { objects: root.candidateSinks }
-  PwObjectTracker { objects: root.candidateSources }
-  PwObjectTracker { objects: root.audioStreams }
-  PwObjectTracker { objects: root.recordingStreams }
-
   PwNodePeakMonitor {
     id: inputPeakMonitor
     node: root.source
@@ -1062,7 +984,7 @@ Panel {
 
   FileView {
     id: settingsFile
-    path: root.settingsPath
+    path: runtime.settingsPath
     watchChanges: true
     printErrors: false
     onLoaded: root.loadAudioControlSettings(text())
@@ -1071,7 +993,7 @@ Panel {
   }
 
   FileView {
-    path: root.audioPreferencesPath
+    path: runtime.preferencesPath
     watchChanges: true
     printErrors: false
     onLoaded: root.loadAudioPreferences(text())
@@ -1080,40 +1002,21 @@ Panel {
   }
 
   FileView {
-    path: root.scenesPath
+    path: runtime.scenesPath
     watchChanges: true
     printErrors: false
     onLoaded: function() {
       root.audioScenes = Model.parseAudioScenes(text()).scenes
-      root.scenesLoaded = true
     }
     onLoadFailed: function() {
       root.audioScenes = []
-      root.scenesLoaded = true
-    }
-    onFileChanged: reload()
-  }
-
-  FileView {
-    path: root.rulesPath
-    watchChanges: true
-    printErrors: false
-    onLoaded: function() {
-      root.audioRules = Model.parseAudioRules(text())
-      root.rulesLoaded = true
-      Qt.callLater(root.enforceRoutingRules)
-    }
-    onLoadFailed: function() {
-      root.audioRules = Model.parseAudioRules("")
-      root.rulesLoaded = true
-      Qt.callLater(root.enforceRoutingRules)
     }
     onFileChanged: reload()
   }
 
   AudioSceneController {
     id: sceneController
-    scriptsDir: root.scriptsDir
+    scriptsDir: runtime.scriptsDir
     onApplyFinished: function(result) {
       var text = "Applied scene '" + result.name + "'"
       if (result.errors.length > 0)
@@ -1196,7 +1099,7 @@ Panel {
 
   Process {
     id: streamRoutesProc
-    command: [root.pluginScript("audio-stream-routes")]
+    command: [runtime.script("audio-stream-routes")]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.updateStreamRoutes(text)
@@ -1221,8 +1124,8 @@ Panel {
       root.lastManualRouteSync = null
       if (exitCode === 0 && sync) {
         var args = sync.target === ""
-          ? [root.pluginScript("audio-app-rules"), "del-app", sync.app, sync.direction]
-          : [root.pluginScript("audio-app-rules"), "set-app", sync.app, sync.direction, sync.target]
+          ? [runtime.script("audio-app-rules"), "del-app", sync.app, sync.direction]
+          : [runtime.script("audio-app-rules"), "set-app", sync.app, sync.direction, sync.target]
         Quickshell.execDetached(args)
       }
 

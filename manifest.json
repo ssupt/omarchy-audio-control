@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "ssupt.audio-control",
   "name": "Advanced Audio Control",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "author": "ssupt",
-  "description": "Advanced PipeWire and WirePlumber audio mixer for Omarchy: persistent per-application output and input routing with live meters; default devices, ports, profiles, Bluetooth codecs and autoswitch; volume boost and balance; safety policies; microphone privacy with recording badge and private mic test; audio scenes; offline per-application routing rules; device aliases, favorites, and hidden devices",
+  "description": "Advanced PipeWire and WirePlumber audio mixer for Omarchy: devices, Bluetooth codecs, safety policies, microphone privacy, audio scenes, persistent routing rules, graph and service diagnostics, channel tests, support reports, and guarded recovery",
   "kinds": [
     "bar-widget",
     "panel"
@@ -15,7 +15,7 @@
   },
   "barWidget": {
     "displayName": "Advanced Audio Control",
-    "description": "Advanced PipeWire and WirePlumber audio mixer for Omarchy: persistent per-application output and input routing with live meters; default devices, ports, profiles, Bluetooth codecs and autoswitch; volume boost and balance; safety policies; microphone privacy with recording badge and private mic test; audio scenes; offline per-application routing rules; device aliases, favorites, and hidden devices",
+    "description": "Advanced PipeWire and WirePlumber audio mixer for Omarchy: devices, Bluetooth codecs, safety policies, microphone privacy, audio scenes, persistent routing rules, graph and service diagnostics, channel tests, support reports, and guarded recovery",
     "category": "Audio",
     "allowMultiple": false
   },

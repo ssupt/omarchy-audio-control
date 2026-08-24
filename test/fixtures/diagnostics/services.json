@@ -1,0 +1,5 @@
+[
+  {"name":"pipewire.service","label":"PipeWire","loadState":"loaded","activeState":"active","subState":"running","active":true,"restarts":0},
+  {"name":"wireplumber.service","label":"WirePlumber","loadState":"loaded","activeState":"active","subState":"running","active":true,"restarts":1},
+  {"name":"pipewire-pulse.service","label":"PipeWire Pulse","loadState":"loaded","activeState":"active","subState":"running","active":true,"restarts":0}
+]

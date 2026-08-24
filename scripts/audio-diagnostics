@@ -1,0 +1,470 @@
+#!/bin/bash
+
+# omarchy:summary=Inspect PipeWire health or copy a privacy-conscious support report
+# omarchy:group=audio
+# omarchy:args=[snapshot | report | copy-report]
+
+set -euo pipefail
+
+export LC_ALL=C
+
+action=${1:-snapshot}
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+fixture_dir=${AUDIO_CONTROL_DIAGNOSTICS_FIXTURE_DIR:-}
+recovery_command=${AUDIO_CONTROL_RECOVERY_COMMAND:-omarchy-restart-audio}
+recovery_launcher=${AUDIO_CONTROL_RECOVERY_LAUNCHER:-omarchy-launch-floating-terminal-with-presentation}
+speaker_command=${AUDIO_CONTROL_SPEAKER_TEST_COMMAND:-speaker-test}
+clipboard_command=${AUDIO_CONTROL_CLIPBOARD_COMMAND:-wl-copy}
+
+usage() {
+  echo "Usage: audio-diagnostics [snapshot | report | copy-report]" >&2
+  exit 1
+}
+
+(( $# <= 1 )) || usage
+case "$action" in
+  snapshot|report|copy-report) ;;
+  *) usage ;;
+esac
+
+command -v jq >/dev/null || {
+  echo "audio-diagnostics requires jq" >&2
+  exit 1
+}
+
+work_dir=$(mktemp -d)
+trap 'rm -rf -- "$work_dir"' EXIT
+warnings_file="$work_dir/warnings"
+: >"$warnings_file"
+
+warn() {
+  printf '%s\n' "$1" >>"$warnings_file"
+}
+
+capture() {
+  local key=$1
+  shift
+  local destination="$work_dir/$key"
+  local fixture="${fixture_dir:+$fixture_dir/$key}"
+
+  if [[ -n $fixture && -f $fixture && ! -L $fixture ]]; then
+    cp -- "$fixture" "$destination"
+    return 0
+  fi
+
+  if timeout 4s "$@" >"$destination" 2>"$destination.error"; then
+    return 0
+  fi
+
+  : >"$destination"
+  return 1
+}
+
+metadata_value() {
+  local key=$1
+  sed -n "s/.*key:'$key' value:'\\([^']*\\)'.*/\\1/p" "$work_dir/metadata.txt" |
+    head -n 1
+}
+
+numeric_or_zero() {
+  local value=$1
+  [[ $value =~ ^[0-9]+$ ]] && printf '%s\n' "$value" || printf '%s\n' 0
+}
+
+version_from() {
+  grep -Eo '[0-9]+([.][0-9]+)+' "$1" 2>/dev/null | head -n 1 || true
+}
+
+service_snapshot() {
+  local unit=$1
+  local label=$2
+  local output active sub_state load_state restarts
+
+  if output=$(timeout 3s systemctl --user show "$unit" \
+      --property=LoadState,ActiveState,SubState,NRestarts --no-pager 2>/dev/null); then
+    load_state=$(sed -n 's/^LoadState=//p' <<<"$output")
+    active=$(sed -n 's/^ActiveState=//p' <<<"$output")
+    sub_state=$(sed -n 's/^SubState=//p' <<<"$output")
+    restarts=$(numeric_or_zero "$(sed -n 's/^NRestarts=//p' <<<"$output")")
+  else
+    load_state=unavailable
+    active=unknown
+    sub_state=unknown
+    restarts=0
+  fi
+
+  jq -nc --arg name "$unit" --arg label "$label" --arg loadState "$load_state" \
+    --arg activeState "$active" --arg subState "$sub_state" --argjson restarts "$restarts" '
+      {
+        name: $name,
+        label: $label,
+        loadState: $loadState,
+        activeState: $activeState,
+        subState: $subState,
+        active: ($activeState == "active" and $subState == "running"),
+        restarts: $restarts
+      }
+    '
+}
+
+build_routes() {
+  jq '
+    def props: (.info.props // {});
+    [ .[]
+      | select(.type == "PipeWire:Interface:Node")
+      | {
+          id: .id,
+          class: (props["media.class"] // ""),
+          internal: ((props["application.id"] // "") == "ssupt.audio-control"),
+          # Media titles and raw node names can contain private content or
+          # hardware identifiers. A route needs roles, not those identifiers.
+          label: ((props["application.name"] // props["node.description"]
+            // props["node.nick"]
+            // (if ((props["media.class"] // "") | startswith("Stream/"))
+              then "Audio application" else "Audio node" end)) | tostring)
+        }
+    ] as $nodes
+    | [ .[]
+        | select(.type == "PipeWire:Interface:Link"
+          and (.info.state == "active" or .info.state == "paused"))
+        | { from: .info["output-node-id"], to: .info["input-node-id"] }
+      ] | unique_by([.from, .to]) as $links
+    | def node_label($id):
+        first($nodes[] | select(.id == $id) | .label) // "Unavailable audio node";
+      def neighbours($id; $reverse):
+        if $reverse then
+          [ $links[] | select(.to == $id) | .from ]
+        else
+          [ $links[] | select(.from == $id) | .to ]
+        end;
+      def walk($id; $reverse; $seen):
+        if ($seen | index($id)) != null or ($seen | length) >= 15 then [$id]
+        else
+          neighbours($id; $reverse) as $next
+          | if ($next | length) == 0 then [$id]
+            else $next[] as $candidate
+              | [$id] + walk($candidate; $reverse; $seen + [$id])
+            end
+        end;
+      ([ $nodes[]
+         | select(.class == "Stream/Output/Audio" and (.internal | not))
+         | .id as $start
+         | { direction: "playback", ids: walk($start; false; []) }
+       ]
+       +
+       [ $nodes[]
+         | select(.class == "Stream/Input/Audio" and (.internal | not))
+         | .id as $start
+         | { direction: "recording", ids: walk($start; true; []) }
+       ])
+    | map(. + { labels: [ .ids[] | node_label(.) ] } | del(.ids))
+    | map(select((.labels | length) > 1))
+    | unique_by(.direction + ":" + (.labels | join(" > ")))
+    | .[:64]
+  ' "$work_dir/dump.json" 2>/dev/null || printf '[]\n'
+}
+
+build_snapshot() {
+  local metadata_ok=false top_ok=false sinks_ok=false sources_ok=false endpoints_ok=false dump_ok=false
+  local plugin_version pipewire_version wireplumber_version configured_rate configured_quantum
+  local default_sink default_source recovery_path recovery_launcher_path speaker_path clipboard_path
+
+  capture metadata.txt pw-metadata -n settings 0 && metadata_ok=true ||
+    warn "PipeWire graph settings could not be read."
+  capture pw-top.txt pw-top -b -n 1 && top_ok=true ||
+    warn "Live PipeWire processing statistics could not be read."
+  capture sinks.json pactl -f json list sinks && sinks_ok=true || {
+    printf '[]\n' >"$work_dir/sinks.json"
+    warn "Playback devices could not be inspected."
+  }
+  capture sources.json pactl -f json list sources && sources_ok=true || {
+    printf '[]\n' >"$work_dir/sources.json"
+    warn "Recording devices could not be inspected."
+  }
+  if $sinks_ok && $sources_ok &&
+      jq -e 'type == "array"' "$work_dir/sinks.json" >/dev/null 2>&1 &&
+      jq -e 'type == "array"' "$work_dir/sources.json" >/dev/null 2>&1; then
+    endpoints_ok=true
+  else
+    printf '[]\n' >"$work_dir/sinks.json"
+    printf '[]\n' >"$work_dir/sources.json"
+    if $sinks_ok && $sources_ok; then
+      warn "PipeWire returned malformed endpoint information."
+    fi
+  fi
+  capture pactl-info.txt pactl info || :
+  if capture dump.json pw-dump; then
+    if jq -e 'type == "array"' "$work_dir/dump.json" >/dev/null 2>&1; then
+      dump_ok=true
+    else
+      printf '[]\n' >"$work_dir/dump.json"
+      warn "PipeWire returned a malformed graph snapshot."
+    fi
+  else
+    printf '[]\n' >"$work_dir/dump.json"
+    warn "The active PipeWire route graph could not be inspected."
+  fi
+
+  if ! capture pipewire-version.txt pw-top --version; then
+    capture pipewire-version.txt pw-top -V || :
+  fi
+  capture wireplumber-version.txt wireplumber --version || :
+  plugin_version=$(jq -r '
+    if (.version | type) == "string" then .version else "" end
+  ' "$script_dir/../manifest.json" 2>/dev/null || true)
+  pipewire_version=$(version_from "$work_dir/pipewire-version.txt")
+  wireplumber_version=$(version_from "$work_dir/wireplumber-version.txt")
+
+  configured_rate=$(numeric_or_zero "$(metadata_value clock.rate)")
+  configured_quantum=$(numeric_or_zero "$(metadata_value clock.quantum)")
+
+  jq -r '
+    .[]
+    | select(.type == "PipeWire:Interface:Node")
+    | select(((.info.props["media.class"] // "") | contains("Audio")))
+    | .id
+  ' "$work_dir/dump.json" 2>/dev/null >"$work_dir/audio-node-ids.txt" ||
+    : >"$work_dir/audio-node-ids.txt"
+
+  awk '
+    BEGIN { load = -1; errors = 0; active = 0; rate = 0; quantum = 0; audioCount = 0 }
+    FILENAME == ARGV[1] {
+      if ($1 ~ /^[0-9]+$/) { audio[$1] = 1; audioCount++ }
+      next
+    }
+    FNR > 1 && $2 ~ /^[0-9]+$/ {
+      if (audioCount > 0 && !($2 in audio)) next
+      if ($1 ~ /^[RrTt]$/) active++
+      if ($7 ~ /^[0-9]+([.][0-9]+)?$/ && ($7 + 0) > load) load = $7 + 0
+      if ($9 ~ /^[0-9]+$/) errors += $9
+      if (rate == 0 && $1 ~ /^[RrTt]$/ && $3 ~ /^[1-9][0-9]*$/ && $4 ~ /^[1-9][0-9]*$/) {
+        quantum = $3 + 0
+        rate = $4 + 0
+      }
+    }
+    END {
+      printf "{\"activeRate\":%d,\"activeQuantum\":%d,\"loadPercent\":%.2f,\"errors\":%d,\"activeNodes\":%d}\n", rate, quantum, load < 0 ? -1 : load * 100, errors, active
+    }
+  ' "$work_dir/audio-node-ids.txt" "$work_dir/pw-top.txt" >"$work_dir/top.json"
+
+  if [[ -n $fixture_dir && -f $fixture_dir/services.json && ! -L $fixture_dir/services.json ]]; then
+    cp -- "$fixture_dir/services.json" "$work_dir/services.json"
+  else
+    {
+      service_snapshot pipewire.service PipeWire
+      service_snapshot wireplumber.service WirePlumber
+      service_snapshot pipewire-pulse.service "PipeWire Pulse"
+    } | jq -s '.' >"$work_dir/services.json"
+  fi
+  jq -e 'type == "array"' "$work_dir/services.json" >/dev/null 2>&1 ||
+    printf '[]\n' >"$work_dir/services.json"
+
+  if ! jq -e 'length == 3 and all(.[]; .active == true)' "$work_dir/services.json" >/dev/null; then
+    warn "One or more audio services are not running normally."
+  fi
+
+  default_sink=$(sed -n 's/^Default Sink:[[:space:]]*//p' "$work_dir/pactl-info.txt" | head -n 1)
+  default_source=$(sed -n 's/^Default Source:[[:space:]]*//p' "$work_dir/pactl-info.txt" | head -n 1)
+  if [[ -n $default_source ]] && jq -e --arg source "$default_source" '
+      any(.[]; .name == $source and ((.monitor_source // "") != ""
+        or (.properties["device.class"] // "") == "monitor"))
+    ' "$work_dir/sources.json" >/dev/null; then
+    default_source=""
+  fi
+
+  jq --arg defaultSink "$default_sink" '
+    def channel_count:
+      try ((.sample_specification // "")
+        | capture("(?<count>[0-9]+)ch").count | tonumber) catch 0;
+    [ .[] | {
+        direction: "output",
+        name: ((.name // "") | tostring),
+        label: ((.description // .name // "Unknown output") | tostring),
+        state: ((.state // "unknown") | ascii_downcase),
+        format: ((.sample_specification // "") | tostring),
+        channelMap: ((.channel_map // "") | tostring),
+        channels: channel_count,
+        port: (if (.active_port | type) == "object"
+          then ((.active_port.description // .active_port.name // "") | tostring)
+          else ((.active_port // "") | tostring) end),
+        profile: ((.properties["device.profile.description"]
+          // .properties["device.profile.name"] // "") | tostring),
+        codec: ((.properties["bluetooth.codec"] // .properties["api.bluez5.codec"]
+          // .properties["bluez5.codec"] // "") | tostring),
+        bluetooth: ((.properties["device.bus"] // "") == "bluetooth"
+          or ((.name // "") | startswith("bluez_"))),
+        default: ((.name // "") == $defaultSink)
+      } ]
+  ' "$work_dir/sinks.json" >"$work_dir/output-devices.json"
+
+  jq --arg defaultSource "$default_source" '
+    def channel_count:
+      try ((.sample_specification // "")
+        | capture("(?<count>[0-9]+)ch").count | tonumber) catch 0;
+    [ .[]
+      | select((.monitor_source // "") == ""
+        and (.properties["device.class"] // "") != "monitor")
+      | {
+          direction: "input",
+          name: ((.name // "") | tostring),
+          label: ((.description // .name // "Unknown input") | tostring),
+          state: ((.state // "unknown") | ascii_downcase),
+          format: ((.sample_specification // "") | tostring),
+          channelMap: ((.channel_map // "") | tostring),
+          channels: channel_count,
+          port: (if (.active_port | type) == "object"
+            then ((.active_port.description // .active_port.name // "") | tostring)
+            else ((.active_port // "") | tostring) end),
+          profile: ((.properties["device.profile.description"]
+            // .properties["device.profile.name"] // "") | tostring),
+          codec: ((.properties["bluetooth.codec"] // .properties["api.bluez5.codec"]
+            // .properties["bluez5.codec"] // "") | tostring),
+          bluetooth: ((.properties["device.bus"] // "") == "bluetooth"
+            or ((.name // "") | startswith("bluez_"))),
+          default: ((.name // "") == $defaultSource)
+        }
+    ]
+  ' "$work_dir/sources.json" >"$work_dir/input-devices.json"
+
+  jq -s 'add | sort_by(.direction, (.default | not), (.label | ascii_downcase))' \
+    "$work_dir/output-devices.json" "$work_dir/input-devices.json" >"$work_dir/devices.json"
+  build_routes >"$work_dir/routes.json"
+
+  recovery_path=$(command -v "$recovery_command" 2>/dev/null || true)
+  recovery_launcher_path=$(command -v "$recovery_launcher" 2>/dev/null || true)
+  speaker_path=$(command -v "$speaker_command" 2>/dev/null || true)
+  clipboard_path=$(command -v "$clipboard_command" 2>/dev/null || true)
+  [[ -n $default_sink ]] || warn "No default playback device is currently available."
+
+  if jq -e '.errors > 0' "$work_dir/top.json" >/dev/null; then
+    warn "PipeWire reports XRUNs or processing errors in the current graph."
+  fi
+
+  jq -Rsc 'split("\n") | map(select(length > 0)) | unique' \
+    "$warnings_file" >"$work_dir/warnings.json"
+
+  jq -n \
+    --arg generatedAt "$(date --iso-8601=seconds)" \
+    --arg pluginVersion "$plugin_version" \
+    --arg pipewireVersion "$pipewire_version" \
+    --arg wireplumberVersion "$wireplumber_version" \
+    --arg defaultOutput "$default_sink" \
+    --arg defaultInput "$default_source" \
+    --argjson configuredRate "$configured_rate" \
+    --argjson configuredQuantum "$configured_quantum" \
+    --argjson metadataAvailable "$metadata_ok" \
+    --argjson topAvailable "$top_ok" \
+    --argjson endpointsAvailable "$endpoints_ok" \
+    --argjson topologyAvailable "$dump_ok" \
+    --argjson speakerAvailable "$([[ -n $speaker_path && -n $default_sink ]] && echo true || echo false)" \
+    --argjson clipboardAvailable "$([[ -n $clipboard_path ]] && echo true || echo false)" \
+    --argjson recoveryAvailable "$([[ -n $recovery_path && -n $recovery_launcher_path ]] && echo true || echo false)" \
+    --slurpfile top "$work_dir/top.json" \
+    --slurpfile services "$work_dir/services.json" \
+    --slurpfile devices "$work_dir/devices.json" \
+    --slurpfile routes "$work_dir/routes.json" \
+    --slurpfile warnings "$work_dir/warnings.json" '
+      ($top[0] // {}) as $stats
+      | (($stats.activeRate // 0) | if . > 0 then . else $configuredRate end) as $rate
+      | (($stats.activeQuantum // 0) | if . > 0 then . else $configuredQuantum end) as $quantum
+      | {
+          version: 1,
+          generatedAt: $generatedAt,
+          healthy: (($services[0] | length) == 3
+            and all($services[0][]; .active == true)
+            and $endpointsAvailable),
+          versions: {
+            plugin: $pluginVersion,
+            pipewire: $pipewireVersion,
+            wireplumber: $wireplumberVersion
+          },
+          graph: {
+            available: ($metadataAvailable or $topAvailable),
+            active: (($stats.activeNodes // 0) > 0),
+            source: (if ($stats.activeRate // 0) > 0 then "active" else "configured" end),
+            rate: $rate,
+            quantum: $quantum,
+            latencyMs: (if $rate > 0 and $quantum > 0
+              then (($quantum * 10000 / $rate | round) / 10) else 0 end),
+            loadPercent: ($stats.loadPercent // -1),
+            errors: ($stats.errors // 0),
+            activeNodes: ($stats.activeNodes // 0)
+          },
+          defaults: { output: $defaultOutput, input: $defaultInput },
+          services: ($services[0] // []),
+          devices: ($devices[0] // []),
+          routes: ($routes[0] // []),
+          capabilities: {
+            speakerTest: $speakerAvailable,
+            supportReport: true,
+            clipboard: $clipboardAvailable,
+            recovery: $recoveryAvailable,
+            topology: $topologyAvailable
+          },
+          warnings: ($warnings[0] // [])
+        }
+    '
+}
+
+print_report() {
+  jq -r '
+    def shown($value): if ($value // "") == "" then "unknown" else $value end;
+    def safe: tostring
+      | gsub("([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}"; "[redacted-address]");
+    def load:
+      if .graph.loadPercent >= 0 then ((.graph.loadPercent * 10 | round) / 10 | tostring) + "%"
+      else "idle/unavailable" end;
+    [
+      "Advanced Audio Control support report",
+      "Generated: " + shown(.generatedAt),
+      "",
+      "Versions",
+      "  Advanced Audio Control: " + shown(.versions.plugin),
+      "  PipeWire: " + shown(.versions.pipewire),
+      "  WirePlumber: " + shown(.versions.wireplumber),
+      "",
+      "Graph",
+      "  Health: " + (if .healthy then "healthy" else "attention required" end),
+      "  Rate / quantum (" + .graph.source + "): " + (.graph.rate | tostring)
+        + " Hz / " + (.graph.quantum | tostring),
+      "  Scheduling latency: " + (.graph.latencyMs | tostring) + " ms",
+      "  Peak DSP load: " + load,
+      "  XRUNs/errors: " + (.graph.errors | tostring),
+      "",
+      "Services",
+      (.services[]? | "  " + .label + ": " + .activeState + "/" + .subState
+        + " (restarts " + (.restarts | tostring) + ")"),
+      "",
+      "Devices",
+      (.devices[]? | "  " + (if .direction == "output" then "Output" else "Input" end)
+        + (if .default then " [default]" else "" end) + ": " + (.label | safe)
+        + " · " + shown(.format) + " · " + shown(.channelMap)
+        + (if .profile != "" then " · " + .profile else "" end)
+        + (if .codec != "" then " · codec " + .codec else "" end)),
+      "",
+      "Active routes",
+      (if (.routes | length) == 0 then "  None reported"
+        else (.routes[] | "  " + .direction + ": " + ([.labels[] | safe] | join(" -> "))) end),
+      "",
+      "Warnings",
+      (if (.warnings | length) == 0 then "  None"
+        else (.warnings[] | "  " + .) end),
+      "",
+      "This report omits logs, usernames, hostnames, configuration files and internal device identifiers."
+    ] | .[]
+  '
+}
+
+snapshot=$(build_snapshot)
+case "$action" in
+  snapshot) printf '%s\n' "$snapshot" ;;
+  report) print_report <<<"$snapshot" ;;
+  copy-report)
+    clipboard_path=$(command -v "$clipboard_command" 2>/dev/null || true)
+    [[ -n $clipboard_path ]] || {
+      echo "No Wayland clipboard command is available" >&2
+      exit 1
+    }
+    print_report <<<"$snapshot" | "$clipboard_path"
+    ;;
+esac

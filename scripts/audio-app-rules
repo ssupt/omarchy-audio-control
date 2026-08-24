@@ -25,6 +25,9 @@ read_rules() {
       .version = 1
       | .appRules = (if (.appRules | type) == "array" then .appRules else [] end)
       | .devices = (if (.devices | type) == "object" then .devices else {} end)
+      | .devices.aliases = (if (.devices.aliases | type) == "object" then .devices.aliases else {} end)
+      | .devices.favorites = (if (.devices.favorites | type) == "array" then .devices.favorites else [] end)
+      | .devices.hidden = (if (.devices.hidden | type) == "array" then .devices.hidden else [] end)
     ' "$rules_file"
   else
     echo "Audio rules contain invalid JSON; refusing to overwrite them" >&2
@@ -96,7 +99,7 @@ case "$action" in
       write_rules '.version = 1 | .devices.aliases[$node] = $label' \
         --arg node "$node" --arg label "$label"
     else
-      write_rules '.version = 1 | .devices.aliases |= (delpaths([[$node]]))' \
+      write_rules '.version = 1 | .devices.aliases |= del(.[$node])' \
         --arg node "$node"
     fi
     ;;

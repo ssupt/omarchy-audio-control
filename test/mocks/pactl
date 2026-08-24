@@ -1,5 +1,10 @@
 #!/bin/bash
 
+if [[ $* == "-f json list sinks" && -n ${AUDIO_CONTROL_DIAGNOSTIC_SINK_FIXTURE:-} ]]; then
+  command cat "$AUDIO_CONTROL_DIAGNOSTIC_SINK_FIXTURE"
+  exit 0
+fi
+
 if [[ $* == "-f json list cards" && -n ${AUDIO_CONTROL_CARD_FIXTURE:-} ]]; then
   command cat "$AUDIO_CONTROL_CARD_FIXTURE"
   exit 0

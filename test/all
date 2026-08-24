@@ -169,6 +169,60 @@ assert.deepEqual(model.recordingInputOptions([defaultInput, headsetInput], defau
   { value: 'override:20', label: 'Always use Desk Microphone' },
   { value: 'override:21', label: 'Always use Headset Microphone' }
 ])
+// Following the default remains available when that device is hidden from the
+// picker; only the explicit "Always use" choice disappears.
+assert.deepEqual(model.streamOutputOptions([headphones], defaultOutput), [
+  { value: 'default:10', label: 'Follow default output' },
+  { value: 'override:11', label: 'Always use Headphones' }
+])
+
+const playbackStream = {
+  name: 'firefox', isStream: true, isSink: true, ready: true, audio: {},
+  properties: { 'application.name': 'Firefox' }
+}
+const recordingStream = {
+  name: 'firefox-capture', isStream: true, isSink: false, ready: true, audio: {},
+  properties: { 'application.name': 'Firefox' }
+}
+const vlcStream = {
+  name: 'vlc', isStream: true, isSink: true, ready: true, audio: {},
+  properties: { 'application.name': 'VLC' }
+}
+const obsStream = {
+  name: 'obs', isStream: true, isSink: false, ready: true, audio: {},
+  properties: { 'application.name': 'OBS' }
+}
+const classified = model.classifyAudioNodes([
+  { name: 'speakers', isStream: false, isSink: true },
+  { name: 'microphone', isStream: false, isSink: false, ready: true, audio: {} },
+  { name: 'speakers.monitor', isStream: false, isSink: false, ready: true, audio: {} },
+  playbackStream,
+  recordingStream,
+  { name: 'omarchy_speaker_tuning_output', isStream: true, isSink: true },
+  { name: 'omarchy_audio_test_record', isStream: true, isSink: false },
+  {
+    name: 'speaker-test', isStream: true, isSink: true, ready: true,
+    properties: { 'application.id': 'ssupt.audio-control' }
+  }
+])
+assert.deepEqual(classified.sinks.map(node => node.name), ['speakers'])
+assert.deepEqual(classified.sources.map(node => node.name), ['microphone'])
+assert.deepEqual(classified.playbackStreams.map(node => node.name), ['firefox'])
+assert.deepEqual(classified.recordingStreams.map(node => node.name), ['firefox-capture'])
+
+assert.deepEqual(model.availableRuleApplicationLabels(
+  [playbackStream, vlcStream], [recordingStream, obsStream], [
+    { app: 'firefox', direction: 'playback', target: 'speakers' },
+    { app: 'obs', direction: 'recording', target: 'microphone' }
+  ]
+), ['Firefox', 'VLC'])
+assert.deepEqual(model.parseAudioRules(JSON.stringify({
+  devices: { favorites: ['speakers', 'speakers'], hidden: ['mic', 'mic'] }
+})).devices, { aliases: {}, favorites: ['speakers'], hidden: ['mic'] })
+assert.deepEqual(['other', 'hasOwnProperty'].sort(
+  model.deviceSortComparator(['hasOwnProperty'])), ['hasOwnProperty', 'other'])
+assert.deepEqual([{ name: 'speakers' }, { name: 'headphones' }].sort(
+  model.deviceSortComparator(['headphones'])).map(node => node.name), ['headphones', 'speakers'])
 assert.equal(model.isRecordingStream({ isStream: true, isSink: false }), true)
 assert.equal(model.isRecordingStream({ isStream: true, isSink: true }), false)
 assert.deepEqual(model.uniqueRecordingStreamLabels([
@@ -182,8 +236,119 @@ assert.equal(model.streamIconName({ ready: true, properties: { 'application.icon
 assert.equal(model.streamIconName({ ready: true, properties: { 'application.icon_name': 'chromium-browser' } }, [], []), 'chromium')
 assert.equal(model.streamIconName({ ready: true, properties: { 'application.id': 'org.example.App.desktop' } }, [], []), 'org.example.App')
 assert.equal(model.streamIconName({ description: 'Spotify' }, [], []), 'spotify')
+const diagnostics = model.parseAudioDiagnostics(JSON.stringify({
+  version: 1,
+  healthy: true,
+  graph: { available: true, rate: 48000, quantum: 256, latencyMs: 5.3, loadPercent: 7, errors: 2 },
+  services: [{ name: 'pipewire.service', label: 'PipeWire', active: true, restarts: 1 }],
+  devices: [{ direction: 'output', name: 'sink', label: 'Speakers', channels: 2, default: true }],
+  routes: [{ direction: 'playback', labels: ['Browser', 'Filter', 'Speakers'] }],
+  capabilities: { speakerTest: true, supportReport: true, clipboard: true, recovery: true },
+  warnings: ['XRUN reported', 'XRUN reported']
+}))
+assert.equal(diagnostics.valid, true)
+assert.equal(diagnostics.value.graph.quantum, 256)
+assert.deepEqual(diagnostics.value.routes[0].labels, ['Browser', 'Filter', 'Speakers'])
+assert.deepEqual(diagnostics.value.warnings, ['XRUN reported'])
+assert.equal(model.parseAudioDiagnostics('not json').valid, false)
 console.log('PASS: profile and routing model')
 JS
+
+diagnostics_fixture="$TEST_DIR/fixtures/diagnostics"
+diagnostics_snapshot=$(
+  AUDIO_CONTROL_DIAGNOSTICS_FIXTURE_DIR="$diagnostics_fixture" \
+  AUDIO_CONTROL_RECOVERY_COMMAND=omarchy-restart-audio \
+  AUDIO_CONTROL_RECOVERY_LAUNCHER=omarchy-launch-floating-terminal-with-presentation \
+  AUDIO_CONTROL_SPEAKER_TEST_COMMAND=speaker-test \
+  AUDIO_CONTROL_CLIPBOARD_COMMAND=wl-copy \
+  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-diagnostics" snapshot
+)
+jq -e '
+  .healthy == true
+  and .versions == {"plugin":"0.7.0","pipewire":"1.6.8","wireplumber":"0.5.15"}
+  and .graph.rate == 48000
+  and .graph.quantum == 256
+  and .graph.latencyMs == 5.3
+  and .graph.loadPercent == 5
+  and .graph.errors == 2
+  and .graph.activeNodes == 2
+  and (.services | length) == 3
+  and ([.services[].restarts] | add) == 1
+  and (.devices | length) == 3
+  and ([.devices[] | select(.name == "bluez_output.test")][0]
+    | .default == true and .bluetooth == true and .codec == "AAC" and .channels == 2)
+  and ([.devices[] | select(.direction == "input")][0].name == "alsa_input.usb-microphone")
+  and ([.devices[].name] | index("bluez_output.test.monitor") == null)
+  and ([.routes[] | select(.direction == "playback")][0].labels
+    == ["Browser","Output Filter","Wireless Headphones"])
+  and ([.routes[] | select(.direction == "recording")][0].labels
+    == ["Recorder","USB Microphone"])
+  and (.routes | length) == 2
+  and ([.routes[].labels[]] | index("Advanced Audio Control") == null)
+  and (.capabilities | .speakerTest and .supportReport and .clipboard and .recovery and .topology)
+  and (.warnings | index("PipeWire reports XRUNs or processing errors in the current graph.") != null)
+' <<<"$diagnostics_snapshot" >/dev/null || fail "audio diagnostics snapshot"
+
+support_report=$(
+  AUDIO_CONTROL_DIAGNOSTICS_FIXTURE_DIR="$diagnostics_fixture" \
+  AUDIO_CONTROL_RECOVERY_COMMAND=omarchy-restart-audio \
+  AUDIO_CONTROL_RECOVERY_LAUNCHER=omarchy-launch-floating-terminal-with-presentation \
+  AUDIO_CONTROL_SPEAKER_TEST_COMMAND=speaker-test \
+  AUDIO_CONTROL_CLIPBOARD_COMMAND=wl-copy \
+  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-diagnostics" report
+)
+grep -q '^  playback: Browser -> Output Filter -> Wireless Headphones$' <<<"$support_report" ||
+  fail "support report active route"
+grep -q '^  Advanced Audio Control: 0.7.0$' <<<"$support_report" ||
+  fail "support report plugin version"
+grep -q '^  Peak DSP load: 5%$' <<<"$support_report" || fail "support report DSP load"
+! grep -q 'bluez_output.test\|alsa_input.usb-microphone' <<<"$support_report" ||
+  fail "support report leaked internal device names"
+grep -q 'Wireless Headphones \[redacted-address\]' <<<"$support_report" ||
+  fail "support report hardware address redaction"
+! grep -q '00:11:22:33:44:55' <<<"$support_report" ||
+  fail "support report leaked a hardware address"
+
+diagnostic_tmp=$(mktemp -d)
+clipboard_log="$diagnostic_tmp/clipboard"
+speaker_log="$diagnostic_tmp/speaker"
+recovery_log="$diagnostic_tmp/recovery"
+trap 'rm -rf "$diagnostic_tmp"' EXIT
+AUDIO_CONTROL_DIAGNOSTICS_FIXTURE_DIR="$diagnostics_fixture" \
+  AUDIO_CONTROL_RECOVERY_COMMAND=omarchy-restart-audio \
+  AUDIO_CONTROL_RECOVERY_LAUNCHER=omarchy-launch-floating-terminal-with-presentation \
+  AUDIO_CONTROL_SPEAKER_TEST_COMMAND=speaker-test \
+  AUDIO_CONTROL_CLIPBOARD_COMMAND=wl-copy \
+  AUDIO_CONTROL_CLIPBOARD_LOG="$clipboard_log" \
+  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-diagnostics" copy-report
+grep -q '^Advanced Audio Control support report$' "$clipboard_log" ||
+  fail "support report clipboard"
+
+AUDIO_CONTROL_DIAGNOSTIC_SINK_FIXTURE="$diagnostics_fixture/sinks.json" \
+  AUDIO_CONTROL_SPEAKER_TEST_COMMAND=speaker-test \
+  AUDIO_CONTROL_SPEAKER_TEST_LOG="$speaker_log" \
+  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-speaker-test" bluez_output.test
+grep -q '^sink=bluez_output.test$' "$speaker_log" || fail "speaker test target"
+grep -q 'application.id=ssupt.audio-control' "$speaker_log" || fail "speaker test private identity"
+grep -q '^args=-D pulse -c 2 -t wav -l 1 -S 35$' "$speaker_log" ||
+  fail "speaker test guarded channel pass"
+if AUDIO_CONTROL_DIAGNOSTIC_SINK_FIXTURE="$diagnostics_fixture/sinks.json" \
+  AUDIO_CONTROL_SPEAKER_TEST_COMMAND=speaker-test PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-speaker-test" missing-output >/dev/null 2>&1; then
+  fail "speaker test accepted an absent output"
+fi
+
+AUDIO_CONTROL_RECOVERY_COMMAND=omarchy-restart-audio \
+  AUDIO_CONTROL_RECOVERY_LAUNCHER=omarchy-launch-floating-terminal-with-presentation \
+  AUDIO_CONTROL_RECOVERY_LOG="$recovery_log" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-recovery"
+for _attempt in {1..50}; do
+  [[ -s $recovery_log ]] && break
+  sleep 0.01
+done
+grep -q '/omarchy-restart-audio$' "$recovery_log" || fail "guarded Omarchy recovery launch"
+echo "PASS: native diagnostics and guarded recovery"
+rm -rf -- "$diagnostic_tmp"
 
 route_log=$(mktemp)
 trap 'rm -f "$route_log"' EXIT
@@ -413,6 +578,18 @@ printf '%s\n' "$scene_one" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TES
 [[ $(stat -c '%a' "$scenes_file") == 600 ]] || fail "audio scene store permissions"
 jq -e '.scenes[0].name == "Desk" and .scenes[0].defaults.output == "speakers"' "$scenes_file" >/dev/null ||
   fail "audio scene content"
+unsafe_scene='{"name":"Wrong name","devices":[{"name":"speakers","direction":"output","muted":true},{"name":"mic","direction":"input","muted":true}],"profiles":[{"card":"card.live","profile":"stereo"},{"card":"card.off","profile":"off"}]}'
+OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-scenes" save SafeName "$unsafe_scene" >/dev/null
+jq -e '
+  ([.scenes[] | select(.name == "SafeName")][0]) as $scene
+  | $scene.devices[0].muted == false
+    and $scene.devices[1].muted == true
+    and $scene.profiles == [{"card":"card.live","profile":"stereo"}]
+    and ([.scenes[].name] | index("Wrong name") | not)
+' "$scenes_file" >/dev/null || fail "audio scene storage safety normalization"
+OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-scenes" delete SafeName >/dev/null
 scene_replacement='{"name":"Desk","defaults":{"output":"line-out","input":"mic"},"devices":[],"ports":[],"profiles":[]}'
 printf '%s\n' "$scene_two" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
   "$ROOT/scripts/audio-scenes" save Headset >/dev/null
@@ -463,6 +640,10 @@ fi
 jq -e '(.devices.aliases | has("speakers") | not)
   and ((.devices.favorites | index("speakers")) == null)' "$rules_file" >/dev/null ||
   fail "device preference removal"
+printf '%s\n' '{}' >"$rules_file"
+"$ROOT/scripts/audio-app-rules" set-alias missing ""
+jq -e '.appRules == [] and .devices == {"aliases":{},"favorites":[],"hidden":[]}' \
+  "$rules_file" >/dev/null || fail "sparse audio rules normalization"
 unset OMARCHY_AUDIO_RULES_FILE
 echo "PASS: application rules and device preference store"
 rm -rf -- "$scenes_dir"
@@ -806,7 +987,7 @@ echo "PASS: menu integration"
 jq -e '
   .schemaVersion == 1
   and .id == "ssupt.audio-control"
-  and .version == "0.6.0"
+  and .version == "0.7.0"
   and .author == "ssupt"
   and (.kinds | index("bar-widget") != null)
   and (.kinds | index("panel") != null)

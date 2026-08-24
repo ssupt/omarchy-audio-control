@@ -1,0 +1,5 @@
+#!/bin/bash
+
+[[ -n ${AUDIO_CONTROL_SPEAKER_TEST_LOG:-} ]] || exit 1
+printf 'sink=%s\nprops=%s\nargs=%s\n' \
+  "${PULSE_SINK:-}" "${PULSE_PROP:-}" "$*" >"$AUDIO_CONTROL_SPEAKER_TEST_LOG"

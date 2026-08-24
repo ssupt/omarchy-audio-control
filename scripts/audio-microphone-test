@@ -70,7 +70,7 @@ case "$action" in
       --target "$source_name" \
       --media-category Capture \
       --media-role Communication \
-      --properties '{"node.name":"omarchy_audio_test_record","application.name":"Advanced Audio Control","media.name":"Microphone test"}' \
+      --properties '{"node.name":"omarchy_audio_test_record","application.id":"ssupt.audio-control","application.name":"Advanced Audio Control","media.name":"Microphone test"}' \
       --rate "$sample_rate" \
       --channels "$channel_count" \
       --format s16 \
@@ -133,7 +133,7 @@ case "$action" in
     command -v pw-play >/dev/null
     exec pw-play \
       --media-role Communication \
-      --properties '{"node.name":"omarchy_audio_test_playback","application.name":"Advanced Audio Control","media.name":"Microphone test playback"}' \
+      --properties '{"node.name":"omarchy_audio_test_playback","application.id":"ssupt.audio-control","application.name":"Advanced Audio Control","media.name":"Microphone test playback"}' \
       --volume 0.8 \
       --rate "$sample_rate" \
       --channels "$channel_count" \

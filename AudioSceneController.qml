@@ -49,6 +49,7 @@ Item {
     for (var i = 0; i < nodes.length; i++) {
       var node = nodes[i]
       if (node && !node.isStream && !node.isSink && Model.isAudioSource(node)
+          && !Model.isInternalAudioNode(node.name) && !Model.isMonitorSource(node)
           && String(node.name || "") === target)
         return node
     }
@@ -57,15 +58,6 @@ Item {
 
   function findDevice(direction, name) {
     return direction === "input" ? findSource(name) : findSink(name)
-  }
-
-  function isInstrumentation(name) {
-    var lower = String(name || "").toLowerCase()
-    return lower === "quickshell" || lower.indexOf("omarchy_audio_test") === 0
-  }
-
-  function isMonitorSource(node) {
-    return String(node && node.name || "").toLowerCase().endsWith(".monitor")
   }
 
   function stereoIndices(node) {
@@ -213,9 +205,10 @@ Item {
     var devices = []
     for (var i = 0; i < nodes.length; i++) {
       var node = nodes[i]
-      if (!node || node.isStream || !node.audio || isInstrumentation(node.name)) continue
+      if (!node || node.ready !== true || node.isStream || !node.audio
+          || Model.isInternalAudioNode(node.name)) continue
       var direction = node.isSink ? "output" : (Model.isAudioSource(node) ? "input" : "")
-      if (direction === "" || isMonitorSource(node)) continue
+      if (direction === "" || Model.isMonitorSource(node)) continue
       devices.push({
         name: String(node.name || ""),
         direction: direction,
@@ -240,7 +233,7 @@ Item {
     var profiles = []
     var cards = Model.parseAudioProfiles(captureProfilesRaw)
     for (var k = 0; k < cards.length; k++) {
-      if (cards[k].activeProfile === "") continue
+      if (cards[k].activeProfile === "" || cards[k].activeProfile === "off") continue
       profiles.push({ card: cards[k].name, profile: cards[k].activeProfile })
     }
 
@@ -248,20 +241,21 @@ Item {
     var defaultSource = Pipewire.defaultAudioSource
     // A monitor source is not a microphone; storing it as the scene's
     // default input would only produce a skipped entry later.
-    captureFinished({
+    var capturedScene = Model.sanitizeSceneEntry({
       version: 1,
       name: captureName,
       savedAt: new Date().toISOString(),
       defaults: {
         output: Pipewire.defaultAudioSink && Pipewire.defaultAudioSink.name
           ? String(Pipewire.defaultAudioSink.name) : "",
-        input: defaultSource && defaultSource.name && !isMonitorSource(defaultSource)
+        input: defaultSource && defaultSource.name && !Model.isMonitorSource(defaultSource)
           ? String(defaultSource.name) : ""
       },
       devices: devices,
       ports: ports,
       profiles: profiles
     })
+    if (capturedScene) captureFinished(capturedScene)
   }
 
   Process {
