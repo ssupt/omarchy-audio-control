@@ -161,16 +161,16 @@ build_routes() {
             to: (.info["input-node-id"] | tostring)
           }
       ][:8192] | unique_by([.from, .to]) as $links
-    | reduce $nodes[] as $node ({};
-        if has($node.id) then . else .[$node.id] = $node.label end) as $labels
+    | (reduce $nodes[] as $node ({};
+        if has($node.id) then . else .[$node.id] = $node.label end)) as $labels
     | def add_neighbour($key; $value):
         (.[$key] // []) as $current
         | if ($current | index($value)) != null or ($current | length) >= 16
           then . else .[$key] = ($current + [$value]) end;
-      reduce $links[] as $link ({ forward: {}, reverse: {} };
+      (reduce $links[] as $link ({ forward: {}, reverse: {} };
         .forward |= add_neighbour($link.from; $link.to)
         | .reverse |= add_neighbour($link.to; $link.from)
-      ) as $adjacency
+      )) as $adjacency
     | def node_label($id):
         $labels[$id] // "Unavailable audio node";
       def neighbours($id; $reverse):
