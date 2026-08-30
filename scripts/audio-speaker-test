@@ -13,13 +13,35 @@ set -euo pipefail
 
 sink_name=$1
 speaker_command=${AUDIO_CONTROL_SPEAKER_TEST_COMMAND:-speaker-test}
-[[ -n $sink_name && $sink_name != *.monitor ]] || exit 1
 command -v jq >/dev/null
 speaker_path=$(command -v "$speaker_command")
+LC_ALL=C
 
-sink=$(pactl -f json list sinks | jq -cer --arg sink "$sink_name" '
-  first(.[] | select(.name == $sink))
-') || {
+jq -ne --arg sink "$sink_name" '
+  ($sink | length) > 0 and ($sink | length) <= 160
+  and ($sink | endswith(".monitor") | not)
+  and ($sink | test("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]") | not)
+' >/dev/null || {
+  echo "Invalid output identifier" >&2
+  exit 1
+}
+
+maximum_pactl_bytes=16777216
+sinks_json=$(timeout 4s pactl -f json list sinks |
+  head -c "$((maximum_pactl_bytes + 1))") || exit 1
+(( ${#sinks_json} <= maximum_pactl_bytes )) || {
+  echo "Audio output information is too large" >&2
+  exit 1
+}
+
+sink=$(jq -cer --arg sink "$sink_name" '
+  if type != "array" or length > 512 then error("invalid sink list")
+  else [.[] | select(.name == $sink)] as $matches
+    | if ($matches | length) == 1 then $matches[0]
+      elif ($matches | length) == 0 then empty
+      else error("ambiguous sink identity") end
+  end
+' <<<"$sinks_json") || {
   echo "The selected output is no longer available" >&2
   exit 2
 }
@@ -39,4 +61,5 @@ channels=$(jq -er '
 
 export PULSE_SINK=$sink_name
 export PULSE_PROP="application.id=ssupt.audio-control application.name='Advanced Audio Control' media.name='Speaker channel test'"
-exec "$speaker_path" -D pulse -c "$channels" -t wav -l 1 -S 35
+exec timeout --foreground --kill-after=2 30 \
+  "$speaker_path" -D pulse -c "$channels" -t wav -l 1 -S 35

@@ -14,6 +14,7 @@ CursorSurface {
   required property bool menuEnabled
   property color urgent: Color.urgent
   property string fontFamily: Style.font.family
+  property bool menuReportedOpen: false
 
   signal targetChosen(string value)
   signal deleted()
@@ -27,6 +28,13 @@ CursorSurface {
 
   function toggleTargetMenu() { if (targetDropdown.enabled) targetDropdown.toggle() }
   function closeTargetMenu() { targetDropdown.close() }
+  function reportMenu(open) {
+    var next = open === true
+    if (menuReportedOpen === next) return
+    menuReportedOpen = next
+    menuToggled(next)
+  }
+  Component.onDestruction: root.reportMenu(false)
 
   Row {
     anchors.left: parent.left
@@ -80,7 +88,7 @@ CursorSurface {
 
       onHovered: function(on) { if (on) root.cursorRequested() }
       onChanged: function(value) { root.targetChosen(value) }
-      onPopupOpenChanged: root.menuToggled(popupOpen)
+      onPopupOpenChanged: root.reportMenu(popupOpen)
     }
 
     PanelActionButton {

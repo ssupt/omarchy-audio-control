@@ -29,6 +29,15 @@ CursorSurface {
   implicitHeight: prefContent.implicitHeight + Style.space(18)
   bordered: true
 
+  // Keep row activation below the explicit action buttons so a favorite,
+  // visibility, or edit-confirmation click cannot also start a rename.
+  MouseArea {
+    anchors.fill: parent
+    enabled: !root.editingAlias && root.interactive
+    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+    onClicked: root.aliasEditStarted()
+  }
+
   Row {
     id: prefContent
     anchors.left: parent.left
@@ -70,6 +79,7 @@ CursorSurface {
       TextField {
         id: aliasField
         visible: root.editingAlias
+        enabled: root.interactive
         width: parent.width
         // Occupy the title and device-code slots together so the outer
         // rectangle keeps its size while renaming.
@@ -113,7 +123,7 @@ CursorSurface {
         foreground: root.foreground
         fontFamily: root.fontFamily
         bordered: true
-        enabled: root.enabled
+        enabled: root.enabled && root.interactive
         onClicked: root.aliasCommitted(aliasField.text)
       }
 
@@ -125,7 +135,7 @@ CursorSurface {
         hoverColor: root.urgent
         fontFamily: root.fontFamily
         bordered: true
-        enabled: root.enabled
+        enabled: root.enabled && root.interactive
         onClicked: root.aliasCancelled()
       }
 
@@ -174,8 +184,4 @@ CursorSurface {
     onContainsMouseChanged: if (containsMouse) root.cursorRequested()
   }
 
-  TapHandler {
-    enabled: !root.editingAlias && root.interactive
-    onTapped: root.aliasEditStarted()
-  }
 }

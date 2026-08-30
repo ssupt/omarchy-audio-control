@@ -5,11 +5,20 @@
 # explicit, reversible integration step rather than a hidden config mutation.
 
 set -euo pipefail
+export LC_ALL=C
 
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$script_dir/.audio-common"
 action=${1:-install}
 menu_file=${AUDIO_CONTROL_MENU_FILE:-$HOME/.config/omarchy/extensions/omarchy-menu.jsonc}
 marker="  // Added by ssupt.audio-control"
 entry='  "setup.audio": {"icon":"","label":"Audio","action":"omarchy-shell shell summon ssupt.audio-control"}'
+maximum_menu_bytes=1048576
+
+command -v jq >/dev/null || {
+  echo "audio-menu-entry requires jq" >&2
+  exit 1
+}
 
 usage() {
   echo "Usage: audio-menu-entry [install|remove]" >&2
@@ -22,51 +31,326 @@ refresh_menu() {
   omarchy-shell shell call omarchy.menu refresh "" >/dev/null 2>&1 || true
 }
 
+# jq is the grammar authority after comments and JSONC trailing commas are
+# removed lexically. Neither pass interprets comment markers or commas inside
+# strings, so validating an existing user file cannot be fooled by values such
+# as URLs or escaped quotes. Slurping also rejects concatenated root documents.
+strip_jsonc_comments() {
+  local source=${1:-$menu_file}
+  awk '
+    {
+      line = $0
+      line_comment = 0
+      for (column = 1; column <= length(line); column++) {
+        character = substr(line, column, 1)
+        next_character = substr(line, column + 1, 1)
+        if (line_comment) break
+        if (block_comment) {
+          if (character == "*" && next_character == "/") {
+            block_comment = 0
+            column++
+          }
+          continue
+        }
+        if (in_string) {
+          printf "%s", character
+          if (escaped) escaped = 0
+          else if (character == "\\") escaped = 1
+          else if (character == "\"") in_string = 0
+          continue
+        }
+        if (character == "\"") {
+          in_string = 1
+          printf "%s", character
+        } else if (character == "/" && next_character == "/") {
+          printf " "
+          line_comment = 1
+          column++
+        } else if (character == "/" && next_character == "*") {
+          printf " "
+          block_comment = 1
+          column++
+        } else {
+          printf "%s", character
+        }
+      }
+      printf "\n"
+      if (in_string) exit 2
+    }
+    END { if (block_comment || in_string) exit 2 }
+  ' "$source"
+}
+
+strip_jsonc_trailing_commas() {
+  awk '
+    function flush_pending(drop_comma) {
+      if (pending == "") return
+      if (drop_comma) printf "%s", substr(pending, 2)
+      else printf "%s", pending
+      pending = ""
+    }
+    {
+      line = $0
+      for (column = 1; column <= length(line); column++) {
+        character = substr(line, column, 1)
+        if (in_string) {
+          printf "%s", character
+          if (escaped) escaped = 0
+          else if (character == "\\") escaped = 1
+          else if (character == "\"") in_string = 0
+          continue
+        }
+        if (pending != "") {
+          if (character ~ /[[:space:]]/) {
+            pending = pending character
+            continue
+          }
+          if (character == "}" || character == "]") flush_pending(1)
+          else flush_pending(0)
+        }
+        if (character == "\"") {
+          in_string = 1
+          printf "%s", character
+        } else if (character == ",") {
+          pending = ","
+        } else {
+          printf "%s", character
+        }
+      }
+      if (pending != "") pending = pending "\n"
+      else printf "\n"
+    }
+    END { flush_pending(0) }
+  '
+}
+
+validate_menu() {
+  local source=${1:-$menu_file}
+  strip_jsonc_comments "$source" | strip_jsonc_trailing_commas |
+    jq -e -s 'length == 1 and (.[0] | type == "object")' >/dev/null 2>&1
+}
+
+menu_has_entry() {
+  local source=${1:-$menu_file}
+  strip_jsonc_comments "$source" | strip_jsonc_trailing_commas |
+    jq -e -s 'length == 1 and (.[0] | type) == "object"
+      and (.[0] | has("setup.audio"))' >/dev/null 2>&1
+}
+
+# Report the root object's closing line/column, whether the generated property
+# already exists, and whether the object has any content. This intentionally
+# lexes JSONC instead of using line-oriented regular expressions: comments,
+# strings containing comment markers, and a closing brace on the same line as
+# the object are all valid menu files.
+inspect_menu() {
+  awk '
+    function invalid() { exit 2 }
+    {
+      line = $0
+      line_comment = 0
+      for (column = 1; column <= length(line); column++) {
+        character = substr(line, column, 1)
+        next_character = substr(line, column + 1, 1)
+
+        if (line_comment) break
+        if (block_comment) {
+          if (character == "*" && next_character == "/") {
+            block_comment = 0
+            column++
+          }
+          continue
+        }
+        if (in_string) {
+          if (escaped) {
+            string_value = string_value character
+            escaped = 0
+          } else if (character == "\\") {
+            string_value = string_value character
+            escaped = 1
+          } else if (character == "\"") {
+            in_string = 0
+            last_significant = "\""
+            if (key_candidate) {
+              pending_key = (string_value == "setup.audio")
+              key_candidate = 0
+            }
+          } else {
+            string_value = string_value character
+          }
+          continue
+        }
+
+        if (character == "/" && next_character == "/") {
+          line_comment = 1
+          column++
+          continue
+        }
+        if (character == "/" && next_character == "*") {
+          block_comment = 1
+          column++
+          continue
+        }
+        if (character ~ /[[:space:]]/) continue
+        if (root_closed) invalid()
+
+        if (pending_key) {
+          if (character == ":") {
+            entry_count++
+            if (entry_count > 1) invalid()
+            has_entry = 1
+            pending_key = 0
+            expect_key = 0
+            continue
+          }
+          pending_key = 0
+        }
+
+        if (!root_started) {
+          if (character != "{") invalid()
+          root_started = 1
+          object_depth = 1
+          expect_key = 1
+          continue
+        }
+
+        if (character == "\"") {
+          in_string = 1
+          escaped = 0
+          string_value = ""
+          key_candidate = (object_depth == 1 && array_depth == 0 && expect_key)
+          if (object_depth == 1 && array_depth == 0) has_content = 1
+          continue
+        }
+        if (character == "{") {
+          if (object_depth == 1 && array_depth == 0) has_content = 1
+          object_depth++
+          continue
+        }
+        if (character == "}") {
+          if (object_depth <= 0) invalid()
+          if (object_depth == 1 && array_depth == 0) {
+            root_trailing_comma = (last_significant == ",")
+            closing_line = NR
+            closing_column = column
+            object_depth = 0
+            root_closed = 1
+          } else {
+            object_depth--
+            last_significant = "}"
+          }
+          continue
+        }
+        if (character == "[") {
+          if (object_depth == 1 && array_depth == 0) has_content = 1
+          array_depth++
+          continue
+        }
+        if (character == "]") {
+          if (array_depth <= 0) invalid()
+          array_depth--
+          last_significant = "]"
+          continue
+        }
+        if (object_depth == 1 && array_depth == 0) {
+          if (character == ",") expect_key = 1
+          else if (character == ":") expect_key = 0
+          has_content = 1
+        }
+        last_significant = character
+      }
+      # JSON strings cannot contain a literal newline.
+      if (in_string) invalid()
+    }
+    END {
+      if (!root_started || !root_closed || object_depth != 0 || array_depth != 0 ||
+          block_comment || in_string) exit 2
+      printf "%d\t%d\t%d\t%d\t%d\n", closing_line, closing_column,
+        has_entry ? 1 : 0, has_content ? 1 : 0, root_trailing_comma ? 1 : 0
+    }
+  ' "$menu_file"
+}
+
 install_entry() {
-  mkdir -p "$(dirname -- "$menu_file")"
   if [[ ! -f $menu_file ]]; then
-    printf '{\n%s\n%s\n}\n' "$marker" "$entry" >"$menu_file"
+    tmp=$(mktemp "${menu_file}.tmp.XXXXXX")
+    trap 'rm -f -- "$tmp"' EXIT
+    printf '{\n%s\n%s\n}\n' "$marker" "$entry" >"$tmp"
+    validate_menu "$tmp" || exit 1
+    chmod 600 -- "$tmp"
+    mv -f -- "$tmp" "$menu_file"
+    trap - EXIT
     refresh_menu
     return
   fi
 
-  grep -Eq '^[[:space:]]*"setup\.audio"[[:space:]]*:' "$menu_file" && return
+  validate_menu || {
+    echo "Audio menu configuration is not valid JSONC" >&2
+    exit 1
+  }
+  # Let the JSON parser decode escaped property names. The positional lexer
+  # below deliberately keeps raw spelling for safe line edits, so on its own
+  # it would miss an existing key such as "setup\u002eaudio" and create a
+  # second semantic property.
+  menu_has_entry && return 0
+  inspection=$(inspect_menu) || {
+    echo "Audio menu configuration is not valid JSONC" >&2
+    exit 1
+  }
+  IFS=$'\t' read -r closing_line closing_column has_entry has_content \
+    has_trailing_comma <<<"$inspection"
+  (( has_entry == 0 )) || return 0
 
   mapfile -t lines <"$menu_file"
-  closing=-1
-  for (( i = ${#lines[@]} - 1; i >= 0; i-- )); do
-    if [[ ${lines[$i]} =~ ^[[:space:]]*\}[[:space:]]*$ ]]; then
-      closing=$i
-      break
-    fi
-  done
-  (( closing >= 0 )) || { echo "Could not find the menu object's closing brace" >&2; exit 1; }
-
-  for (( i = closing - 1; i >= 0; i-- )); do
-    line=${lines[$i]}
-    [[ $line =~ ^[[:space:]]*$ || $line =~ ^[[:space:]]*// ]] && continue
-    if [[ ! $line =~ \{[[:space:]]*$ && ! $line =~ ,[[:space:]]*$ ]]; then
-      lines[$i]="$line,"
-    fi
-    break
-  done
+  closing=$((closing_line - 1))
+  (( closing >= 0 && closing < ${#lines[@]} && closing_column > 0 )) || {
+    echo "Could not locate the menu object's closing brace" >&2
+    exit 1
+  }
 
   tmp=$(mktemp "${menu_file}.tmp.XXXXXX")
+  trap 'rm -f -- "$tmp"' EXIT
   for (( i = 0; i < ${#lines[@]}; i++ )); do
     if (( i == closing )); then
-      printf '%s\n%s\n' "$marker" "$entry"
+      line=${lines[$i]}
+      prefix=${line:0:closing_column-1}
+      if [[ $prefix =~ ^[[:space:]]*$ ]]; then
+        closing_text=$line
+      else
+        indent=${line%%[![:space:]]*}
+        closing_text="${indent}${line:closing_column-1}"
+        printf '%s\n' "$prefix"
+      fi
+      printf '%s\n' "$marker"
+      if (( has_content && ! has_trailing_comma )); then
+        printf '  ,%s\n' "${entry#  }"
+      else
+        printf '%s\n' "$entry"
+      fi
+      printf '%s\n' "$closing_text"
+      continue
     fi
     printf '%s\n' "${lines[$i]}"
   done >"$tmp"
-  mv "$tmp" "$menu_file"
+  validate_menu "$tmp" || {
+    echo "Could not create a valid audio menu configuration" >&2
+    exit 1
+  }
+  chmod 600 -- "$tmp"
+  mv -f -- "$tmp" "$menu_file"
+  trap - EXIT
   refresh_menu
 }
 
 remove_entry() {
   [[ -f $menu_file ]] || return
+  validate_menu && inspect_menu >/dev/null || {
+    echo "Audio menu configuration is not valid JSONC" >&2
+    exit 1
+  }
   mapfile -t lines <"$menu_file"
   tmp=$(mktemp "${menu_file}.tmp.XXXXXX")
-  entry_pattern='^[[:space:]]*"setup\.audio"[[:space:]]*:'
+  trap 'rm -f -- "$tmp"' EXIT
+  entry_pattern='^[[:space:]]*,?[[:space:]]*"setup\.audio"[[:space:]]*:'
   skip_entry=0
   for line in "${lines[@]}"; do
     if [[ $line == "$marker" ]]; then
@@ -80,12 +364,37 @@ remove_entry() {
     skip_entry=0
     printf '%s\n' "$line"
   done >"$tmp"
-  mv "$tmp" "$menu_file"
+  validate_menu "$tmp" || {
+    echo "Could not remove the audio menu entry safely" >&2
+    exit 1
+  }
+  chmod 600 -- "$tmp"
+  mv -f -- "$tmp" "$menu_file"
+  trap - EXIT
   refresh_menu
 }
 
-case "$action" in
-  install) install_entry ;;
-  remove) remove_entry ;;
-  *) usage ;;
-esac
+[[ $action == install || $action == remove ]] || usage
+
+menu_dir=$(dirname -- "$menu_file")
+if [[ $action == remove && ! -d $menu_dir ]]; then
+  exit 0
+fi
+mkdir -p -- "$menu_dir"
+audio_open_lock_path "${menu_file}.lock" 9 \
+  "Audio menu configuration is busy; try again" || exit 1
+if [[ -L $menu_file || (-e $menu_file && ! -f $menu_file) ]]; then
+  echo "Audio menu configuration is not a regular file" >&2
+  exit 1
+fi
+if [[ -e $menu_file ]] &&
+    (( $(stat -c %s -- "$menu_file" 2>/dev/null || printf '%s' "$((maximum_menu_bytes + 1))") > maximum_menu_bytes )); then
+  echo "Audio menu configuration is too large; refusing to rewrite it" >&2
+  exit 1
+fi
+
+if [[ $action == install ]]; then
+  install_entry
+else
+  remove_entry
+fi

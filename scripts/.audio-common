@@ -1,0 +1,167 @@
+#!/bin/bash
+
+# Shared runtime setup for helpers that talk to PipeWire. The XDG runtime
+# directory is normally private; the /tmp fallback must create its own
+# user-owned directory so another local user cannot pre-place a FIFO or symlink
+# at a predictable lock/capture path and stall a shell process on open.
+audio_prepare_private_runtime() {
+  local runtime_base mode permissions
+  if [[ -n ${AUDIO_CONTROL_PRIVATE_RUNTIME_DIR:-} ]]; then
+    runtime_base=$AUDIO_CONTROL_PRIVATE_RUNTIME_DIR
+  elif [[ -n ${XDG_RUNTIME_DIR:-} ]]; then
+    runtime_base=$XDG_RUNTIME_DIR
+  else
+    runtime_base=/tmp/omarchy-audio-control-${UID}
+    if [[ ! -e $runtime_base && ! -L $runtime_base ]]; then
+      mkdir -m 700 -- "$runtime_base" 2>/dev/null || true
+    fi
+    if [[ -L $runtime_base || ! -d $runtime_base || ! -O $runtime_base ]]; then
+      echo "Could not create a private audio runtime directory" >&2
+      return 1
+    fi
+    chmod 700 -- "$runtime_base" || return 1
+  fi
+
+  if [[ -L $runtime_base || ! -d $runtime_base || ! -O $runtime_base ]]; then
+    echo "The audio runtime directory is not private to this user" >&2
+    return 1
+  fi
+  mode=$(stat -Lc '%a' -- "$runtime_base" 2>/dev/null) || return 1
+  permissions=${mode: -3}
+  if [[ ! $permissions =~ ^[0-7]{3}$ ]] || (( (8#$permissions & 0022) != 0 )); then
+    echo "The audio runtime directory is writable by another user" >&2
+    return 1
+  fi
+
+  AUDIO_CONTROL_PRIVATE_RUNTIME_DIR=$runtime_base
+}
+
+# Open a persistent lock without following a pre-placed symlink or blocking on
+# a FIFO. Noclobber makes first creation atomic; the descriptor/path identity
+# checks protect the subsequent append open in normal private or sticky dirs.
+audio_open_lock_path() {
+  local lock_path=${1:-}
+  local descriptor=${2:-}
+  local busy_message=${3:-Another audio change is still finishing; try again}
+  local wait_seconds=${4:-5}
+  local lock_dir directory_mode directory_permissions directory_sticky
+  local owner links path_identity descriptor_identity
+  [[ -n $lock_path && $descriptor =~ ^[89]$
+      && $wait_seconds =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+  lock_dir=$(dirname -- "$lock_path") || return 1
+  [[ ! -L $lock_dir && -d $lock_dir ]] || {
+    echo "The audio lock directory is not safe" >&2
+    return 1
+  }
+  directory_mode=$(stat -Lc '%a' -- "$lock_dir" 2>/dev/null) || return 1
+  directory_permissions=${directory_mode: -3}
+  directory_sticky=0
+  (( (8#$directory_mode & 01000) != 0 )) && directory_sticky=1
+  if [[ ! $directory_permissions =~ ^[0-7]{3}$ ]] ||
+      { (( (8#$directory_permissions & 0022) != 0 )) && (( directory_sticky == 0 )); }; then
+    echo "The audio lock directory is writable by another user" >&2
+    return 1
+  fi
+
+  if [[ ! -e $lock_path && ! -L $lock_path ]]; then
+    (umask 077; set -o noclobber; : >"$lock_path") 2>/dev/null || true
+  fi
+  if [[ -L $lock_path || ! -f $lock_path ]]; then
+    echo "The audio lock is not a regular file" >&2
+    return 1
+  fi
+  read -r owner links < <(stat -Lc '%u %h' -- "$lock_path" 2>/dev/null) || return 1
+  if [[ $owner != "$UID" || $links != 1 ]]; then
+    echo "The audio lock is not private to this user" >&2
+    return 1
+  fi
+
+  if [[ $descriptor == 9 ]]; then
+    exec 9>>"$lock_path" || return 1
+  else
+    exec 8>>"$lock_path" || return 1
+  fi
+  path_identity=$(stat -Lc '%d:%i:%u:%h' -- "$lock_path" 2>/dev/null) || return 1
+  descriptor_identity=$(stat -Lc '%d:%i:%u:%h' \
+    -- "/proc/$$/fd/$descriptor" 2>/dev/null) || return 1
+  if [[ $path_identity != "$descriptor_identity" ||
+      $descriptor_identity != *":$UID:1" || ! -f /proc/$$/fd/$descriptor ]]; then
+    echo "The audio lock changed while it was being opened" >&2
+    return 1
+  fi
+  chmod 600 -- "/proc/$$/fd/$descriptor" || return 1
+  flock -w "$wait_seconds" "$descriptor" || {
+    echo "$busy_message" >&2
+    return 1
+  }
+}
+
+audio_open_lock() {
+  local lock_name=${1:-}
+  local descriptor=${2:-}
+  local busy_message=${3:-Another audio change is still finishing; try again}
+  local lock_path
+  [[ $lock_name =~ ^[a-z0-9-]+$ && $descriptor =~ ^[89]$ ]] || return 1
+  audio_prepare_private_runtime || return 1
+
+  lock_path=$AUDIO_CONTROL_PRIVATE_RUNTIME_DIR/$lock_name.lock
+  audio_open_lock_path "$lock_path" "$descriptor" "$busy_message"
+}
+
+audio_acquire_mutation_lock() {
+  audio_open_lock omarchy-audio-mutation 9 \
+    "${1:-Another audio change is still finishing; try again}"
+}
+
+audio_acquire_settings_lock() {
+  audio_open_lock omarchy-audio-settings 8 \
+    "${1:-Another audio setting change is still finishing; try again}"
+}
+
+# Capture command output without allowing a malfunctioning audio service to
+# grow an unbounded shell variable. The producer and limiter are both checked;
+# output one byte over the ceiling is rejected rather than silently truncated.
+audio_capture_bounded() {
+  local __audio_destination=${1:-}
+  local __audio_maximum=${2:-}
+  shift 2 || return 1
+  [[ $__audio_destination =~ ^[A-Za-z_][A-Za-z0-9_]*$ \
+      && $__audio_maximum =~ ^[1-9][0-9]*$ \
+      && -n ${AUDIO_CONTROL_PRIVATE_RUNTIME_DIR:-} ]] || return 1
+
+  local __audio_capture __audio_size __audio_value
+  local -a __audio_pipeline_status
+  __audio_capture=$(mktemp \
+    "$AUDIO_CONTROL_PRIVATE_RUNTIME_DIR/.audio-capture.XXXXXX") || return 1
+  # Inspect both commands explicitly instead of relying on the caller to have
+  # enabled pipefail before sourcing this file.
+  { "$@" 2>/dev/null | head -c "$((__audio_maximum + 1))" >"$__audio_capture"
+    __audio_pipeline_status=("${PIPESTATUS[@]}")
+  } || true
+  if (( ${#__audio_pipeline_status[@]} != 2
+      || __audio_pipeline_status[0] != 0
+      || __audio_pipeline_status[1] != 0 )); then
+    rm -f -- "$__audio_capture"
+    return 1
+  fi
+  __audio_size=$(stat -c '%s' -- "$__audio_capture" 2>/dev/null) || {
+    rm -f -- "$__audio_capture"
+    return 1
+  }
+  if (( __audio_size > __audio_maximum )); then
+    rm -f -- "$__audio_capture"
+    return 1
+  fi
+  # Bash variables cannot represent NUL bytes and command substitution would
+  # silently delete them. Reject binary output before importing it; otherwise
+  # two distinct PipeWire identifiers separated by NUL could collapse into a
+  # third string that passes later identity checks.
+  if ! LC_ALL=C tr -d '\000' <"$__audio_capture" |
+      cmp -s -- "$__audio_capture" -; then
+    rm -f -- "$__audio_capture"
+    return 1
+  fi
+  __audio_value=$(<"$__audio_capture")
+  rm -f -- "$__audio_capture"
+  printf -v "$__audio_destination" '%s' "$__audio_value"
+}

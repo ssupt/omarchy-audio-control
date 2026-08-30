@@ -5,10 +5,95 @@
 # omarchy:args=[save <name> [scene-json] | delete <name>]
 
 set -euo pipefail
+LC_ALL=C
 
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$script_dir/.audio-common"
 scenes_file=${OMARCHY_AUDIO_SCENES_FILE:-${XDG_CONFIG_HOME:-${HOME:?}/.config}/omarchy/audio-scenes.json}
 action=${1:-}
 maximum_scenes=24
+maximum_store_bytes=2097152
+
+scene_jq_defs='
+  def clean($maximum):
+    tostring
+    | gsub("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]"; " ")
+    | gsub(" +"; " ")
+    | sub("^ +"; "") | sub(" +$"; "")
+    | .[0:$maximum];
+  def identifier($maximum):
+    if type == "string" and length > 0 and length <= $maximum
+        and (test("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]") | not)
+      then . else "" end;
+  def bounded_number($fallback; $minimum; $maximum):
+    (if type == "number" then . else (tonumber? // $fallback) end) as $value
+    | if $value < $minimum then $minimum
+      elif $value > $maximum then $maximum
+      elif ($value >= $minimum and $value <= $maximum) then $value
+      else $fallback end;
+  def normalized_scene:
+    select(type == "object")
+    | {
+        name: ((.name // "") | clean(48)),
+        savedAt: ((.savedAt // "") | clean(32)),
+        defaults: (
+          if (.defaults | type) == "object" then .defaults else {} end
+          | {
+              output: ((.output // "") | identifier(160)),
+              input: ((.input // "") | identifier(160))
+            }
+        ),
+        devices: (
+          reduce ([(if (.devices | type) == "array" then .devices else [] end)[:256][]?
+            | select(type == "object")
+            | ((.name // "") | identifier(160)) as $device
+            | select($device != "" and (.direction == "output" or .direction == "input"))
+            | {
+                key: (.direction + ":" + $device),
+                value: {
+                  name: $device,
+                  direction: .direction,
+                  volume: ((.volume // 1) | bounded_number(1; 0; 1.5)),
+                  muted: (.direction == "input" and .muted == true),
+                  balance: ((.balance // 0) | bounded_number(0; -1; 1))
+                }
+              }][]) as $entry
+            ({seen: {}, values: []};
+              if (.seen | has($entry.key)) or (.values | length) >= 64 then .
+              else .seen[$entry.key] = true | .values += [$entry.value] end)
+          | .values
+        ),
+        ports: (
+          reduce ([(if (.ports | type) == "array" then .ports else [] end)[:256][]?
+            | select(type == "object")
+            | ((.endpoint // "") | identifier(160)) as $endpoint
+            | ((.value // "") | identifier(160)) as $value
+            | select($endpoint != "" and $value != ""
+                and (.direction == "output" or .direction == "input"))
+            | {
+                key: (.direction + ":" + $endpoint),
+                value: {direction: .direction, endpoint: $endpoint, value: $value}
+              }][]) as $entry
+            ({seen: {}, values: []};
+              if (.seen | has($entry.key)) or (.values | length) >= 64 then .
+              else .seen[$entry.key] = true | .values += [$entry.value] end)
+          | .values
+        ),
+        profiles: (
+          reduce ([(if (.profiles | type) == "array" then .profiles else [] end)[:256][]?
+            | select(type == "object")
+            | ((.card // "") | identifier(160)) as $card
+            | ((.profile // "") | identifier(160)) as $profile
+            | select($card != "" and $profile != "" and $profile != "off")
+            | {key: $card, value: {card: $card, profile: $profile}}][]) as $entry
+            ({seen: {}, values: []};
+              if (.seen | has($entry.key)) or (.values | length) >= 64 then .
+              else .seen[$entry.key] = true | .values += [$entry.value] end)
+          | .values
+        )
+      }
+    | select(.name != "");
+'
 
 usage() {
   echo "Usage: audio-scenes save <name> [scene-json] | audio-scenes delete <name>" >&2
@@ -17,17 +102,47 @@ usage() {
 }
 
 read_scenes() {
-  if [[ ! -s $scenes_file ]]; then
+  if [[ -L $scenes_file || (-e $scenes_file && ! -f $scenes_file) ]]; then
+    echo "Audio scenes are not stored in a regular file" >&2
+    return 1
+  elif [[ ! -s $scenes_file ]]; then
     printf '%s\n' '{"version":1,"scenes":[]}'
-  elif jq -e 'type == "object"' "$scenes_file" >/dev/null 2>&1; then
-    jq -c '
-      .version = 1
-      | .scenes = (if (.scenes | type) == "array" then .scenes else [] end)
+  elif (( $(stat -c %s -- "$scenes_file" 2>/dev/null || printf '%s' "$((maximum_store_bytes + 1))") > maximum_store_bytes )); then
+    echo "Audio scenes are too large; refusing to overwrite them" >&2
+    return 1
+  elif jq -se 'length == 1 and (.[0] | type) == "object"
+      and ((.[0] | has("version") | not) or .[0].version == 1)' \
+      "$scenes_file" >/dev/null 2>&1; then
+    jq -cs "$scene_jq_defs"'
+      .[0]
+      | reduce ([
+        (if (.scenes | type) == "array" then .scenes else [] end)[:96][]?
+        | normalized_scene
+      ][]) as $scene
+        ({seen: {}, values: []};
+          if (.seen | has($scene.name)) or (.values | length) >= 24 then .
+          else .seen[$scene.name] = true | .values += [$scene] end)
+      | {version: 1, scenes: .values}
     ' "$scenes_file"
+  elif jq -se 'length == 1 and (.[0] | type) == "object"' \
+      "$scenes_file" >/dev/null 2>&1; then
+    echo "Audio scenes use an unsupported schema version; refusing to overwrite them" >&2
+    return 1
   else
     echo "Audio scenes contain invalid JSON; refusing to overwrite them" >&2
     return 1
   fi
+}
+
+normalize_string() {
+  local value=$1 maximum=$2
+  jq -nr --arg value "$value" --argjson maximum "$maximum" '
+    $value
+    | gsub("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]"; " ")
+    | gsub(" +"; " ")
+    | sub("^ +"; "") | sub(" +$"; "")
+    | .[0:$maximum]
+  '
 }
 
 write_scenes() {
@@ -37,8 +152,8 @@ write_scenes() {
   local scenes_dir temporary_file
   scenes_dir=$(dirname -- "$scenes_file")
   mkdir -p -- "$scenes_dir"
-  exec 9>"${scenes_file}.lock"
-  flock 9
+  audio_open_lock_path "${scenes_file}.lock" 9 \
+    "Audio scenes are busy; try again" || return 1
 
   temporary_file=$(mktemp "$scenes_dir/.audio-scenes.XXXXXX")
   trap 'rm -f -- "$temporary_file"' EXIT
@@ -55,11 +170,16 @@ write_scenes() {
 case "$action" in
   save)
     (( $# == 2 || $# == 3 )) || usage
-    name=$2
+    name=$(normalize_string "$2" 48)
     [[ -n $name ]] || usage
     if (( $# == 3 )); then
+      (( ${#3} <= maximum_store_bytes )) || {
+        echo "Scene is too large" >&2
+        exit 1
+      }
       scene_json=$(printf '%s' "$3" |
-        jq -c 'if type == "object" then . else empty end' 2>/dev/null) || {
+        jq -cse 'if length == 1 and (.[0] | type) == "object"
+          then .[0] else error("expected one object") end' 2>/dev/null) || {
         echo "Scene must be a JSON object" >&2
         exit 1
       }
@@ -68,32 +188,29 @@ case "$action" in
         exit 1
       }
     else
-      scene_json=$(jq -c .) || {
-        echo "Scene is not valid JSON" >&2
+      scene_input_with_marker=$(head -c "$((maximum_store_bytes + 1))"; printf x)
+      scene_input=${scene_input_with_marker%x}
+      (( ${#scene_input} <= maximum_store_bytes )) || {
+        echo "Scene is too large" >&2
         exit 1
       }
-      [[ $scene_json == "{"* ]] || {
-        echo "Scene must be a JSON object" >&2
+      scene_json=$(jq -cse 'if length == 1 and (.[0] | type) == "object"
+          then .[0] else error("expected one object") end' <<<"$scene_input") || {
+        echo "Scene is not valid JSON" >&2
         exit 1
       }
     fi
     # The command argument is authoritative, and safety invariants belong in
     # the store as well as in the QML parser. This keeps hand-written/imported
-    # scenes from persisting output mutes or card power-off profiles.
-    scene_json=$(jq -c --arg name "$name" '
-      .name = $name
-      | .devices = (
-          if (.devices | type) == "array" then
-            [.devices[] | if type == "object" and .direction == "output"
-              then .muted = false else . end]
-          else [] end
-        )
-      | .profiles = (
-          if (.profiles | type) == "array" then
-            [.profiles[] | select(type != "object" or (.profile? // "") != "off")]
-          else [] end
-        )
+    # scenes from persisting output mutes, invalid directions, or card
+    # power-off profiles.
+    scene_json=$(jq -c --arg name "$name" "$scene_jq_defs"'
+      .name = $name | normalized_scene
     ' <<<"$scene_json") || exit 1
+    [[ -n $scene_json ]] || {
+      echo "Scene has no valid name" >&2
+      exit 1
+    }
     write_scenes '
       .version = 1
       | .scenes = (
@@ -105,7 +222,7 @@ case "$action" in
     ;;
   delete)
     (( $# == 2 )) || usage
-    name=$2
+    name=$(normalize_string "$2" 48)
     [[ -n $name ]] || usage
     write_scenes '.version = 1 | .scenes |= map(select(.name != $name))' --arg name "$name"
     ;;

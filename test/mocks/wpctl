@@ -4,13 +4,15 @@ if [[ -n ${AUDIO_CONTROL_DEFAULT_FAILURE:-} && $1 == "set-default" ]]; then
   exit 1
 fi
 
-if [[ -n ${AUDIO_CONTROL_OUTPUT_DEFAULT_LOG:-} && $* == "set-default 51" ]]; then
+if [[ -n ${AUDIO_CONTROL_OUTPUT_DEFAULT_LOG:-} && $1 == "set-default" ]]; then
   printf 'wpctl %s\n' "$*" >>"$AUDIO_CONTROL_OUTPUT_DEFAULT_LOG"
+  [[ ${AUDIO_CONTROL_DEFAULT_WPCTL_FAIL_ID:-} == "${2:-}" ]] && exit 1
   exit 0
 fi
 
-if [[ -n ${AUDIO_CONTROL_INPUT_DEFAULT_LOG:-} && $* == "set-default 52" ]]; then
+if [[ -n ${AUDIO_CONTROL_INPUT_DEFAULT_LOG:-} && $1 == "set-default" ]]; then
   printf 'wpctl %s\n' "$*" >>"$AUDIO_CONTROL_INPUT_DEFAULT_LOG"
+  [[ ${AUDIO_CONTROL_DEFAULT_WPCTL_FAIL_ID:-} == "${2:-}" ]] && exit 1
   exit 0
 fi
 
@@ -39,10 +41,19 @@ if [[ -n ${AUDIO_CONTROL_POLICY_STATE:-} ]]; then
     [[ -n ${AUDIO_CONTROL_POLICY_LOG:-} ]] &&
       printf 'settings --save %s %s\n' "$setting" "$value" >>"$AUDIO_CONTROL_POLICY_LOG"
     [[ ${AUDIO_CONTROL_POLICY_FAIL:-} == 1 || ${AUDIO_CONTROL_POLICY_FAIL:-} == "$setting" ]] && exit 1
+    [[ ${AUDIO_CONTROL_POLICY_NO_EFFECT:-} == "$setting" ||
+        ${AUDIO_CONTROL_POLICY_NO_EFFECT_VALUE:-} == "$setting=$value" ]] && exit 0
+    stored_value=$value
+    if [[ ${AUDIO_CONTROL_POLICY_WRONG_VALUE:-} == "$setting" &&
+        ( -z ${AUDIO_CONTROL_POLICY_WRONG_ON_VALUE:-} ||
+          ${AUDIO_CONTROL_POLICY_WRONG_ON_VALUE:-} == "$value" ) ]]; then
+      stored_value=${AUDIO_CONTROL_POLICY_WRONG_RAW:-null}
+    fi
     temporary_file="${state_file}.tmp"
-    jq --arg setting "$setting" --argjson value "$value" \
+    jq --arg setting "$setting" --argjson value "$stored_value" \
       '.[$setting] = $value' "$state_file" >"$temporary_file"
     mv -f -- "$temporary_file" "$state_file"
+    [[ ${AUDIO_CONTROL_POLICY_FAIL_AFTER_EFFECT:-} != "$setting" ]] || exit 1
     exit 0
   fi
 
@@ -55,6 +66,8 @@ if [[ -n ${AUDIO_CONTROL_POLICY_STATE:-} ]]; then
     value=$(jq -r --arg setting "$setting" --arg fallback "$fallback" \
       'if has($setting) then .[$setting] else ($fallback | fromjson) end' "$state_file")
     printf 'Value: %s\n' "$value"
+    [[ ${AUDIO_CONTROL_WPCTL_DUPLICATE_VALUE:-0} != 1 ]] ||
+      printf 'Value: %s\n' "$value"
     exit 0
   fi
 fi
@@ -65,13 +78,20 @@ if [[ -n ${AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG:-} ]]; then
     "settings --save bluetooth.autoswitch-to-headset-profile true"|"settings --save bluetooth.autoswitch-to-headset-profile false")
       printf '%s\n' "$*" >>"$AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG"
       [[ ${AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_FAIL:-0} == 1 ]] && exit 1
-      printf '%s\n' "${!#}" >"$state_file"
+      requested=${!#}
+      [[ ${AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_NO_EFFECT_VALUE:-} == "$requested" ]] && exit 0
+      stored=$requested
+      [[ ${AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_WRONG_VALUE:-} == "$requested" ]] && stored=invalid
+      printf '%s\n' "$stored" >"$state_file"
+      [[ ${AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_FAIL_AFTER_EFFECT:-0} != 1 ]] || exit 1
       exit 0
       ;;
     "settings bluetooth.autoswitch-to-headset-profile")
       value=true
       [[ -s $state_file ]] && value=$(<"$state_file")
       printf 'Value: %s\n' "$value"
+      [[ ${AUDIO_CONTROL_WPCTL_DUPLICATE_VALUE:-0} != 1 ]] ||
+        printf 'Value: %s\n' "$value"
       exit 0
       ;;
   esac
@@ -82,13 +102,21 @@ if [[ -n ${AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG:-} ]]; then
   case "$*" in
     "settings --save bluetooth.profile-preference quality"|"settings --save bluetooth.profile-preference latency")
       printf '%s\n' "$*" >>"$AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG"
-      printf '%s\n' "${!#}" >"$state_file"
+      requested=${!#}
+      [[ ${AUDIO_CONTROL_BLUETOOTH_PREFERENCE_FAIL:-0} != 1 ]] || exit 1
+      [[ ${AUDIO_CONTROL_BLUETOOTH_PREFERENCE_NO_EFFECT_VALUE:-} == "$requested" ]] && exit 0
+      stored=$requested
+      [[ ${AUDIO_CONTROL_BLUETOOTH_PREFERENCE_WRONG_VALUE:-} == "$requested" ]] && stored=invalid
+      printf '%s\n' "$stored" >"$state_file"
+      [[ ${AUDIO_CONTROL_BLUETOOTH_PREFERENCE_FAIL_AFTER_EFFECT:-0} != 1 ]] || exit 1
       exit 0
       ;;
     "settings bluetooth.profile-preference")
       value=quality
       [[ -s $state_file ]] && value=$(<"$state_file")
       printf 'Value: %s\n' "$value"
+      [[ ${AUDIO_CONTROL_WPCTL_DUPLICATE_VALUE:-0} != 1 ]] ||
+        printf 'Value: %s\n' "$value"
       exit 0
       ;;
   esac

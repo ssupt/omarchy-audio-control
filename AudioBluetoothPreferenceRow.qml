@@ -8,6 +8,7 @@ CursorSurface {
   required property string preference
   required property bool menuEnabled
   property string fontFamily: Style.font.family
+  property bool menuReportedOpen: false
 
   signal cursorRequested()
   signal preferenceSelected(string value)
@@ -19,6 +20,13 @@ CursorSurface {
 
   function togglePreferenceMenu() { if (preferenceDropdown.enabled) preferenceDropdown.toggle() }
   function closePreferenceMenu() { preferenceDropdown.close() }
+  function reportMenu(open) {
+    var next = open === true
+    if (menuReportedOpen === next) return
+    menuReportedOpen = next
+    menuToggled(next)
+  }
+  Component.onDestruction: root.reportMenu(false)
 
   Row {
     anchors.left: parent.left
@@ -73,7 +81,7 @@ CursorSurface {
 
       onHovered: function(on) { if (on) root.cursorRequested() }
       onChanged: function(value) { root.preferenceSelected(value) }
-      onPopupOpenChanged: root.menuToggled(popupOpen)
+      onPopupOpenChanged: root.reportMenu(popupOpen)
     }
   }
 

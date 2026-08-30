@@ -1,6 +1,17 @@
 #!/bin/bash
 
 if [[ -n ${AUDIO_CONTROL_ROUTE_LIST:-} ]]; then
+  if [[ ${AUDIO_CONTROL_ROUTE_LIST_INVALID_METADATA:-0} == 1 ]]; then
+    echo "update: id:900 key:'target.object' value:'-2' type:'Spa:Id'"
+    exit 0
+  fi
+  if [[ ${AUDIO_CONTROL_ROUTE_LIST_OVERSIZED_METADATA:-0} == 1 ]]; then
+    for (( metadata_id = 1; metadata_id <= 4097; metadata_id++ )); do
+      printf "update: id:%s key:'target.object' value:'101' type:'Spa:Id'\n" \
+        "$metadata_id"
+    done
+    exit 0
+  fi
   cat <<'EOF'
 update: id:900 key:'target.object' value:'101' type:'Spa:Id'
 update: id:901 key:'target.node' value:'2001' type:'Spa:Id'
@@ -23,4 +34,46 @@ fi
   exit 1
 }
 
+if [[ $* == "-n default" ]]; then
+  [[ ${AUDIO_CONTROL_ROUTE_METADATA_READ_FAIL:-0} != 1 ]] || exit 1
+  if [[ ${AUDIO_CONTROL_ROUTE_METADATA_READ_FAIL_AFTER_WRITES:-0} == 1 ]] &&
+      grep -q '^pw-metadata ' "$AUDIO_CONTROL_ROUTE_LOG" 2>/dev/null; then
+    exit 1
+  fi
+  object_900=${AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT:--1}
+  node_900=${AUDIO_CONTROL_ROUTE_PREVIOUS_NODE:--1}
+  object_901=${AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT:--1}
+  node_901=${AUDIO_CONTROL_ROUTE_PREVIOUS_NODE:--1}
+  while read -r command_name option_name metadata_name separator object_id key value value_type; do
+    [[ $command_name == pw-metadata && $separator == -- ]] || continue
+    if [[ -n ${AUDIO_CONTROL_ROUTE_METADATA_WRITE_FAIL:-} &&
+        $key == "$AUDIO_CONTROL_ROUTE_METADATA_WRITE_FAIL" &&
+        ${AUDIO_CONTROL_ROUTE_METADATA_FAIL_AFTER_EFFECT:-0} != 1 ]]; then
+      continue
+    fi
+    [[ ${AUDIO_CONTROL_ROUTE_METADATA_NO_EFFECT:-} == "$key" ]] && continue
+    case "$object_id:$key" in
+      900:target.object) object_900=$value ;;
+      900:target.node) node_900=$value ;;
+      901:target.object) object_901=$value ;;
+      901:target.node) node_901=$value ;;
+    esac
+  done <"$AUDIO_CONTROL_ROUTE_LOG"
+  if [[ ${AUDIO_CONTROL_ROUTE_DUPLICATE_METADATA_VALUE:-0} == 1 ]]; then
+    printf "update: id:900 key:'target.object' value:'%s' type:'Spa:Id'\n" \
+      "$object_900"
+  fi
+  cat <<EOF
+update: id:900 key:'target.object' value:'$object_900' type:'Spa:Id'
+update: id:900 key:'target.node' value:'$node_900' type:'Spa:Id'
+update: id:901 key:'target.object' value:'$object_901' type:'Spa:Id'
+update: id:901 key:'target.node' value:'$node_901' type:'Spa:Id'
+EOF
+  exit 0
+fi
+
 printf 'pw-metadata %s\n' "$*" >>"$AUDIO_CONTROL_ROUTE_LOG"
+if [[ -n ${AUDIO_CONTROL_ROUTE_METADATA_WRITE_FAIL:-} &&
+      $* == *" ${AUDIO_CONTROL_ROUTE_METADATA_WRITE_FAIL} "* ]]; then
+  exit 1
+fi

@@ -19,22 +19,24 @@ CursorSurface {
   signal hovered()
 
   readonly property bool running: state === "recording" || state === "stopping"
-    || state === "playing"
+    || state === "playing" || state === "cancelling"
   readonly property bool ready: state === "ready"
-  readonly property bool primaryEnabled: state !== "stopping"
+  readonly property bool primaryEnabled: state !== "stopping" && state !== "cancelling"
     && (running || ready || !microphoneMuted)
   readonly property string description: {
     if (error !== "") return error
     if (state === "recording")
       return "Recording… " + Math.max(0, secondsRemaining) + " seconds remaining."
     if (state === "stopping") return "Finishing the partial recording…"
+    if (state === "cancelling") return "Cleaning up the microphone test…"
     if (state === "ready") return "Private test clip ready. Play it back or discard it."
     if (state === "playing") return "Playing the private test clip through the current output."
     if (microphoneMuted) return "Unmute the microphone before recording a test."
     return "Record five seconds from the current input, then choose when to play it back."
   }
   readonly property string primaryIcon: running ? "󰓛" : (ready ? "󰐊" : "󰑊")
-  readonly property string primaryTooltip: state === "stopping" ? "Finishing microphone test"
+  readonly property string primaryTooltip: state === "stopping" || state === "cancelling"
+    ? "Finishing microphone test"
     : (running ? "Stop and keep microphone test"
     : (ready ? "Play microphone test" : "Record five-second microphone test")
     )

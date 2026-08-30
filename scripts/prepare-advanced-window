@@ -3,7 +3,14 @@
 # Register the static rule before the Wayland toplevel is mapped. Applying
 # float after mapping leaves one tiled frame visible and can disturb the
 # workspace layout; a pre-map rule makes its first rendered frame final.
-hyprctl eval '
+set -euo pipefail
+
+(( $# == 0 )) || {
+  echo "Usage: prepare-advanced-window" >&2
+  exit 1
+}
+
+timeout 2 hyprctl eval '
   hl.window_rule({
     name = "ssupt-audio-control",
     match = {

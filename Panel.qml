@@ -16,14 +16,27 @@ Panel {
   AudioRuntime { id: runtime }
 
   readonly property var sink: Pipewire.defaultAudioSink
-  readonly property var source: Pipewire.defaultAudioSource
+  readonly property var rawSource: Pipewire.defaultAudioSource
+  // PipeWire permits a sink monitor to be the default source. Treating that
+  // loopback node as a microphone would expose the wrong mute/level controls
+  // and produce misleading capture state in the panel.
+  readonly property var source: usableInputNode(rawSource) ? rawSource : null
   readonly property var nodes: Pipewire.nodes ? Pipewire.nodes.values : []
   AudioRulesController {
     id: rulesStore
     nodes: root.nodes
     rulesPath: runtime.rulesPath
     scriptPath: runtime.script("audio-app-rules")
-    onRulesChanged: Qt.callLater(root.enforceRoutingRules)
+    onRulesChanged: {
+      root.resetRoutingEnforcement()
+      Qt.callLater(root.enforceRoutingRules)
+    }
+    onWriteFinished: function(success) {
+      if (success) return
+      root.streamRouteSetError = "Application route changed, but its saved rule could not be updated"
+      root.resetRoutingEnforcement()
+      Qt.callLater(root.enforceRoutingRules)
+    }
   }
   readonly property var mprisPlayers: Mpris.players ? Mpris.players.values : []
   readonly property var appLibrary: bar && bar.shell ? bar.shell.appLibrary : null
@@ -31,10 +44,13 @@ Panel {
     ? bar.shell.firstPartyServiceFor("omarchy.media") : null
   readonly property var activeMediaPlayer: mediaService ? mediaService.activePlayer : null
   property var audioPreferences: Model.parseAudioPreferences("")
+  property bool audioPreferencesLoaded: false
   property bool outputOverdrive: false
   property bool captureNotifications: true
+  property bool audioControlSettingsLoaded: false
   property bool notificationsAvailable: false
   property var audioScenes: []
+  property bool audioScenesLoaded: false
   readonly property var audioRules: rulesStore.rules
   readonly property bool rulesLoaded: rulesStore.loaded
   property string sceneFeedback: ""
@@ -44,6 +60,7 @@ Panel {
   property real inputPeakHold: 0
   property bool inputClipping: false
   readonly property real outputVolumeMaximum: outputOverdrive ? 1.5 : 1.0
+  onOutputOverdriveChanged: enforceOutputVolumeLimit()
 
   readonly property var candidateSinks: rulesStore.sinks
   readonly property var candidateSources: rulesStore.sources
@@ -52,6 +69,17 @@ Panel {
 
   property var sinkAvailability: ({})
   property bool sinkAvailabilityLoaded: false
+
+  function usableInputNode(node) {
+    try {
+      return !!node && node.isStream !== true && node.isSink !== true
+        && Model.nodeName(node) !== "" && Model.isAudioSource(node)
+        && !Model.isMonitorSource(node)
+        && !Model.isInternalAudioNode(Model.nodeName(node), Model.nodeProps(node))
+    } catch (_error) {
+      return false
+    }
+  }
 
   function loadAudioPreferences(raw) {
     audioPreferences = Model.parseAudioPreferences(raw)
@@ -83,10 +111,15 @@ Panel {
 
   readonly property var rawAudioSinks: {
     var list = []
-    for (var i = 0; i < candidateSinks.length; i++)
-      if (sinkAvailable(candidateSinks[i]) && !deviceHidden(candidateSinks[i].name))
-        list.push(candidateSinks[i])
-    if (sink && !deviceHidden(sink.name) && list.indexOf(sink) < 0) list.unshift(sink)
+    for (var i = 0; i < candidateSinks.length; i++) {
+      var candidate = candidateSinks[i]
+      var candidateName = Model.nodeName(candidate)
+      if (candidateName !== "" && sinkAvailable(candidate)
+          && !deviceHidden(candidateName)) list.push(candidate)
+    }
+    var sinkName = Model.nodeName(sink)
+    if (sinkName !== "" && !deviceHidden(sinkName) && list.indexOf(sink) < 0)
+      list.unshift(sink)
     var sorted = list.slice()
     sorted.sort(Model.deviceSortComparator(audioRules.devices.favorites))
     return sorted
@@ -94,9 +127,13 @@ Panel {
 
   readonly property var rawAudioSources: {
     var list = []
-    for (var i = 0; i < candidateSources.length; i++)
-      if (!deviceHidden(candidateSources[i].name)) list.push(candidateSources[i])
-    if (source && !Model.isMonitorSource(source) && !deviceHidden(source.name)
+    for (var i = 0; i < candidateSources.length; i++) {
+      var candidate = candidateSources[i]
+      var candidateName = Model.nodeName(candidate)
+      if (candidateName !== "" && !deviceHidden(candidateName)) list.push(candidate)
+    }
+    var sourceName = Model.nodeName(source)
+    if (sourceName !== "" && !Model.isMonitorSource(source) && !deviceHidden(sourceName)
         && list.indexOf(source) < 0) list.unshift(source)
     var sorted = list.slice()
     sorted.sort(Model.deviceSortComparator(audioRules.devices.favorites))
@@ -104,10 +141,12 @@ Panel {
   }
 
   readonly property var cachedVisibleAudioSinks: cachedAudioSinks.filter(function(node) {
-    return node && !deviceHidden(node.name)
+    var name = Model.nodeName(node)
+    return name !== "" && sinkAvailable(node) && !deviceHidden(name)
   })
   readonly property var cachedVisibleAudioSources: cachedAudioSources.filter(function(node) {
-    return node && !deviceHidden(node.name) && !Model.isMonitorSource(node)
+    var name = Model.nodeName(node)
+    return name !== "" && !deviceHidden(name) && !Model.isMonitorSource(node)
   })
   readonly property var audioSinks: rawAudioSinks.length > 0
     ? rawAudioSinks : cachedVisibleAudioSinks
@@ -124,22 +163,32 @@ Panel {
 
   readonly property var audioStreams: {
     var list = []
-    for (var i = 0; i < candidateStreams.length; i++)
-      if (candidateStreams[i].audio) list.push(candidateStreams[i])
+    for (var i = 0; i < candidateStreams.length; i++) {
+      try {
+        if (candidateStreams[i] && candidateStreams[i].audio) list.push(candidateStreams[i])
+      } catch (_error) { }
+    }
     return list
   }
 
   readonly property var recordingStreams: {
     var list = []
-    for (var i = 0; i < candidateRecordingStreams.length; i++)
-      if (candidateRecordingStreams[i].audio) list.push(candidateRecordingStreams[i])
+    for (var i = 0; i < candidateRecordingStreams.length; i++) {
+      try {
+        if (candidateRecordingStreams[i] && candidateRecordingStreams[i].audio)
+          list.push(candidateRecordingStreams[i])
+      } catch (_error) { }
+    }
     return list
   }
 
   readonly property var activeRecordingLabels: Model.uniqueRecordingStreamLabels(recordingStreams)
   readonly property int recordingApplicationCount: activeRecordingLabels.length
-  readonly property real inputPeakLevel: inputMuted
-    ? 0 : Math.max(0, Math.min(1, Number(inputPeakMonitor.peak || 0)))
+  readonly property real inputPeakLevel: {
+    if (inputMuted) return 0
+    var value = Number(inputPeakMonitor.peak)
+    return isFinite(value) ? Math.max(0, Math.min(1, value)) : 0
+  }
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property string recordingTooltip: {
     var microphoneAction = hasInput
@@ -195,20 +244,28 @@ Panel {
   // share a display name.
   property var streamRoutes: ({})
   property var recordingStreamRoutes: ({})
-  property bool streamOutputMenuOpen: false
+  property int streamOutputMenuCount: 0
+  readonly property bool streamOutputMenuOpen: streamOutputMenuCount > 0
   property string streamRouteReadError: ""
   property string streamRouteSetError: ""
   readonly property string streamRouteError: streamRouteSetError !== ""
     ? streamRouteSetError : streamRouteReadError
   property string defaultOutputError: ""
   property string defaultInputError: ""
-  property var previousDefaultSink: null
-  property var previousDefaultSource: null
   readonly property string defaultDeviceError: defaultOutputError !== ""
     ? defaultOutputError : defaultInputError
   readonly property string panelError: defaultDeviceError !== ""
-    ? defaultDeviceError : streamRouteError
+    ? defaultDeviceError : (streamRouteError !== "" ? streamRouteError : rulesStore.error)
   property var pendingStreamRoute: null
+  readonly property bool routeMutationBusy: defaultSinkProc.running
+    || defaultSourceProc.running || streamRouteSetProc.running
+    || pendingStreamRoute !== null || rulesStore.busy
+  readonly property bool directDeviceMutationBusy: sceneController.busy
+    || defaultSinkProc.running || defaultSourceProc.running
+  onDirectDeviceMutationBusyChanged: if (!directDeviceMutationBusy)
+    enforceOutputVolumeLimit()
+  readonly property bool sceneMutationBusy: sceneController.busy || routeMutationBusy
+    || streamOutputMenuOpen
 
   // The default is ordered first and named by behavior. Applications on that
   // option follow later default changes; all other choices are persistent.
@@ -228,34 +285,125 @@ Panel {
   // tuning fronts") is what keeps this correct when headphones or HDMI are
   // selected while a tuning still exists.
   property string volumeSinkName: ""
+  property bool volumeSinkResolvePending: false
 
   // Carry sub-notch touchpad deltas between wheel events.
   property real wheelAccumulator: 0
 
   readonly property var volumeSink: {
-    if (volumeSinkName === "" || !sink) return sink
-    if (volumeSinkName === String(sink.name)) return sink
-    for (var i = 0; i < nodes.length; i++) {
-      var n = nodes[i]
-      if (n && n.isSink && !n.isStream && String(n.name) === volumeSinkName && n.audio)
-        return n
+    try {
+      if (volumeSinkName === "" || !sink) return sink
+      if (volumeSinkName === Model.nodeName(sink)) return sink
+      var match = null
+      for (var i = 0; i < nodes.length && i < 4096; i++) {
+        var n = nodes[i]
+        if (!n || !n.isSink || n.isStream || Model.nodeName(n) !== volumeSinkName
+            || !n.audio) continue
+        if (match) return sink
+        match = n
+      }
+      return match || sink
+    } catch (_error) {
+      return sink
     }
-    return sink
   }
   onVolumeSinkChanged: enforceOutputVolumeLimit()
 
   // Re-resolve whenever the selected output changes; the timer below is only a
   // safety net for the tuning being applied or removed underneath us.
-  onSinkChanged: resolveVolumeSink()
-
-  function resolveVolumeSink() {
-    if (!volumeSinkProc.running) volumeSinkProc.running = true
+  onSinkChanged: {
+    // Never expose the physical endpoint resolved for the previous default
+    // while a newer asynchronous lookup is still in flight.
+    volumeSinkName = ""
+    resolveVolumeSink()
   }
 
-  readonly property real outputVolume: volumeSink && volumeSink.audio ? volumeSink.audio.volume : 0
-  readonly property bool outputMuted: volumeSink && volumeSink.audio ? volumeSink.audio.muted : false
-  readonly property real inputVolume: source && source.audio ? source.audio.volume : 0
-  readonly property bool inputMuted: source && source.audio ? source.audio.muted : false
+  function resolveVolumeSink() {
+    if (volumeSinkProc.running) {
+      volumeSinkResolvePending = true
+      return
+    }
+    volumeSinkResolvePending = false
+    volumeSinkProc.response = ""
+    volumeSinkProc.requestedDefaultName = Model.nodeName(sink)
+    volumeSinkProc.requestedDefaultObjectId = Model.nodeObjectId(sink)
+    volumeSinkProc.running = true
+  }
+
+  readonly property real outputVolume: audioNodeVolume(volumeSink)
+  readonly property bool outputMuted: audioNodeMuted(volumeSink)
+  readonly property real inputVolume: audioNodeVolume(source)
+  readonly property bool inputMuted: audioNodeMuted(source)
+
+  // A deferred display snapshot can outlive its PipeWire object. Resolve the
+  // object id back through the current graph before every direct mutation and
+  // reject duplicate ids, replacements, and nodes that are not fully bound.
+  function mutableAudioNode(node) {
+    try {
+      if (!node || node.ready !== true || !node.audio
+          || nodes.length > 4096) return false
+      var objectId = Model.nodeObjectId(node)
+      if (objectId === "") return false
+      var match = null
+      for (var i = 0; i < nodes.length; i++) {
+        var candidate = nodes[i]
+        if (!candidate || Model.nodeObjectId(candidate) !== objectId) continue
+        if (match) return false
+        match = candidate
+      }
+      return match === node
+    } catch (_error) {
+      return false
+    }
+  }
+
+  function audioNodeVolume(node) {
+    if (!mutableAudioNode(node)) return 0
+    try {
+      var value = Number(node.audio.volume)
+      return isFinite(value) ? value : 0
+    } catch (_error) {
+      return 0
+    }
+  }
+
+  function audioNodeMuted(node) {
+    if (!mutableAudioNode(node)) return false
+    try { return node.audio.muted === true } catch (_error) { return false }
+  }
+
+  function setAudioNodeVolume(node, value, maximum) {
+    var requested = Number(value)
+    var ceiling = Number(maximum)
+    if (!mutableAudioNode(node) || !isFinite(requested)
+        || !isFinite(ceiling) || ceiling < 0) return false
+    try {
+      node.audio.volume = Math.max(0, Math.min(ceiling, requested))
+      return true
+    } catch (_error) {
+      return false
+    }
+  }
+
+  function setAudioNodeMuted(node, muted) {
+    if (!mutableAudioNode(node)) return false
+    try {
+      node.audio.muted = muted === true
+      return true
+    } catch (_error) {
+      return false
+    }
+  }
+
+  function toggleAudioNodeMute(node) {
+    if (!mutableAudioNode(node)) return false
+    try {
+      node.audio.muted = node.audio.muted !== true
+      return true
+    } catch (_error) {
+      return false
+    }
+  }
 
   onRawAudioSinksChanged: if (rawAudioSinks.length > 0) cachedAudioSinks = rawAudioSinks
   onRawAudioSourcesChanged: if (rawAudioSources.length > 0) cachedAudioSources = rawAudioSources
@@ -283,8 +431,8 @@ Panel {
   // Only channels that actually exist get a vote. A box with no default source
   // would otherwise report "input unmuted" forever, leaving the hero switch
   // able to mute but never to unmute.
-  readonly property bool hasOutput: !!(volumeSink && volumeSink.audio)
-  readonly property bool hasInput: !!(source && source.audio)
+  readonly property bool hasOutput: mutableAudioNode(volumeSink)
+  readonly property bool hasInput: mutableAudioNode(source)
   readonly property bool anyAudible: (hasOutput && !outputMuted) || (hasInput && !inputMuted)
   readonly property string toggleHint: anyAudible ? "Mute" : "Unmute"
 
@@ -399,6 +547,7 @@ Panel {
   // — the cursor is on a discrete row, not on the slider, and silently
   // moving the global slider would surprise the user.
   function adjustVolume(delta) {
+    if (directDeviceMutationBusy) return
     if (focusSection === "output" && selectedIndex === -1) {
       setOutputVolume(outputVolume + delta)
       return
@@ -409,13 +558,14 @@ Panel {
     }
     if (focusSection === "streams" && selectedIndex >= 0 && selectedIndex < displayAudioStreams.length) {
       var s = displayAudioStreams[selectedIndex]
-      if (s && s.ready === true && s.audio) s.audio.volume = Math.max(0, Math.min(1.5, s.audio.volume + delta))
+      var playbackVolume = audioNodeVolume(s) + Number(delta)
+      if (isFinite(playbackVolume)) setAudioNodeVolume(s, playbackVolume, 1.5)
       return
     }
     if (focusSection === "recording" && selectedIndex >= 0 && selectedIndex < displayRecordingStreams.length) {
       var recording = displayRecordingStreams[selectedIndex]
-      if (recording && recording.ready === true && recording.audio)
-        recording.audio.volume = Math.max(0, Math.min(1.5, recording.audio.volume + delta))
+      var recordingVolume = audioNodeVolume(recording) + Number(delta)
+      if (isFinite(recordingVolume)) setAudioNodeVolume(recording, recordingVolume, 1.5)
     }
   }
 
@@ -444,30 +594,34 @@ Panel {
     }
     if (focusSection === "streams" && selectedIndex >= 0) {
       var row = streamRepeater.itemAt(selectedIndex)
-      if (row && displayAudioSinks.length > 1) row.toggleOutputMenu()
+      if (row && row.routeMenuAvailable) row.toggleOutputMenu()
       else {
         var st = displayAudioStreams[selectedIndex]
-        if (st && st.ready === true && st.audio) st.audio.muted = !st.audio.muted
+        if (!sceneController.busy) toggleAudioNodeMute(st)
       }
       return
     }
     if (focusSection === "recording" && selectedIndex >= 0) {
       var recordingRow = recordingStreamRepeater.itemAt(selectedIndex)
-      if (recordingRow && displayAudioSources.length > 1) recordingRow.toggleOutputMenu()
+      if (recordingRow && recordingRow.routeMenuAvailable) recordingRow.toggleOutputMenu()
       else {
         var recordingStream = displayRecordingStreams[selectedIndex]
-        if (recordingStream && recordingStream.ready === true && recordingStream.audio)
-          recordingStream.audio.muted = !recordingStream.audio.muted
+        if (!sceneController.busy) toggleAudioNodeMute(recordingStream)
       }
     }
   }
 
   function openAdvancedAudio() {
+    if (sceneMutationBusy) return
     controller.hide()
     if (bar && bar.shell && typeof bar.shell.summon === "function")
       bar.shell.summon("ssupt.audio-control", "{}")
     else
       Quickshell.execDetached(["omarchy-shell", "shell", "summon", "ssupt.audio-control", "{}"])
+  }
+
+  function updateStreamOutputMenu(open) {
+    streamOutputMenuCount = Math.max(0, streamOutputMenuCount + (open ? 1 : -1))
   }
 
   onOpenedChanged: {
@@ -484,7 +638,7 @@ Panel {
       cursorActive = false
       Qt.callLater(resetScroll)
     } else {
-      streamOutputMenuOpen = false
+      streamOutputMenuCount = 0
       clearDisplayAudioModels()
     }
   }
@@ -492,8 +646,14 @@ Panel {
   // Clamp / repair the cursor whenever any list refreshes underneath us.
   // Stream changes also re-run routing rules so a pinned application is
   // routed as soon as it appears, panel open or not.
-  onAudioSinksChanged: scheduleDisplayAudioModelRefresh()
-  onAudioSourcesChanged: scheduleDisplayAudioModelRefresh()
+  onAudioSinksChanged: {
+    scheduleDisplayAudioModelRefresh()
+    Qt.callLater(enforceRoutingRules)
+  }
+  onAudioSourcesChanged: {
+    scheduleDisplayAudioModelRefresh()
+    Qt.callLater(enforceRoutingRules)
+  }
   onAudioStreamsChanged: {
     scheduleDisplayAudioModelRefresh()
     Qt.callLater(enforceRoutingRules)
@@ -516,9 +676,21 @@ Panel {
     var parts = []
     for (var i = 0; i < list.length; i++) {
       var node = list[i]
-      parts.push(node ? Model.nodeSerial(node) : "")
+      try {
+        parts.push(node ? [
+          Model.nodeSerial(node),
+          Model.nodeObjectId(node),
+          Model.nodeName(node),
+          node.isSink === true,
+          node.isStream === true
+        ] : null)
+      } catch (_error) {
+        // Force a single model refresh when a cached native QObject vanished;
+        // the next current-graph signature will then replace this sentinel.
+        parts.push(["vanished", i])
+      }
     }
-    return parts.join(",")
+    return JSON.stringify(parts)
   }
 
   function refreshDisplayAudioModels() {
@@ -566,50 +738,49 @@ Panel {
   }
 
   function updateStreamRoutes(raw) {
-    try {
-      var routes = JSON.parse(String(raw || "{}"))
-      if (!routes || typeof routes !== "object") routes = ({})
-      var playback = routes.playback && typeof routes.playback === "object" ? routes.playback : ({})
-      var recording = routes.recording && typeof routes.recording === "object" ? routes.recording : ({})
-      if (pendingStreamRoute) {
-        var pendingRoutes = pendingStreamRoute.direction === "recording" ? recording : playback
-        pendingRoutes[pendingStreamRoute.stream] = {
-          target: pendingStreamRoute.target,
-          mode: pendingStreamRoute.mode
-        }
-      }
-      streamRoutes = playback
-      recordingStreamRoutes = recording
-      streamRouteReadError = ""
-    } catch (e) {
-      streamRoutes = ({})
-      recordingStreamRoutes = ({})
+    var response = Model.parseAudioStreamRoutes(raw)
+    if (!response.valid) {
       streamRouteReadError = "Could not read application routes"
+      return
     }
+    var playback = response.playback
+    var recording = response.recording
+    if (pendingStreamRoute) {
+      var pendingRoutes = pendingStreamRoute.direction === "recording" ? recording : playback
+      pendingRoutes[pendingStreamRoute.stream] = {
+        target: pendingStreamRoute.target,
+        mode: pendingStreamRoute.mode
+      }
+    }
+    streamRoutes = playback
+    recordingStreamRoutes = recording
+    streamRouteReadError = ""
   }
 
   function streamSerial(node) {
-    return Model.nodeSerial(node)
+    var group = Model.isRecordingStream(node) ? recordingStreams : audioStreams
+    return Model.uniqueNodeSerial(group, node)
   }
 
   function streamRoute(node) {
     var serial = streamSerial(node)
     if (serial === "") return null
-    var route = streamRoutes[serial]
+    var route = Model.mapValue(streamRoutes, serial, null)
     return route && typeof route === "object" ? route : null
   }
 
   function recordingStreamRoute(node) {
     var serial = streamSerial(node)
     if (serial === "") return null
-    var route = recordingStreamRoutes[serial]
+    var route = Model.mapValue(recordingStreamRoutes, serial, null)
     return route && typeof route === "object" ? route : null
   }
 
   function setStreamRoute(node, optionValue, direction) {
     var streamSerialValue = streamSerial(node)
     var route = Model.parseStreamOutputOption(optionValue)
-    if (streamSerialValue === "" || route.sink === "" || route.mode === "" || streamRouteSetProc.running) return
+    if (streamSerialValue === "" || route.sink === "" || route.mode === ""
+        || sceneController.busy || routeMutationBusy) return
 
     // Keep the offline rules layer in sync: when the edited application has
     // a stored rule, a manual choice rewrites that rule instead of being
@@ -630,7 +801,8 @@ Panel {
 
     var routes = direction === "recording" ? recordingStreamRoutes : streamRoutes
     var next = ({})
-    for (var key in routes) next[key] = routes[key]
+    for (var key in routes)
+      if (Model.hasOwn(routes, key)) next[key] = routes[key]
     next[streamSerialValue] = { target: route.sink, mode: route.mode }
     if (direction === "recording") recordingStreamRoutes = next
     else streamRoutes = next
@@ -641,24 +813,28 @@ Panel {
       target: route.sink,
       mode: route.mode
     }
-    streamRouteSetProc.command = [
-      runtime.script("audio-stream-route-set"),
+    streamRouteSetProc.command = runtime.scriptCommand("audio-stream-route-set", [
       direction,
       streamSerialValue,
       route.sink,
       route.mode
-    ]
+    ])
     streamRouteSetProc.running = true
   }
 
   property var lastManualRouteSync: null
 
   function deviceNameForSerial(list, serial) {
-    for (var i = 0; i < list.length; i++) {
+    var match = ""
+    var matches = 0
+    for (var i = 0; i < list.length && i < 512; i++) {
       var node = list[i]
-      if (node && Model.nodeSerial(node) === String(serial)) return String(node.name || "")
+      if (!node || Model.nodeSerial(node) !== String(serial)) continue
+      matches++
+      match = Model.nodeName(node)
+      if (matches > 1) return ""
     }
-    return ""
+    return matches === 1 ? match : ""
   }
 
   // Enforcement runs outside the panel too: rules matter most when an
@@ -670,39 +846,67 @@ Panel {
   ]
   property var enforcedStreamRoutes: ({})
 
+  function resetRoutingEnforcement() {
+    enforcedStreamRoutes = ({})
+  }
+
+  function pruneRoutingEnforcement() {
+    var live = ({})
+    for (var g = 0; g < enforceableGroups.length; g++) {
+      var group = enforceableGroups[g]
+      for (var i = 0; i < group.nodes.length; i++) {
+        var serial = Model.uniqueNodeSerial(group.nodes, group.nodes[i])
+        var objectId = Model.nodeObjectId(group.nodes[i])
+        var key = group.direction + ":" + serial + ":" + objectId
+        if (serial !== "" && objectId !== "" && Model.hasOwn(enforcedStreamRoutes, key))
+          live[key] = enforcedStreamRoutes[key]
+      }
+    }
+    enforcedStreamRoutes = live
+  }
+
   function enforceRoutingRules() {
-    if (!rulesLoaded || streamRouteSetProc.running || pendingStreamRoute || streamOutputMenuOpen) return
+    if (!rulesLoaded || rulesStore.busy || sceneController.busy
+        || defaultSinkProc.running || defaultSourceProc.running || streamRouteSetProc.running
+        || pendingStreamRoute || streamOutputMenuOpen) return
+    pruneRoutingEnforcement()
     for (var g = 0; g < enforceableGroups.length; g++) {
       var group = enforceableGroups[g]
       for (var i = 0; i < group.nodes.length; i++) {
         var node = group.nodes[i]
-        if (!node || !node.audio || node.ready !== true) continue
-        var serial = Model.nodeSerial(node)
-        if (serial === "") continue
+        if (!mutableAudioNode(node)) continue
+        var serial = Model.uniqueNodeSerial(group.nodes, node)
+        var streamObjectId = Model.nodeObjectId(node)
+        if (serial === "" || streamObjectId === "") continue
         var rule = Model.findAppRule(audioRules.appRules, group.direction, rawStreamLabel(node))
         if (!rule) continue
-        var cacheKey = group.direction + ":" + serial
-        if (enforcedStreamRoutes[cacheKey] === rule.target) continue
+        var cacheKey = group.direction + ":" + serial + ":" + streamObjectId
 
         var targetNode = null
+        var targetMatches = 0
         for (var d = 0; d < group.devices.length; d++) {
-          if (group.devices[d] && group.devices[d].name === rule.target) {
+          if (Model.nodeName(group.devices[d]) === rule.target) {
+            targetMatches++
             targetNode = group.devices[d]
-            break
+            if (targetMatches > 1) break
           }
         }
         // An absent target falls back to WirePlumber's own choice; the rule
         // is enforced the moment the device appears.
-        if (!targetNode || targetNode.ready !== true) continue
+        if (targetMatches !== 1 || !mutableAudioNode(targetNode)) continue
+        var targetSerial = Model.uniqueNodeSerial(group.devices, targetNode)
+        var targetObjectId = Model.nodeObjectId(targetNode)
+        if (targetSerial === "" || targetObjectId === "") continue
+        var targetIdentity = JSON.stringify([rule.target, targetSerial, targetObjectId])
+        if (Model.mapValue(enforcedStreamRoutes, cacheKey, "") === targetIdentity) continue
 
-        enforcedStreamRoutes[cacheKey] = rule.target
-        streamRouteSetProc.command = [
-          runtime.script("audio-stream-route-set"),
+        enforcedStreamRoutes[cacheKey] = targetIdentity
+        streamRouteSetProc.command = runtime.scriptCommand("audio-stream-route-set", [
           group.direction,
           serial,
-          Model.nodeSerial(targetNode),
+          targetSerial,
           "override"
-        ]
+        ])
         streamRouteSetProc.running = true
         return
       }
@@ -759,7 +963,7 @@ Panel {
   function outputIcon(volume) {
     // Match the old Waybar pulseaudio glyph set. The Material Design speaker
     // icons render visually smaller in JetBrainsMono Nerd Font.
-    if (!sink || !sink.audio) return ""
+    if (!hasOutput) return ""
     if (isHeadphones(sink)) return "󰋋"
     if (outputMuted) return ""
     var v = volume === undefined ? outputVolume : volume
@@ -770,7 +974,7 @@ Panel {
   }
 
   function inputIcon() {
-    if (!source || !source.audio) return "󰍭"
+    if (!hasInput) return "󰍭"
     return inputMuted ? "󰍭" : "󰍬"
   }
 
@@ -782,10 +986,11 @@ Panel {
   }
 
   function setOutputVolume(v) {
-    if (!volumeSink || !volumeSink.audio) return outputVolume
-    var volume = Math.max(0, Math.min(outputVolumeMaximum, v))
-    volumeSink.audio.volume = volume
-    return volume
+    if (directDeviceMutationBusy || !mutableAudioNode(volumeSink)) return outputVolume
+    var requested = Number(v)
+    if (!isFinite(requested)) return outputVolume
+    var volume = Math.max(0, Math.min(outputVolumeMaximum, requested))
+    return setAudioNodeVolume(volumeSink, volume, outputVolumeMaximum) ? volume : outputVolume
   }
 
   function enforceOutputVolumeLimit() {
@@ -808,61 +1013,69 @@ Panel {
   }
 
   function setInputVolume(v) {
-    if (!source || !source.audio) return
-    source.audio.volume = Math.max(0, Math.min(1, v))
+    if (directDeviceMutationBusy || !mutableAudioNode(source)) return inputVolume
+    var requested = Number(v)
+    if (!isFinite(requested)) return inputVolume
+    var volume = Math.max(0, Math.min(1, requested))
+    return setAudioNodeVolume(source, volume, 1) ? volume : inputVolume
   }
 
   function toggleOutputMute() {
-    if (volumeSink && volumeSink.audio) volumeSink.audio.muted = !volumeSink.audio.muted
+    if (!directDeviceMutationBusy) toggleAudioNodeMute(volumeSink)
   }
 
   function toggleInputMute() {
-    if (source && source.audio) source.audio.muted = !source.audio.muted
+    if (!directDeviceMutationBusy) toggleAudioNodeMute(source)
   }
 
   // The hero switch is the whole panel's on/off, so it carries both channels
   // at once. It reads as on while anything is still audible, which keeps
   // muting a single channel from the row below flipping the master switch.
   function toggleAllMuted() {
+    if (directDeviceMutationBusy) return
     var mute = anyAudible
-    if (hasOutput) volumeSink.audio.muted = mute
-    if (hasInput) source.audio.muted = mute
+    if (hasOutput) setAudioNodeMuted(volumeSink, mute)
+    if (hasInput) setAudioNodeMuted(source, mute)
   }
 
   function setDefaultSink(node) {
-    if (!node || node.id === undefined || !node.name || defaultSinkProc.running) return
-    var previousSinkName = sink && sink.name ? String(sink.name) : ""
-    previousDefaultSink = sink
-    Pipewire.preferredDefaultAudioSink = node
+    var objectId = Model.nodeObjectId(node)
+    var name = Model.nodeName(node)
+    if (!mutableAudioNode(node) || objectId === "" || name === ""
+        || sceneController.busy || routeMutationBusy) return
+    var previousSinkName = Model.nodeName(sink)
+    var previousSinkObjectId = Model.nodeObjectId(sink)
     defaultOutputError = ""
-    defaultSinkProc.command = [
-      runtime.script("audio-output-set-default"),
-      String(node.id),
-      String(node.name),
-      previousSinkName
-    ]
+    defaultSinkProc.command = runtime.scriptCommand("audio-output-set-default", [
+      objectId,
+      name,
+      previousSinkName,
+      previousSinkObjectId
+    ])
     defaultSinkProc.running = true
   }
 
   function setDefaultSource(node) {
-    if (!node || node.id === undefined || !node.name || defaultSourceProc.running) return
-    var previousSourceName = source && source.name ? String(source.name) : ""
-    previousDefaultSource = source
-    Pipewire.preferredDefaultAudioSource = node
+    var objectId = Model.nodeObjectId(node)
+    var name = Model.nodeName(node)
+    if (!mutableAudioNode(node) || objectId === "" || name === ""
+        || sceneController.busy || routeMutationBusy) return
+    var previousSourceName = Model.nodeName(source)
+    var previousSourceObjectId = Model.nodeObjectId(source)
     defaultInputError = ""
-    defaultSourceProc.command = [
-      runtime.script("audio-input-set-default"),
-      String(node.id),
-      String(node.name),
-      previousSourceName
-    ]
+    defaultSourceProc.command = runtime.scriptCommand("audio-input-set-default", [
+      objectId,
+      name,
+      previousSourceName,
+      previousSourceObjectId
+    ])
     defaultSourceProc.running = true
   }
 
   function sinkAvailable(node) {
-    if (!node || !node.name || !sinkAvailabilityLoaded) return true
-    var name = String(node.name)
-    return sinkAvailability[name] !== false
+    var name = Model.nodeName(node)
+    if (name === "" || !sinkAvailabilityLoaded) return true
+    return Model.mapValue(sinkAvailability, name, true) !== false
   }
 
   function updateSinkAvailability(raw) {
@@ -883,8 +1096,9 @@ Panel {
   }
 
   function nodeLabel(node) {
-    if (node && node.name) {
-      var alias = deviceAlias(node.name)
+    var name = Model.nodeName(node)
+    if (name !== "") {
+      var alias = deviceAlias(name)
       if (alias !== "") return alias
     }
     return Model.nodeLabel(node)
@@ -960,11 +1174,10 @@ Panel {
   function streamIconSource(node) {
     var name = Model.streamIconName(node, mprisPlayers, displayAudioStreams)
     if (!name) return ""
-    if (name.indexOf("file://") === 0 || name.indexOf("image://") === 0) return name
-    if (name.charAt(0) === "/") return Util.fileUrl(name)
     var themed = Quickshell.iconPath(name, true)
     if (themed) return themed
-    if (appLibrary && appLibrary.iconIndex && appLibrary.iconIndex[name]
+    if (appLibrary && appLibrary.iconIndex
+        && Model.mapValue(appLibrary.iconIndex, name, null)
         && typeof appLibrary.iconSource === "function") return appLibrary.iconSource(name)
     return ""
   }
@@ -987,8 +1200,22 @@ Panel {
     path: runtime.settingsPath
     watchChanges: true
     printErrors: false
-    onLoaded: root.loadAudioControlSettings(text())
-    onLoadFailed: root.loadAudioControlSettings("")
+    onLoaded: function() {
+      var raw = text()
+      if (!Model.isAudioControlSettingsDocument(raw)) {
+        if (!root.audioControlSettingsLoaded) {
+          root.loadAudioControlSettings("")
+          root.audioControlSettingsLoaded = true
+        }
+        return
+      }
+      root.loadAudioControlSettings(raw)
+      root.audioControlSettingsLoaded = true
+    }
+    onLoadFailed: if (!root.audioControlSettingsLoaded) {
+      root.loadAudioControlSettings("")
+      root.audioControlSettingsLoaded = true
+    }
     onFileChanged: reload()
   }
 
@@ -996,8 +1223,22 @@ Panel {
     path: runtime.preferencesPath
     watchChanges: true
     printErrors: false
-    onLoaded: root.loadAudioPreferences(text())
-    onLoadFailed: root.loadAudioPreferences("")
+    onLoaded: function() {
+      var raw = text()
+      if (!Model.isAudioPreferencesDocument(raw)) {
+        if (!root.audioPreferencesLoaded) {
+          root.loadAudioPreferences("")
+          root.audioPreferencesLoaded = true
+        }
+        return
+      }
+      root.loadAudioPreferences(raw)
+      root.audioPreferencesLoaded = true
+    }
+    onLoadFailed: if (!root.audioPreferencesLoaded) {
+      root.loadAudioPreferences("")
+      root.audioPreferencesLoaded = true
+    }
     onFileChanged: reload()
   }
 
@@ -1006,10 +1247,18 @@ Panel {
     watchChanges: true
     printErrors: false
     onLoaded: function() {
-      root.audioScenes = Model.parseAudioScenes(text()).scenes
+      var raw = text()
+      if (!Model.isAudioScenesDocument(raw)) {
+        if (!root.audioScenesLoaded) root.audioScenes = []
+        root.audioScenesLoaded = true
+        return
+      }
+      root.audioScenes = Model.parseAudioScenes(raw).scenes
+      root.audioScenesLoaded = true
     }
     onLoadFailed: function() {
-      root.audioScenes = []
+      if (!root.audioScenesLoaded) root.audioScenes = []
+      root.audioScenesLoaded = true
     }
     onFileChanged: reload()
   }
@@ -1017,6 +1266,7 @@ Panel {
   AudioSceneController {
     id: sceneController
     scriptsDir: runtime.scriptsDir
+    outputVolumeMaximum: root.outputVolumeMaximum
     onApplyFinished: function(result) {
       var text = "Applied scene '" + result.name + "'"
       if (result.errors.length > 0)
@@ -1042,16 +1292,21 @@ Panel {
 
   function applySceneAt(index) {
     var scene = index >= 0 ? audioScenes[index] : null
-    if (!scene || sceneController.busy) return
+    if (!scene || sceneMutationBusy) return
     sceneController.apply(scene)
   }
 
   Process {
     id: sinkAvailabilityProc
-    command: ["omarchy-audio-sink-availability"]
+    command: runtime.scriptCommand("audio-sink-availability")
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.updateSinkAvailability(text)
+      onStreamFinished: sinkAvailabilityProc.response = String(text || "")
+    }
+    property string response: ""
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.updateSinkAvailability(response)
+      response = ""
     }
   }
 
@@ -1060,16 +1315,34 @@ Panel {
   Process {
     id: notificationProbeProc
     running: true
-    command: ["sh", "-c", "command -v notify-send >/dev/null 2>&1"]
+    command: ["/bin/sh", "-c", "command -v notify-send >/dev/null 2>&1"]
     onExited: function(exitCode) { root.notificationsAvailable = exitCode === 0 }
   }
 
   Process {
     id: volumeSinkProc
-    command: ["omarchy-audio-output-sink"]
+    property string response: ""
+    property string requestedDefaultName: ""
+    property string requestedDefaultObjectId: ""
+    command: runtime.scriptCommand("audio-resolve-output-sink")
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.volumeSinkName = String(text).trim()
+      onStreamFinished: volumeSinkProc.response = String(text || "").trim()
+    }
+    onExited: function(exitCode) {
+      var resolved = Model.sanitizeIdentifier(response, 160)
+      var currentDefaultName = Model.nodeName(root.sink)
+      var currentDefaultObjectId = Model.nodeObjectId(root.sink)
+      var requestStillCurrent = requestedDefaultName === currentDefaultName
+        && requestedDefaultObjectId === currentDefaultObjectId
+      var retry = root.volumeSinkResolvePending || !requestStillCurrent
+      if (requestStillCurrent)
+        root.volumeSinkName = exitCode === 0 && resolved !== "" ? resolved : ""
+      response = ""
+      requestedDefaultName = ""
+      requestedDefaultObjectId = ""
+      root.volumeSinkResolvePending = false
+      if (retry) Qt.callLater(root.resolveVolumeSink)
     }
   }
 
@@ -1078,10 +1351,8 @@ Panel {
     onExited: function(exitCode) {
       root.defaultOutputError = exitCode === 0 ? ""
         : (exitCode === 2 ? "Default output changed, but its preference could not be saved"
-          : "Could not change the default audio output")
-      if (exitCode !== 0 && exitCode !== 2 && root.previousDefaultSink)
-        Pipewire.preferredDefaultAudioSink = root.previousDefaultSink
-      root.previousDefaultSink = null
+          : (exitCode === 4 ? "Default output change could not be fully restored"
+            : "Could not change the default audio output"))
     }
   }
 
@@ -1090,21 +1361,22 @@ Panel {
     onExited: function(exitCode) {
       root.defaultInputError = exitCode === 0 ? ""
         : (exitCode === 2 ? "Default input changed, but its preference could not be saved"
-          : "Could not change the default audio input")
-      if (exitCode !== 0 && exitCode !== 2 && root.previousDefaultSource)
-        Pipewire.preferredDefaultAudioSource = root.previousDefaultSource
-      root.previousDefaultSource = null
+          : (exitCode === 4 ? "Default input change could not be fully restored"
+            : "Could not change the default audio input"))
     }
   }
 
   Process {
     id: streamRoutesProc
-    command: [runtime.script("audio-stream-routes")]
+    property string response: ""
+    command: runtime.scriptCommand("audio-stream-routes")
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.updateStreamRoutes(text)
+      onStreamFinished: streamRoutesProc.response = String(text || "")
     }
     onExited: function(exitCode) {
+      if (exitCode === 0) root.updateStreamRoutes(response)
+      response = ""
       if (exitCode !== 0 && root.opened
           && (root.displayAudioStreams.length > 0 || root.displayRecordingStreams.length > 0))
         root.streamRouteReadError = "Could not read application routes"
@@ -1114,7 +1386,9 @@ Panel {
   Process {
     id: streamRouteSetProc
     onExited: function(exitCode) {
-      if (exitCode !== 0) root.streamRouteSetError = "Could not change the application route"
+      if (exitCode === 4)
+        root.streamRouteSetError = "Application route changed and its previous state could not be fully restored"
+      else if (exitCode !== 0) root.streamRouteSetError = "Could not change the application route"
       else root.streamRouteSetError = ""
       root.pendingStreamRoute = null
 
@@ -1124,15 +1398,16 @@ Panel {
       root.lastManualRouteSync = null
       if (exitCode === 0 && sync) {
         var args = sync.target === ""
-          ? [runtime.script("audio-app-rules"), "del-app", sync.app, sync.direction]
-          : [runtime.script("audio-app-rules"), "set-app", sync.app, sync.direction, sync.target]
-        Quickshell.execDetached(args)
+          ? ["del-app", sync.app, sync.direction]
+          : ["set-app", sync.app, sync.direction, sync.target]
+        if (!rulesStore.write(args)) {
+          root.streamRouteSetError = "Application route changed, but its saved rule could not be updated"
+          root.resetRoutingEnforcement()
+        }
       }
 
       // A failed enforcement would otherwise stay cached as satisfied.
-      if (exitCode !== 0 && !root.pendingStreamRoute) {
-        for (var key in root.enforcedStreamRoutes) delete root.enforcedStreamRoutes[key]
-      }
+      if (exitCode !== 0) root.resetRoutingEnforcement()
       streamRouteRefreshTimer.restart()
       Qt.callLater(root.enforceRoutingRules)
     }
@@ -1278,7 +1553,7 @@ Panel {
               ? root.displayRecordingStreams : root.displayAudioStreams
             if (root.selectedIndex >= streams.length) return
             var s = streams[root.selectedIndex]
-            if (s && s.audio) s.audio.muted = !s.audio.muted
+            if (!sceneController.busy) root.toggleAudioNodeMute(s)
           } else if (root.focusSection === "input") {
             root.toggleInputMute()
           } else if (root.focusSection !== "scenes") {
@@ -1351,6 +1626,7 @@ Panel {
                 horizontalPadding: Style.space(5)
                 verticalPadding: Style.space(2)
                 hasCursor: root.settingsHeaderHasCursor
+                enabled: !root.sceneMutationBusy
                 anchors.verticalCenter: parent.verticalCenter
                 onHovered: function(on) { if (on) root.setHeaderCursor(0) }
                 onClicked: root.openAdvancedAudio()
@@ -1460,7 +1736,7 @@ Panel {
 
                   MouseArea {
                     anchors.fill: parent
-                    enabled: !sceneController.busy
+                    enabled: !root.sceneMutationBusy
                     hoverEnabled: true
                     cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                     onContainsMouseChanged: if (containsMouse) {
@@ -1542,7 +1818,7 @@ Panel {
                 step: 0.05
                 value: root.outputVolume
                 opacity: root.outputMuted ? 0.5 : 1.0
-                enabled: !!root.sink
+                enabled: root.hasOutput && !root.directDeviceMutationBusy
 
                 onMoved: function(v) { root.setOutputVolume(v) }
                 onRightClicked: root.toggleOutputMute()
@@ -1570,7 +1846,7 @@ Panel {
                 bar: root.bar
                 preferredName: root.preferredOutputName
                 label: root.nodeLabel(sinkDelegate.node)
-                defaultSetBusy: defaultSinkProc.running
+                defaultSetBusy: root.sceneMutationBusy
                 hasCursor: root.cursorActive && root.focusSection === "output"
                   && root.selectedIndex === sinkDelegate.rowIndex
                 onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sinkDelegate)
@@ -1653,7 +1929,7 @@ Panel {
                   step: 0.05
                   value: root.inputVolume
                   opacity: root.inputMuted ? 0.5 : 1.0
-                  enabled: !!root.source
+                  enabled: root.hasInput && !root.directDeviceMutationBusy
 
                   onMoved: function(v) { root.setInputVolume(v) }
                   onRightClicked: root.toggleInputMute()
@@ -1706,7 +1982,7 @@ Panel {
                 bar: root.bar
                 preferredName: root.preferredInputName
                 label: root.nodeLabel(sourceDelegate.node)
-                defaultSetBusy: defaultSourceProc.running
+                defaultSetBusy: root.sceneMutationBusy
                 hasCursor: root.cursorActive && root.focusSection === "input"
                   && root.selectedIndex === sourceDelegate.rowIndex
                 onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sourceDelegate)
@@ -1750,6 +2026,7 @@ Panel {
                 required property int index
                 width: panelColumn.width
                 node: modelData
+                nodeLive: root.mutableAudioNode(streamDelegate.node)
                 rowIndex: index
                 recording: false
                 bar: root.bar
@@ -1758,8 +2035,6 @@ Panel {
                 currentRoute: streamDelegate.recording
                   ? root.recordingStreamRoute(streamDelegate.node)
                   : root.streamRoute(streamDelegate.node)
-                targetCount: streamDelegate.recording
-                  ? root.displayAudioSources.length : root.displayAudioSinks.length
                 routeOptions: streamDelegate.recording
                   ? root.recordingInputOptions : root.streamOutputOptions
                 streamLabel: streamDelegate.recording
@@ -1768,6 +2043,9 @@ Panel {
                 iconSource: root.streamIconSource(streamDelegate.node)
                 routeAvailable: root.streamSerial(streamDelegate.node) !== ""
                 routeSetBusy: streamRouteSetProc.running
+                  || defaultSinkProc.running || defaultSourceProc.running
+                  || root.pendingStreamRoute !== null || rulesStore.busy
+                mutationBlocked: sceneController.busy
                 hasCursor: root.cursorActive
                   && root.focusSection === (streamDelegate.recording ? "recording" : "streams")
                   && root.selectedIndex === streamDelegate.rowIndex
@@ -1779,12 +2057,16 @@ Panel {
                   root.focusSection = section
                   root.selectedIndex = index
                 }
+                onVolumeRequested: function(value) {
+                  root.setAudioNodeVolume(streamDelegate.node, value, 1.5)
+                }
+                onMuteRequested: root.toggleAudioNodeMute(streamDelegate.node)
                 onRouteChosen: function(route) {
                   root.setStreamRoute(streamDelegate.node, route,
                     streamDelegate.recording ? "recording" : "playback")
                 }
                 onPopupToggled: function(open) {
-                  root.streamOutputMenuOpen = open
+                  root.updateStreamOutputMenu(open)
                   if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
                 }
               }
@@ -1817,6 +2099,7 @@ Panel {
                 required property int index
                 width: panelColumn.width
                 node: modelData
+                nodeLive: root.mutableAudioNode(recordingStreamDelegate.node)
                 rowIndex: index
                 recording: true
                 bar: root.bar
@@ -1825,8 +2108,6 @@ Panel {
                 currentRoute: recordingStreamDelegate.recording
                   ? root.recordingStreamRoute(recordingStreamDelegate.node)
                   : root.streamRoute(recordingStreamDelegate.node)
-                targetCount: recordingStreamDelegate.recording
-                  ? root.displayAudioSources.length : root.displayAudioSinks.length
                 routeOptions: recordingStreamDelegate.recording
                   ? root.recordingInputOptions : root.streamOutputOptions
                 streamLabel: recordingStreamDelegate.recording
@@ -1835,6 +2116,9 @@ Panel {
                 iconSource: root.streamIconSource(recordingStreamDelegate.node)
                 routeAvailable: root.streamSerial(recordingStreamDelegate.node) !== ""
                 routeSetBusy: streamRouteSetProc.running
+                  || defaultSinkProc.running || defaultSourceProc.running
+                  || root.pendingStreamRoute !== null || rulesStore.busy
+                mutationBlocked: sceneController.busy
                 hasCursor: root.cursorActive
                   && root.focusSection === (recordingStreamDelegate.recording ? "recording" : "streams")
                   && root.selectedIndex === recordingStreamDelegate.rowIndex
@@ -1846,12 +2130,16 @@ Panel {
                   root.focusSection = section
                   root.selectedIndex = index
                 }
+                onVolumeRequested: function(value) {
+                  root.setAudioNodeVolume(recordingStreamDelegate.node, value, 1.5)
+                }
+                onMuteRequested: root.toggleAudioNodeMute(recordingStreamDelegate.node)
                 onRouteChosen: function(route) {
                   root.setStreamRoute(recordingStreamDelegate.node, route,
                     recordingStreamDelegate.recording ? "recording" : "playback")
                 }
                 onPopupToggled: function(open) {
-                  root.streamOutputMenuOpen = open
+                  root.updateStreamOutputMenu(open)
                   if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
                 }
               }

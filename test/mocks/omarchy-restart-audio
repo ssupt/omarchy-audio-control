@@ -1,3 +1,5 @@
 #!/bin/bash
 
-exit 0
+[[ -n ${AUDIO_CONTROL_RECOVERY_LOG:-} ]] || exit 1
+printf 'recovery=run\n' >>"$AUDIO_CONTROL_RECOVERY_LOG"
+exit "${AUDIO_CONTROL_RECOVERY_EXIT:-0}"

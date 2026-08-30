@@ -10,32 +10,36 @@ CursorSurface {
   id: root
 
   required property var node
+  required property bool nodeLive
   required property int rowIndex
   property bool recording: false
   required property var bar
   required property bool monitorEnabled
   required property bool representsPlayer
   required property var currentRoute
-  required property int targetCount
   required property var routeOptions
   required property string streamLabel
   required property var iconSource
   required property bool routeAvailable
   required property bool routeSetBusy
+  required property bool mutationBlocked
+  property bool popupReportedOpen: false
 
   signal claimed(string section, int index)
+  signal volumeRequested(real value)
+  signal muteRequested()
   signal routeChosen(string optionValue)
   signal popupToggled(bool open)
 
   // PipeWire nodes publish their audio interface only once bound; reading
   // it earlier — which happens while streams churn during profile or codec
   // switches — has historically destabilized Quickshell's Pipewire service.
-  readonly property bool nodeReady: !!root.node && root.node.ready === true
-  readonly property real streamVolume: root.nodeReady && root.node.audio ? root.node.audio.volume : 0
-  readonly property bool streamMuted: root.nodeReady && root.node.audio ? root.node.audio.muted : false
+  readonly property bool nodeReady: liveAudioReady()
+  readonly property real streamVolume: liveAudioVolume()
+  readonly property bool streamMuted: liveAudioMuted()
   readonly property real meterLevel: !root.nodeReady ? 0 : Model.audioMeterLevel(
     streamPeakMonitor.peaks,
-    root.node && root.node.audio ? root.node.audio.volumes : [],
+    liveAudioVolumes(),
     streamPeakMonitor.peak,
     streamVolume,
     streamMuted)
@@ -46,15 +50,45 @@ CursorSurface {
   readonly property string routeOptionValue: routeMode !== "" && targetSerial !== ""
     ? routeMode + ":" + targetSerial : ""
   readonly property bool routeIsExplicit: routeMode === "override"
+  readonly property bool routeMenuAvailable: root.routeOptions.length > 1
+    && root.targetSerial !== ""
 
   implicitHeight: streamColumn.implicitHeight + Style.spacing.xl
 
-  function toggleOutputMenu() {
-    if (root.targetCount > 1 && root.targetSerial !== "" && routeDropdown.enabled)
-      routeDropdown.toggle()
+  function liveAudioReady() {
+    try { return root.nodeLive && !!root.node && root.node.ready === true && !!root.node.audio }
+    catch (_error) { return false }
   }
 
-  Component.onDestruction: if (routeDropdown.popupOpen) root.popupToggled(false)
+  function liveAudioVolume() {
+    try {
+      var value = root.nodeReady ? Number(root.node.audio.volume) : 0
+      return isFinite(value) ? value : 0
+    } catch (_error) { return 0 }
+  }
+
+  function liveAudioMuted() {
+    try { return root.nodeReady && root.node.audio.muted === true }
+    catch (_error) { return false }
+  }
+
+  function liveAudioVolumes() {
+    try { return root.nodeReady && root.node.audio.volumes ? root.node.audio.volumes : [] }
+    catch (_error) { return [] }
+  }
+
+  function toggleOutputMenu() {
+    if (root.routeMenuAvailable && routeDropdown.enabled)
+      routeDropdown.toggle()
+  }
+  function reportPopup(open) {
+    var next = open === true
+    if (popupReportedOpen === next) return
+    popupReportedOpen = next
+    popupToggled(next)
+  }
+
+  Component.onDestruction: root.reportPopup(false)
 
   PwNodePeakMonitor {
     id: streamPeakMonitor
@@ -117,10 +151,10 @@ CursorSurface {
 
           MouseArea {
             anchors.fill: parent
+            enabled: !root.mutationBlocked
             cursorShape: Qt.PointingHandCursor
             onClicked: {
-              if (root.nodeReady && root.node.audio)
-                root.node.audio.muted = !root.node.audio.muted
+              if (root.nodeReady) root.muteRequested()
             }
           }
         }
@@ -146,7 +180,7 @@ CursorSurface {
 
           Text {
             id: routeChevron
-            visible: root.targetCount > 1 && root.targetSerial !== ""
+            visible: root.routeMenuAvailable
             width: Style.space(22)
             text: {
               var position = root.bar ? root.bar.position : "left"
@@ -192,7 +226,7 @@ CursorSurface {
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         z: 1
-        visible: root.targetCount > 1 && root.targetSerial !== ""
+        visible: root.routeMenuAvailable
         rowHeight: height
         popupRowHeight: Style.space(34)
         popupDirection: {
@@ -214,13 +248,13 @@ CursorSurface {
         triggerChrome: false
         value: root.routeOptionValue
         options: root.routeOptions
-        enabled: root.routeAvailable && !root.routeSetBusy
+        enabled: root.routeAvailable && !root.routeSetBusy && !root.mutationBlocked
         foreground: root.bar.foreground
         fontFamily: root.bar.fontFamily
 
         onHovered: function(on) { if (on) root.claimed(root.routeSection, root.rowIndex) }
         onChanged: function(route) { root.routeChosen(route) }
-        onPopupOpenChanged: root.popupToggled(popupOpen)
+        onPopupOpenChanged: root.reportPopup(popupOpen)
       }
     }
 
@@ -232,13 +266,15 @@ CursorSurface {
       step: 0.05
       value: root.streamVolume
       opacity: root.streamMuted ? 0.5 : 1.0
+      enabled: root.nodeReady && !root.mutationBlocked
 
       onMoved: function(v) {
-        if (root.nodeReady && root.node.audio) root.node.audio.volume = v
+        if (!root.mutationBlocked && root.nodeReady)
+          root.volumeRequested(v)
       }
       onRightClicked: {
-        if (root.nodeReady && root.node.audio)
-          root.node.audio.muted = !root.node.audio.muted
+        if (!root.mutationBlocked && root.nodeReady)
+          root.muteRequested()
       }
     }
 
