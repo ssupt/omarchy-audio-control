@@ -7,19 +7,58 @@
 setting=bluetooth.autoswitch-to-headset-profile
 action=${1:-}
 
+set -u -o pipefail
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$script_dir/.audio-common"
+
+read_setting() {
+  local output
+  audio_capture_bounded output 65536 timeout 3 wpctl settings "$setting" || return 1
+  awk '
+    $1 == "Value:" { count++; value=$2 }
+    END {
+      if (count != 1 || (value != "true" && value != "false")) exit 1
+      print value
+    }
+  ' <<<"$output"
+}
+
 if (( $# > 1 )); then
   echo "Usage: omarchy-audio-bluetooth-autoswitch [on|off]" >&2
   exit 1
 fi
 
+audio_prepare_private_runtime || exit 1
+audio_acquire_settings_lock || exit 1
+
+old_value=$(read_setting) || exit 1
+
 case "$action" in
-  "") ;;
-  on) wpctl settings --save "$setting" true >/dev/null || exit 1 ;;
-  off) wpctl settings --save "$setting" false >/dev/null || exit 1 ;;
+  "") printf '%s\n' "$old_value"; exit 0 ;;
+  on) requested_value=true ;;
+  off) requested_value=false ;;
   *)
     echo "Usage: omarchy-audio-bluetooth-autoswitch [on|off]" >&2
     exit 1
     ;;
 esac
 
-wpctl settings "$setting" 2>/dev/null | awk '$1 == "Value:" && ($2 == "true" || $2 == "false") { print $2; found=1 } END { exit !found }'
+[[ $requested_value == "$old_value" ]] && { printf '%s\n' "$old_value"; exit 0; }
+
+timeout 3 wpctl settings --save "$setting" "$requested_value" >/dev/null || true
+confirmed_value=$(read_setting) || confirmed_value=
+if [[ $confirmed_value != "$requested_value" ]]; then
+  [[ $confirmed_value == "$old_value" ]] && {
+    echo "Bluetooth autoswitch change was not applied" >&2
+    exit 1
+  }
+  rollback_complete=false
+  timeout 3 wpctl settings --save "$setting" "$old_value" >/dev/null 2>&1 || true
+  restored_value=$(read_setting) || restored_value=
+  [[ $restored_value == "$old_value" ]] && rollback_complete=true
+  echo "Bluetooth autoswitch change could not be verified" >&2
+  [[ $rollback_complete == true ]] || exit 4
+  exit 1
+fi
+printf '%s\n' "$confirmed_value"

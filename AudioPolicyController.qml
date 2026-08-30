@@ -14,11 +14,13 @@ Item {
   property bool loaded: false
   property string error: ""
   property string pendingKey: ""
-  readonly property bool busy: policyProc.running
+  property bool reconcilePending: false
+  readonly property bool busy: policyProc.running || reconcilePending
 
   property bool mutation: false
   property bool responseValid: false
   property var previousSettings: ({})
+  property var pendingValue: null
 
   readonly property var coreDefinitions: [
     {
@@ -82,14 +84,15 @@ Item {
     var supported = []
     for (var i = 0; i < definitions.length; i++) {
       var definition = definitions[i]
-      if (settings[definition.key] !== undefined) supported.push(definition)
+      if (Model.hasOwn(settings, definition.key)) supported.push(definition)
     }
     return supported
   }
 
   function copySettings(source) {
     var copy = ({})
-    for (var key in source) copy[key] = source[key]
+    for (var key in source)
+      if (Model.hasOwn(source, key)) copy[key] = source[key]
     return copy
   }
 
@@ -97,17 +100,32 @@ Item {
     var response = Model.parseAudioPolicySettings(raw)
     responseValid = response.valid
     if (!response.valid) return
+    if (mutation) {
+      if (!Model.hasOwn(response.values, pendingKey)) {
+        responseValid = false
+        return
+      }
+      var actual = Model.mapValue(response.values, pendingKey, null)
+      if ((typeof pendingValue === "boolean" && actual !== pendingValue)
+          || (typeof pendingValue === "number"
+            && (typeof actual !== "number" || Math.abs(actual - pendingValue) > 0.001))) {
+        responseValid = false
+        return
+      }
+    }
     settings = response.values
     loaded = true
   }
 
   function refresh() {
-    loaded = false
     if (busy) return
+    loaded = false
     mutation = false
     responseValid = false
     pendingKey = ""
-    policyProc.command = [scriptPath]
+    pendingValue = null
+    policyProc.response = ""
+    policyProc.command = ["/bin/bash", scriptPath]
     policyProc.running = true
   }
 
@@ -116,8 +134,8 @@ Item {
   }
 
   function setSetting(key, value) {
-    if (!loaded || busy || settings[key] === undefined) return
-    var current = settings[key]
+    if (!loaded || busy || !Model.hasOwn(settings, key)) return
+    var current = Model.mapValue(settings, key, null)
     var normalized
     if (typeof current === "boolean") {
       if (typeof value !== "boolean") return
@@ -136,31 +154,53 @@ Item {
     mutation = true
     responseValid = false
     pendingKey = key
-    policyProc.command = [scriptPath, "set", key, String(normalized)]
+    pendingValue = normalized
+    policyProc.response = ""
+    policyProc.command = ["/bin/bash", scriptPath, "set", key, String(normalized)]
     policyProc.running = true
   }
 
   Process {
     id: policyProc
+    property string response: ""
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.loadResponse(text)
+      onStreamFinished: policyProc.response = String(text || "")
     }
     onExited: function(exitCode) {
+      if (exitCode === 0) root.loadResponse(response)
+      response = ""
       var wasMutation = root.mutation
       if (exitCode !== 0 || !root.responseValid) {
-        root.settings = wasMutation ? root.previousSettings : ({})
+        if (wasMutation) root.settings = root.previousSettings
         root.loaded = true
         root.error = wasMutation
-          ? "Could not change the audio safety policy"
+          ? (exitCode === 4
+            ? "Audio safety policy changed and its previous value could not be restored"
+            : "Could not change the audio safety policy")
           : "Could not load audio safety policies"
       } else {
         root.error = ""
       }
       root.mutation = false
       root.pendingKey = ""
+      root.pendingValue = null
       root.previousSettings = ({})
+      if (wasMutation && exitCode === 4) {
+        root.reconcilePending = true
+        reconcileTimer.restart()
+      }
       root.settled()
+    }
+  }
+
+  Timer {
+    id: reconcileTimer
+    interval: 250
+    repeat: false
+    onTriggered: {
+      root.reconcilePending = false
+      root.refresh()
     }
   }
 }

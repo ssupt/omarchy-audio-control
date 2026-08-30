@@ -1,4 +1,6 @@
 #!/bin/bash
 
 [[ -n ${AUDIO_CONTROL_RECOVERY_LOG:-} ]] || exit 1
-printf '%s\n' "$*" >"$AUDIO_CONTROL_RECOVERY_LOG"
+printf 'launch=%s\n' "$*" >"$AUDIO_CONTROL_RECOVERY_LOG"
+[[ ${AUDIO_CONTROL_RECOVERY_LAUNCH_FAIL:-0} != 1 ]] || exit 1
+exec /bin/bash -c "$*"

@@ -9,13 +9,14 @@ QtObject {
 
   readonly property string configHome: {
     var configured = Quickshell.env("XDG_CONFIG_HOME")
-    return configured || Quickshell.env("HOME") + "/.config"
+    var home = Quickshell.env("HOME")
+    return configured || (home ? home + "/.config" : "")
   }
-  readonly property string settingsPath: configHome + "/omarchy/audio-control.json"
-  readonly property string preferencesPath: configHome + "/omarchy/audio-preferences.json"
-  readonly property string scenesPath: configHome + "/omarchy/audio-scenes.json"
-  readonly property string rulesPath: configHome + "/omarchy/audio-rules.json"
-  readonly property string scriptsDir: localPath(Qt.resolvedUrl("scripts/"))
+  readonly property string settingsPath: configPath("audio-control.json")
+  readonly property string preferencesPath: configPath("audio-preferences.json")
+  readonly property string scenesPath: configPath("audio-scenes.json")
+  readonly property string rulesPath: configPath("audio-rules.json")
+  readonly property string scriptsDir: localPath(Qt.resolvedUrl("scripts/")).replace(/\/$/, "")
 
   function localPath(url) {
     return decodeURIComponent(String(url).replace(/^file:\/\//, ""))
@@ -23,5 +24,13 @@ QtObject {
 
   function script(name) {
     return scriptsDir + "/" + String(name || "")
+  }
+
+  function configPath(name) {
+    return configHome === "" ? "" : configHome + "/omarchy/" + name
+  }
+
+  function scriptCommand(name, args) {
+    return ["/bin/bash", script(name)].concat(args || [])
   }
 }

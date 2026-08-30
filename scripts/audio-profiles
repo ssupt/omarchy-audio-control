@@ -3,49 +3,120 @@
 # omarchy:summary=List available audio card profiles as JSON
 # omarchy:group=audio
 
-set -o pipefail
+set -u -o pipefail
+LC_ALL=C
 
-timeout 2 pactl -f json list cards 2>/dev/null | jq -c '
+(( $# == 0 )) || {
+  echo "Usage: audio-profiles" >&2
+  exit 1
+}
+
+maximum_pactl_bytes=16777216
+cards=$(timeout 2 pactl -f json list cards 2>/dev/null |
+  head -c "$((maximum_pactl_bytes + 1))") || exit 1
+(( ${#cards} <= maximum_pactl_bytes )) || {
+  echo "Audio card information is too large" >&2
+  exit 1
+}
+
+if jq -c '
+  def identifier($maximum):
+    if type == "string" and length > 0 and length <= $maximum
+        and (test("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]") | not)
+      then . else "" end;
+  def clean_label($fallback):
+    (if type == "string" then . else "" end
+      | gsub("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]"; " ")
+      | gsub(" +"; " ") | sub("^ +"; "") | sub(" +$"; "") | .[:160])
+    | if length > 0 then . else $fallback end;
+  def bounded_count:
+    if type == "number" and . >= 0 and . <= 64 then floor else 0 end;
+  def bounded_priority:
+    if type == "number" and . >= 0 and . <= 1000000000 then . else 0 end;
   # Cards that ship a UCM profile name their ports "[Out] Speaker" instead of
   # following the classic ACP scheme ("analog-output"), so match both.
   def port_supports($card; $profile; $direction):
     any(
-      (($card.ports // {}) | to_entries)[]?;
-      ((.value.priority // 0) > 0)
-      and ((.value.profiles // []) | index($profile) != null)
-      and (.key | test($direction))
+      (($card.ports // {})
+        | if type == "object" then to_entries[:256] else [] end)[]?;
+      (.value | type) == "object"
+      and ((.value.priority // 0) | bounded_priority) > 0
+      and ((.value.profiles // [])
+        | if type == "array" then .[:256] else [] end | index($profile) != null)
+      and ((.key | type) == "string" and (.key | test($direction)))
     );
 
-  map(. as $card | {
-    name: $card.name,
-    label: ($card.properties["device.description"] // $card.properties["device.alias"] // $card.name),
-    bluetooth: (($card.properties["device.api"] // "") == "bluez5"),
-    address: ($card.properties["api.bluez5.address"] // $card.properties["device.string"] // ""),
-    activeProfile: ($card.active_profile // "off"),
-    profiles: (
-      $card.profiles
-      | to_entries
-      | map(
-          select((.value.available != false and .value.available != "no") or .key == $card.active_profile)
-          | select(
-              .key == $card.active_profile
-              or .key == "off"
-              or (($card.properties["device.api"] // "") == "bluez5")
-              or (
-                ((.value.sinks // 0) == 0 or port_supports($card; .key; "^\\[Out\\] |output"))
-                and ((.value.sources // 0) == 0 or port_supports($card; .key; "^\\[In\\] |input"))
+  if type != "array" then error("expected a card array") else .[:128] end
+  | . as $raw_cards
+  | [ $raw_cards[] | select(type == "object") ] as $objects
+  | [ $objects[] | ((.index // "") | tostring) ] as $indexes
+  | [ $objects[]
+      | (((.properties // {})."object.id" // "") | tostring)
+      | select(. != "") ] as $object_ids
+  | if any($indexes[]; test("^[0-9]{1,20}$") | not)
+      or (($indexes | unique | length) != ($indexes | length))
+      or any($object_ids[]; test("^[0-9]{1,20}$") | not)
+      or (($object_ids | unique | length) != ($object_ids | length))
+    then error("ambiguous card identity") else $raw_cards end
+  | map(
+      select(type == "object")
+      | . as $card
+      | ($card.name | identifier(160)) as $name
+      | select($name != "")
+      | ($card.properties
+          | if type == "object" then . else {} end) as $properties
+      | (($card.active_profile // "off") | identifier(160)) as $rawActive
+      | (if $rawActive == "" then "off" else $rawActive end) as $active
+      | {
+          name: $name,
+          label: (($properties["device.description"]
+            // $properties["device.alias"] // $name) | clean_label($name)),
+          bluetooth: (($properties["device.api"] // "") == "bluez5"),
+          address: (($properties["api.bluez5.address"]
+            // $properties["device.string"] // "") | identifier(80)),
+          activeProfile: $active,
+          profiles: (
+            ($card.profiles // {})
+            | if type == "object" then to_entries[:256] else [] end
+            | map(
+                select((.value | type) == "object")
+                | (.key | identifier(160)) as $profile
+                | select($profile != "")
+                | select((.value.available != false and .value.available != "no")
+                    or $profile == $active)
+                | select(
+                    $profile == $active
+                    or $profile == "off"
+                    or (($properties["device.api"] // "") == "bluez5")
+                    or (
+                      (((.value.sinks // 0) | bounded_count) == 0
+                        or port_supports($card; $profile; "^\\[Out\\] |output"))
+                      and (((.value.sources // 0) | bounded_count) == 0
+                        or port_supports($card; $profile; "^\\[In\\] |input"))
+                    )
+                  )
+                | {
+                    value: $profile,
+                    label: ((.value.description // $profile) | clean_label($profile)),
+                    sinks: ((.value.sinks // 0) | bounded_count),
+                    sources: ((.value.sources // 0) | bounded_count),
+                    priority: ((.value.priority // 0) | bounded_priority)
+                  }
               )
-            )
-          | {
-              value: .key,
-              label: (.value.description // .key),
-              sinks: (.value.sinks // 0),
-              sources: (.value.sources // 0),
-              priority: (.value.priority // 0)
-            }
-        )
-      | sort_by(-.priority, .label)
-      | map(del(.priority))
+            | unique_by(.value)
+            | sort_by(-.priority, (.label | ascii_downcase))
+            | .[:64]
+            | map(del(.priority))
+          )
+        }
+      | select((.profiles | length) > 0)
     )
-  })
-' || exit 1
+  | . as $cards
+  | if (($cards | map(.name) | unique | length) != ($cards | length))
+      then error("ambiguous card identity")
+    else $cards[:64] end
+' <<<"$cards"; then
+  :
+else
+  exit 1
+fi

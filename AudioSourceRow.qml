@@ -17,7 +17,8 @@ CursorSurface {
   signal claimed(string section, int index)
   signal activated(var node)
 
-  readonly property bool isActive: root.node && String(root.node.name || "") === root.preferredName
+  readonly property bool isActive: Model.nodeName(root.node) !== ""
+    && Model.nodeName(root.node) === root.preferredName
 
   current: root.isActive
   implicitHeight: deviceInner.implicitHeight + Style.spacing.xl

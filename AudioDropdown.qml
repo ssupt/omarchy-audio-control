@@ -65,6 +65,8 @@ Item {
   signal changed(string value)
   signal hovered(bool isHovered)
 
+  onEnabledChanged: if (!enabled) popup.close()
+
   function optionValue(o) {
     return (o && typeof o === "object") ? String(o.value) : String(o)
   }

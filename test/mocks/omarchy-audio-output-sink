@@ -1,0 +1,9 @@
+#!/bin/bash
+
+if [[ ${AUDIO_CONTROL_OUTPUT_SINK_OVERSIZED:-0} == 1 ]]; then
+  printf '%02048d' 0
+  exit 0
+fi
+
+printf '%s' "${AUDIO_CONTROL_OUTPUT_SINK_RESPONSE:-physical-speakers}"
+exit "${AUDIO_CONTROL_OUTPUT_SINK_EXIT:-0}"

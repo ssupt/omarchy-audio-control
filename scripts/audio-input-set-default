@@ -1,70 +1,385 @@
 #!/bin/bash
 
 # omarchy:summary=Set the default audio input and move streams following it
-# omarchy:args=<node-id> <source-name> [current-source-name]
+# omarchy:args=<node-id> <source-name> [current-source-name] [current-source-id]
+
+set -u -o pipefail
 
 node_id=${1:-}
 source_name=${2:-}
 old_source_name=${3:-}
+expected_old_source_name=$old_source_name
+expected_old_source_object=${4:-}
 
-if (( $# < 2 || $# > 3 )) || [[ -z $node_id || -z $source_name ]]; then
-  echo "Usage: audio-input-set-default <node-id> <source-name> [current-source-name]" >&2
+if (( $# < 2 || $# > 4 )) || [[ ! $node_id =~ ^[0-9]{1,20}$ || -z $source_name ]] ||
+    [[ -n $expected_old_source_object && ! $expected_old_source_object =~ ^[0-9]{1,20}$ ]]; then
+  echo "Usage: audio-input-set-default <node-id> <source-name> [current-source-name] [current-source-id]" >&2
   exit 1
 fi
 
 preferences_file=${OMARCHY_AUDIO_PREFERENCES_FILE:-${XDG_CONFIG_HOME:-${HOME:?}/.config}/omarchy/audio-preferences.json}
 mkdir -p -- "$(dirname -- "$preferences_file")" || exit 1
-exec 8>"${preferences_file}.input.lock" || exit 1
-flock 8 || exit 1
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-"$script_dir/audio-preferences" show >/dev/null || exit 1
+source "$script_dir/.audio-common"
+audio_acquire_mutation_lock || exit 1
+audio_open_lock_path "${preferences_file}.input.lock" 8 \
+  "Audio input preferences are busy; try again" || exit 1
+/bin/bash "$script_dir/audio-preferences" show >/dev/null || exit 1
 
-live_source_name=$(timeout 2 pactl get-default-source 2>/dev/null || true)
-if [[ -n $live_source_name && $live_source_name != "$source_name" ]]; then
-  old_source_name=$live_source_name
-elif [[ -z $old_source_name ]]; then
-  old_source_name=$live_source_name
+valid_identifier() {
+  local value=$1
+  jq -ne --arg value "$value" '
+    ($value | length) > 0 and ($value | length) <= 160
+    and ($value | test("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]") | not)
+  ' >/dev/null
+}
+
+resolve_source_index() {
+  local identity_name=$1 identity_object=$2 endpoint_json
+  audio_capture_bounded endpoint_json 16777216 \
+    timeout 2 pactl -f json list sources || return 1
+  jq -er --arg name "$identity_name" --arg object "$identity_object" '
+    if type != "array" or length > 512 then error("invalid source list") else . end
+    | [ .[] | select(.name == $name) ] as $named
+    | [ .[]
+        | select(((.properties."object.id" // "") | tostring) == $object)
+      ] as $identified
+    | if ($named | length) != 1 or ($identified | length) != 1
+        or (($named[0].properties."object.id" // "") | tostring) != $object
+      then error("ambiguous source identity")
+      else ($named[0].index | tostring)
+      end
+    | select(test("^[0-9]{1,20}$"))
+  ' <<<"$endpoint_json" 2>/dev/null
+}
+
+valid_identifier "$source_name" || {
+  echo "Invalid audio input identifier" >&2
+  exit 1
+}
+if [[ -n $old_source_name ]]; then
+  valid_identifier "$old_source_name" || {
+    echo "Invalid previous audio input identifier" >&2
+    exit 1
+  }
 fi
-old_source_index=$(timeout 2 pactl -f json list sources 2>/dev/null |
-  jq -r --arg name "$old_source_name" 'map(select(.name == $name))[0].index // empty' || true)
 
-following_outputs=()
-if [[ -n $old_source_index && $old_source_name != "$source_name" ]]; then
-  if metadata=$(timeout 2 pw-metadata -n default 2>/dev/null); then
-    declare -A explicitly_targeted=()
-    while IFS=$'\t' read -r object_id target; do
-      if [[ $object_id =~ ^[0-9]+$ && $target != "-1" ]]; then
-        explicitly_targeted["$object_id"]=1
-      fi
-    done < <(sed -n "s/^update: id:\([0-9][0-9]*\) key:'target\.\(object\|node\)' value:'\([^']*\)'.*/\1\t\3/p" <<<"$metadata")
+audio_capture_bounded live_source_name 1024 timeout 2 pactl get-default-source || {
+  echo "Could not determine the current default audio input" >&2
+  exit 1
+}
+valid_identifier "$live_source_name" || {
+  echo "The current default audio input has an invalid identifier" >&2
+  exit 1
+}
+if [[ -n $expected_old_source_name && $live_source_name != "$expected_old_source_name" ]]; then
+  echo "The default audio input changed before the request could begin" >&2
+  exit 1
+fi
+old_source_name=$live_source_name
 
-    while IFS=$'\t' read -r output object_id; do
-      [[ -n $output ]] || continue
-      if [[ -z $object_id || -z ${explicitly_targeted[$object_id]:-} ]]; then
-        following_outputs+=("$output")
-      fi
-    done < <(timeout 2 pactl -f json list source-outputs 2>/dev/null |
-      jq -r --arg source "$old_source_index" '.[]
-        | select((.source | tostring) == $source)
-        | [.index, (.properties."object.id" // "")]
-        | @tsv' || true)
+audio_capture_bounded sources_json 16777216 timeout 2 pactl -f json list sources || {
+  echo "Could not inspect audio inputs before changing the default" >&2
+  exit 1
+}
+target_source_record=$(jq -cer --arg name "$source_name" '
+  if type != "array" or length > 512 then error("invalid source list")
+  else [.[] | select(.name == $name)] as $matches
+    | if ($matches | length) == 1 then $matches[0]
+      else error("ambiguous source identity") end
+  end
+' <<<"$sources_json") || {
+  echo "The requested default audio input is not available" >&2
+  exit 3
+}
+target_source_object=$(jq -r '.properties."object.id" // "" | tostring' <<<"$target_source_record") || exit 1
+target_source_index=$(jq -r '.index // empty | tostring' <<<"$target_source_record") || exit 1
+[[ $target_source_index =~ ^[0-9]{1,20}$ ]] || {
+  echo "The requested default audio input has an invalid index" >&2
+  exit 3
+}
+if [[ ! $target_source_object =~ ^[0-9]{1,20}$ || $target_source_object != "$node_id" ]]; then
+  echo "The requested audio input changed before it could be selected" >&2
+  exit 3
+fi
+
+if [[ $old_source_name == "$source_name" ]]; then
+  if [[ -n $expected_old_source_object && $target_source_object != "$expected_old_source_object" ]]; then
+    echo "The default audio input was replaced before the request could begin" >&2
+    exit 1
   fi
+  /bin/bash "$script_dir/audio-preferences" set-default input "$source_name" || {
+    echo "The active input preference could not be saved" >&2
+    exit 1
+  }
+  exit 0
 fi
 
-timeout 2 wpctl set-default "$node_id" 2>/dev/null || true
-timeout 2 pactl set-default-source "$source_name" 2>/dev/null || true
-
-actual_source_name=$(timeout 2 pactl get-default-source 2>/dev/null || true)
-if [[ $actual_source_name != "$source_name" ]]; then
-  echo "Could not set the default audio input" >&2
+old_source_index=
+old_source_object=
+if [[ -n $old_source_name && $old_source_name != "$source_name" ]]; then
+  old_source_record=$(jq -r --arg name "$old_source_name" '
+    if type != "array" or length > 512 then error("invalid source list")
+    else [.[] | select(.name == $name)] as $matches
+      | if ($matches | length) == 0 then ""
+        elif ($matches | length) == 1 then
+          ($matches[0] | [(.index // ""), (.properties."object.id" // "")] | @tsv)
+        else error("ambiguous source identity") end
+    end
+  ' <<<"$sources_json") || {
+    echo "Could not inspect audio inputs before changing the default" >&2
+    exit 1
+  }
+  IFS=$'\t' read -r old_source_index old_source_object <<<"$old_source_record"
+fi
+[[ $old_source_index =~ ^[0-9]{1,20}$ ]] || {
+  echo "The current default audio input is no longer available" >&2
+  exit 1
+}
+[[ $old_source_object =~ ^[0-9]{1,20}$ ]] || {
+  echo "The current default audio input has an invalid identity" >&2
+  exit 1
+}
+if [[ -n $expected_old_source_object && $old_source_object != "$expected_old_source_object" ]]; then
+  echo "The default audio input was replaced before the request could begin" >&2
   exit 1
 fi
 
-for output in "${following_outputs[@]}"; do
-  [[ -n $output ]] && timeout 2 pactl move-source-output "$output" "$source_name" 2>/dev/null || true
+following_outputs=()
+following_output_objects=()
+if [[ -n $old_source_index && $old_source_name != "$source_name" ]]; then
+  audio_capture_bounded metadata 4194304 timeout 2 pw-metadata -n default || {
+    echo "Could not inspect persistent application routes before changing the default" >&2
+    exit 1
+  }
+  explicit_rows=$(sed -n "s/^update: id:\([0-9][0-9]*\) key:'target\.\(object\|node\)' value:'\([^']*\)'.*/\1\t\3/p" <<<"$metadata" |
+    awk -F '\t' '
+      $2 != "-1" && length($1) <= 20 && $1 ~ /^[0-9]+$/ && !seen[$1]++ {
+        if (++count > 4096) exit 3
+        print $1 "\t" $2
+      }
+    ') || {
+    echo "Persistent application route metadata is too large" >&2
+    exit 1
+  }
+  declare -A explicitly_targeted=()
+  while IFS=$'\t' read -r object_id target; do
+    [[ -n $object_id ]] && explicitly_targeted["$object_id"]=1
+  done <<<"$explicit_rows"
+
+  audio_capture_bounded source_outputs_json 16777216 \
+    timeout 2 pactl -f json list source-outputs || {
+    echo "Could not inspect recording streams before changing the default" >&2
+    exit 1
+  }
+  output_rows=$(jq -r --arg source "$old_source_index" '
+    if type != "array" or length > 1024 then error("invalid stream list") else . end
+    | [.[] | select((.source | tostring) == $source)] as $streams
+    | if ($streams | length) > 512 or any($streams[]?;
+        ((.index | tostring) | test("^[0-9]{1,20}$") | not)
+        or (((.properties."object.id" // "") | tostring)
+          | test("^[0-9]{1,20}$") | not))
+        or (($streams | map(.index | tostring) | unique | length) != ($streams | length))
+        or (($streams | map(.properties."object.id" | tostring) | unique | length)
+          != ($streams | length)) then
+        error("invalid stream identity")
+      else $streams[]
+        | [.index, .properties."object.id"] | @tsv
+      end
+  ' <<<"$source_outputs_json") || {
+    echo "Could not inspect recording streams before changing the default" >&2
+    exit 1
+  }
+  while IFS=$'\t' read -r output object_id; do
+    [[ -n $output ]] || continue
+    if [[ -z $object_id || -z ${explicitly_targeted[$object_id]:-} ]]; then
+      following_outputs+=("$output")
+      following_output_objects+=("$object_id")
+    fi
+  done <<<"$output_rows"
+fi
+
+rollback_default() {
+  local restored_source_name restored_source_index
+  if [[ -z $old_source_name ]]; then
+    return 1
+  fi
+  restored_source_name=
+  audio_capture_bounded restored_source_name 1024 \
+    timeout 2 pactl get-default-source || true
+  if [[ $restored_source_name == "$old_source_name" ]]; then
+    resolve_source_index "$old_source_name" "$old_source_object" >/dev/null || return 1
+    return 0
+  fi
+  if [[ $old_source_name != "$source_name" ]]; then
+    restored_source_index=$(resolve_source_index \
+      "$old_source_name" "$old_source_object") || return 1
+    timeout 2 wpctl set-default "$old_source_object" 2>/dev/null || true
+    timeout 2 pactl set-default-source "$old_source_name" 2>/dev/null || true
+  fi
+  restored_source_name=
+  audio_capture_bounded restored_source_name 1024 \
+    timeout 2 pactl get-default-source || true
+  [[ $restored_source_name == "$old_source_name" ]] || return 1
+  resolve_source_index "$old_source_name" "$old_source_object" >/dev/null
+}
+
+target_source_index=$(resolve_source_index "$source_name" "$target_source_object") || {
+  echo "The requested audio input changed before it could be selected" >&2
+  exit 3
+}
+timeout 2 wpctl set-default "$node_id" 2>/dev/null || true
+timeout 2 pactl set-default-source "$source_name" 2>/dev/null || true
+
+actual_source_name=
+audio_capture_bounded actual_source_name 1024 timeout 2 pactl get-default-source || true
+if [[ $actual_source_name != "$source_name" ]]; then
+  echo "Could not set the default audio input" >&2
+  rollback_default && exit 1
+  exit 4
+fi
+target_source_index=$(resolve_source_index "$source_name" "$target_source_object") || {
+  echo "The selected audio input was replaced during the default change" >&2
+  rollback_default && exit 1
+  exit 4
+}
+
+moved_outputs=()
+moved_output_objects=()
+move_failed=false
+for (( follower = 0; follower < ${#following_outputs[@]}; follower++ )); do
+  output=${following_outputs[$follower]}
+  object_id=${following_output_objects[$follower]}
+  audio_capture_bounded current_outputs 16777216 \
+    timeout 2 pactl -f json list source-outputs || {
+    move_failed=true
+    break
+  }
+  current_row=$(jq -cer --arg object "$object_id" '
+    if type != "array" or length > 1024 then error("invalid stream list")
+    else [.[] | select(((.properties."object.id" // "") | tostring) == $object)] as $matches
+      | if ($matches | length) == 0 then "__gone__"
+        elif ($matches | length) == 1 then $matches[0]
+        else error("ambiguous stream identity") end
+    end
+  ' <<<"$current_outputs" 2>/dev/null) || { move_failed=true; break; }
+  [[ $current_row != __gone__ ]] || continue
+  current_output=$(jq -r '.index // empty | tostring' <<<"$current_row")
+  current_target=$(jq -r '.source // empty | tostring' <<<"$current_row")
+  [[ $current_output =~ ^[0-9]{1,20}$ && $current_target =~ ^[0-9]{1,20}$ ]] || {
+    move_failed=true
+    break
+  }
+  current_old_index=$(resolve_source_index "$old_source_name" "$old_source_object") || {
+    move_failed=true
+    break
+  }
+  [[ $current_target == "$current_old_index" ]] || continue
+
+  target_source_index=$(resolve_source_index "$source_name" "$target_source_object") || {
+    move_failed=true
+    break
+  }
+
+  move_command_failed=false
+  timeout 2 pactl move-source-output "$current_output" "$source_name" \
+    2>/dev/null || move_command_failed=true
+  audio_capture_bounded remaining_outputs 16777216 \
+    timeout 2 pactl -f json list source-outputs || { move_failed=true; break; }
+  moved_row=$(jq -cer --arg object "$object_id" '
+    if type != "array" or length > 1024 then error("invalid stream list")
+    else [.[] | select(((.properties."object.id" // "") | tostring) == $object)] as $matches
+      | if ($matches | length) == 0 then "__gone__"
+        elif ($matches | length) == 1 then $matches[0]
+        else error("ambiguous stream identity") end
+    end
+  ' <<<"$remaining_outputs" 2>/dev/null) || { move_failed=true; break; }
+  [[ $moved_row != __gone__ ]] || continue
+  moved_output=$(jq -r '.index // empty | tostring' <<<"$moved_row")
+  moved_target=$(jq -r '.source // empty | tostring' <<<"$moved_row")
+  target_source_index=$(resolve_source_index "$source_name" "$target_source_object") || {
+    move_failed=true
+    break
+  }
+  if [[ $moved_output =~ ^[0-9]{1,20}$ && $moved_target == "$target_source_index" ]]; then
+    moved_outputs+=("$moved_output")
+    moved_output_objects+=("$object_id")
+    if [[ $move_command_failed == true ]]; then
+      move_failed=true
+      break
+    fi
+  else
+    move_failed=true
+    break
+  fi
 done
 
-if ! "$script_dir/audio-preferences" set-default input "$source_name"; then
+if [[ $move_failed == false ]]; then
+  final_source_name=
+  audio_capture_bounded final_source_name 1024 \
+    timeout 2 pactl get-default-source || move_failed=true
+  if [[ $move_failed == false && $final_source_name == "$source_name" ]]; then
+    resolve_source_index "$source_name" "$target_source_object" >/dev/null || move_failed=true
+  else
+    move_failed=true
+  fi
+fi
+
+rollback_moved_outputs() {
+  local rollback_outputs row current_output current_target object_id live_target_index live_old_index
+  local -a attempted_objects=()
+  for (( moved = 0; moved < ${#moved_output_objects[@]}; moved++ )); do
+    object_id=${moved_output_objects[$moved]}
+    audio_capture_bounded rollback_outputs 16777216 \
+      timeout 2 pactl -f json list source-outputs || return 1
+    row=$(jq -cer --arg object "$object_id" '
+      if type != "array" or length > 1024 then error("invalid stream list")
+      else [.[] | select(((.properties."object.id" // "") | tostring) == $object)] as $matches
+        | if ($matches | length) == 0 then "__gone__"
+          elif ($matches | length) == 1 then $matches[0]
+          else error("ambiguous stream identity") end
+      end
+    ' <<<"$rollback_outputs" 2>/dev/null) || return 1
+    [[ $row != __gone__ ]] || continue
+    current_output=$(jq -r '.index // empty | tostring' <<<"$row")
+    current_target=$(jq -r '.source // empty | tostring' <<<"$row")
+    [[ $current_output =~ ^[0-9]{1,20}$ && $current_target =~ ^[0-9]{1,20}$ ]] || return 1
+    live_target_index=$(resolve_source_index "$source_name" "$target_source_object") || return 1
+    [[ $current_target == "$live_target_index" ]] || continue
+    timeout 2 pactl move-source-output "$current_output" "$old_source_name" \
+      >/dev/null 2>&1 || true
+    attempted_objects+=("$object_id")
+  done
+  (( ${#attempted_objects[@]} > 0 )) || return 0
+  audio_capture_bounded rollback_outputs 16777216 \
+    timeout 2 pactl -f json list source-outputs || return 1
+  for object_id in "${attempted_objects[@]}"; do
+    row=$(jq -cer --arg object "$object_id" '
+      if type != "array" or length > 1024 then error("invalid stream list")
+      else [.[] | select(((.properties."object.id" // "") | tostring) == $object)] as $matches
+        | if ($matches | length) == 0 then "__gone__"
+          elif ($matches | length) == 1 then $matches[0]
+          else error("ambiguous stream identity") end
+      end
+    ' <<<"$rollback_outputs" 2>/dev/null) || return 1
+    [[ $row != __gone__ ]] || continue
+    current_target=$(jq -r '.source // empty | tostring' <<<"$row")
+    [[ $current_target =~ ^[0-9]{1,20}$ ]] || return 1
+    live_old_index=$(resolve_source_index "$old_source_name" "$old_source_object") || return 1
+    [[ $current_target == "$live_old_index" ]] || return 1
+  done
+}
+
+if [[ $move_failed == true ]]; then
+  rollback_complete=true
+  rollback_moved_outputs || rollback_complete=false
+  rollback_default || rollback_complete=false
+  echo "Could not move applications following the default audio input" >&2
+  [[ $rollback_complete == true ]] && exit 1
+  exit 4
+fi
+
+if ! /bin/bash "$script_dir/audio-preferences" set-default input "$source_name"; then
   echo "The default input changed, but its preference could not be saved" >&2
   exit 2
 fi

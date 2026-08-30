@@ -34,7 +34,8 @@ Item {
     diagnosticsPath: runtime.script("audio-diagnostics")
     speakerTestPath: runtime.script("audio-speaker-test")
     recoveryPath: runtime.script("audio-recovery")
-    sessionActive: window.visible && root.activeTab === 5
+    sessionActive: window.visible && root.activeTab === 5 && !root.recoveryConfirmOpen
+    mutationBlocked: root.graphMutationBusy
   }
 
   property var shell: null
@@ -50,15 +51,27 @@ Item {
   property bool bluetoothAutoSwitch: true
   property bool bluetoothAutoSwitchLoaded: false
   property bool autoswitchMutation: false
+  property bool autoswitchReconcilePending: false
   property string bluetoothProfilePreference: "quality"
   property bool bluetoothProfilePreferenceLoaded: false
   property bool bluetoothProfilePreferenceMutation: false
+  property bool bluetoothPreferenceReconcilePending: false
   property var audioScenes: []
   property bool scenesLoaded: false
+  property bool settingsLoaded: false
+  property bool preferencesLoaded: false
+  property bool sceneReloadPending: false
   readonly property var audioRules: rulesStore.rules
   property string newRuleApp: ""
   property string aliasEditingDevice: ""
   readonly property bool routingMutation: rulesStore.busy
+  readonly property bool diagnosticsMutationBusy: diagnostics.speakerTesting
+    || diagnostics.recovering
+  readonly property bool graphMutationBusy: sceneController.busy
+    || profileSetProc.running || portSetProc.running || microphoneTest.busy || policy.busy
+  readonly property bool sceneMutationBusy: graphMutationBusy
+    || sceneStoreProc.running || sceneReloadPending
+    || diagnosticsMutationBusy
   property var pendingSceneSave: null
   property string sceneStatus: ""
   property bool sceneStatusIsError: false
@@ -68,13 +81,19 @@ Item {
   property string portSetError: ""
   property string bluetoothAutoswitchError: ""
   property string bluetoothPreferenceError: ""
+  property string settingsSaveError: ""
+  property string settingsFormatError: ""
+  property bool audioControlSettingsWritable: true
+  property bool audioControlWritePending: false
+  property var previousAudioControlSettings: null
   readonly property var policySettings: policy.settings
   readonly property bool policySettingsLoaded: policy.loaded
   readonly property string pendingPolicyKey: policy.pendingKey
   readonly property string policyError: policy.error
   readonly property string error: {
     var errors = [profileSetError, portSetError, bluetoothAutoswitchError,
-      bluetoothPreferenceError, policyError, profileLoadError, portLoadError]
+      bluetoothPreferenceError, settingsSaveError, settingsFormatError,
+      policyError, profileLoadError, portLoadError]
     for (var i = 0; i < errors.length; i++) if (errors[i] !== "") return errors[i]
     return ""
   }
@@ -83,8 +102,8 @@ Item {
   property int activeTab: 0
   property bool cursorActive: false
   property int selectedIndex: 0
-  property bool profileMenuOpen: false
-  property var pendingSharedProfile: null
+  property int profileMenuCount: 0
+  readonly property bool profileMenuOpen: profileMenuCount > 0
   property var audioPreferences: Model.parseAudioPreferences("")
   property var audioControlSettings: ({
     version: 1,
@@ -111,19 +130,27 @@ Item {
   readonly property var pipewireNodes: Pipewire.nodes ? Pipewire.nodes.values : []
   readonly property var defaultOutputDevice: Pipewire.defaultAudioSink
   property string volumeSinkName: ""
+  property bool volumeSinkResolvePending: false
   readonly property var outputDevice: {
-    if (!defaultOutputDevice || !volumeSinkName
-        || String(defaultOutputDevice.name) === volumeSinkName) return defaultOutputDevice
-    for (var i = 0; i < pipewireNodes.length; i++) {
-      var node = pipewireNodes[i]
-      if (node && node.isSink && !node.isStream && String(node.name) === volumeSinkName)
-        return node
+    try {
+      if (!defaultOutputDevice || !volumeSinkName
+          || Model.nodeName(defaultOutputDevice) === volumeSinkName) return defaultOutputDevice
+      var match = null
+      for (var i = 0; i < pipewireNodes.length && i < 4096; i++) {
+        var node = pipewireNodes[i]
+        if (!node || !node.isSink || node.isStream
+            || Model.nodeName(node) !== volumeSinkName) continue
+        if (match) return defaultOutputDevice
+        match = node
+      }
+      return match || defaultOutputDevice
+    } catch (_error) {
+      return defaultOutputDevice
     }
-    return defaultOutputDevice
   }
-  readonly property var inputDevice: Pipewire.defaultAudioSource
-  readonly property bool inputDeviceMuted: !inputDevice || !inputDevice.audio
-    || inputDevice.audio.muted
+  readonly property var rawInputDevice: Pipewire.defaultAudioSource
+  readonly property var inputDevice: usableInputNode(rawInputDevice) ? rawInputDevice : null
+  readonly property bool inputDeviceMuted: audioNodeMuted(inputDevice, true)
   readonly property bool outputBalanceAvailable: balanceAvailable(outputDevice)
   readonly property bool inputBalanceAvailable: balanceAvailable(inputDevice)
   readonly property int audioPortStartIndex: 1
@@ -150,14 +177,26 @@ Item {
         : (activeTab === 0
           ? deviceItemCount + (inputDevice ? 1 : 0)
           : (activeTab === 1 ? 2 + bluetoothCards.length : policyItemCount))))
-  readonly property bool audioMutationBusy: profileSetProc.running || portSetProc.running
-    || microphoneTest.busy
+  readonly property bool audioMutationBusy: graphMutationBusy || diagnosticsMutationBusy
+  onAudioMutationBusyChanged: if (!audioMutationBusy) enforceOutputVolumeLimit()
+  onOutputOverdriveChanged: enforceOutputVolumeLimit()
+  readonly property bool policyMutationBlocked: sceneController.busy
+    || profileSetProc.running || portSetProc.running || microphoneTest.busy
+    || diagnosticsMutationBusy
   readonly property color hoverFill: Style.hoverFillFor(foreground, Color.accent)
-  onDefaultOutputDeviceChanged: resolveVolumeSink()
+  onDefaultOutputDeviceChanged: {
+    volumeSinkName = ""
+    resolveVolumeSink()
+  }
+  onOutputDeviceChanged: enforceOutputVolumeLimit()
 
   function open(payloadJson) {
     var payload = ({})
-    try { payload = JSON.parse(payloadJson || "{}") } catch (e) { payload = ({}) }
+    var rawPayload = typeof payloadJson === "string" ? payloadJson : ""
+    if (rawPayload.length <= 4096) {
+      try { payload = JSON.parse(rawPayload || "{}") } catch (e) { payload = ({}) }
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) payload = ({})
     activeTab = payload.tab === "bluetooth" ? 1
       : payload.tab === "policy" ? 2
       : payload.tab === "scenes" ? 3
@@ -185,13 +224,14 @@ Item {
     portSetError = ""
     bluetoothAutoswitchError = ""
     bluetoothPreferenceError = ""
+    settingsSaveError = ""
     policy.clearError()
   }
 
   function showOnCurrentWorkspace() {
     if (!openRequested) return
     window.visible = true
-    Quickshell.execDetached([runtime.script("place-advanced-window")])
+    Quickshell.execDetached(runtime.scriptCommand("place-advanced-window"))
     Qt.callLater(function() {
       if (!window.visible) return
       keyCatcher.forceActiveFocus()
@@ -202,7 +242,8 @@ Item {
   function close() {
     openRequested = false
     closingFromHost = true
-    profileMenuOpen = false
+    closeProfileMenus()
+    profileMenuCount = 0
     recoveryConfirmOpen = false
     microphoneTest.discard()
     window.visible = false
@@ -211,6 +252,8 @@ Item {
 
   function requestClose() {
     openRequested = false
+    closeProfileMenus()
+    profileMenuCount = 0
     recoveryConfirmOpen = false
     microphoneTest.discard()
     if (shell && typeof shell.hide === "function") shell.hide("ssupt.audio-control")
@@ -221,13 +264,21 @@ Item {
     if (!window.visible) return
     if (!profilesProc.running && !profileSetProc.running) profilesProc.running = true
     if (!bluetoothAutoswitchProc.running) {
+      autoswitchReconcileTimer.stop()
+      autoswitchReconcilePending = false
       autoswitchMutation = false
-      bluetoothAutoswitchProc.command = [runtime.script("audio-bluetooth-autoswitch")]
+      bluetoothAutoswitchProc.responseValid = false
+      bluetoothAutoswitchProc.response = ""
+      bluetoothAutoswitchProc.command = runtime.scriptCommand("audio-bluetooth-autoswitch")
       bluetoothAutoswitchProc.running = true
     }
     if (!bluetoothPreferenceProc.running) {
+      bluetoothPreferenceReconcileTimer.stop()
+      bluetoothPreferenceReconcilePending = false
       bluetoothProfilePreferenceMutation = false
-      bluetoothPreferenceProc.command = [runtime.script("audio-bluetooth-profile-preference")]
+      bluetoothPreferenceProc.responseValid = false
+      bluetoothPreferenceProc.response = ""
+      bluetoothPreferenceProc.command = runtime.scriptCommand("audio-bluetooth-profile-preference")
       bluetoothPreferenceProc.running = true
     }
     if (!portsProc.running && !portSetProc.running) portsProc.running = true
@@ -236,7 +287,58 @@ Item {
   }
 
   function resolveVolumeSink() {
-    if (!volumeSinkProc.running) volumeSinkProc.running = true
+    if (volumeSinkProc.running) {
+      volumeSinkResolvePending = true
+      return
+    }
+    volumeSinkResolvePending = false
+    volumeSinkProc.response = ""
+    volumeSinkProc.requestedDefaultName = Model.nodeName(defaultOutputDevice)
+    volumeSinkProc.requestedDefaultObjectId = Model.nodeObjectId(defaultOutputDevice)
+    volumeSinkProc.running = true
+  }
+
+  function mutableAudioNode(node) {
+    try {
+      if (!node || node.ready !== true || !node.audio
+          || pipewireNodes.length > 4096) return false
+      var objectId = Model.nodeObjectId(node)
+      if (objectId === "") return false
+      var match = null
+      for (var i = 0; i < pipewireNodes.length; i++) {
+        var candidate = pipewireNodes[i]
+        if (!candidate || Model.nodeObjectId(candidate) !== objectId) continue
+        if (match) return false
+        match = candidate
+      }
+      return match === node
+    } catch (_error) {
+      return false
+    }
+  }
+
+  function usableInputNode(node) {
+    try {
+      return !!node && node.isStream !== true && node.isSink !== true
+        && Model.nodeName(node) !== "" && Model.isAudioSource(node)
+        && !Model.isMonitorSource(node)
+        && !Model.isInternalAudioNode(Model.nodeName(node), Model.nodeProps(node))
+    } catch (_error) {
+      return false
+    }
+  }
+
+  function audioNodeMuted(node, fallback) {
+    if (!mutableAudioNode(node)) return fallback === true
+    try { return node.audio.muted === true } catch (_error) { return fallback === true }
+  }
+
+  function enforceOutputVolumeLimit() {
+    if (outputOverdrive || audioMutationBusy || !mutableAudioNode(outputDevice)) return
+    try {
+      var volume = Number(outputDevice.audio.volume)
+      if (isFinite(volume) && volume > 1) outputDevice.audio.volume = 1
+    } catch (_error) { }
   }
 
   function parseAudioProfiles(raw) {
@@ -273,15 +375,22 @@ Item {
   }
 
   function adjustPolicyVolumeAtCursor(delta) {
-    if (activeTab !== 2) return false
+    if (activeTab !== 2 || policyMutationBlocked) return false
     var index = selectedIndex - policyVolumeStartIndex
     if (index < 0 || index >= availablePolicyVolumes.length) return false
     var definition = availablePolicyVolumes[index]
-    policy.setSetting(definition.key, Number(policySettings[definition.key]) + delta * 0.05)
+    setPolicySetting(definition.key,
+      Number(Model.mapValue(policySettings, definition.key, 0)) + delta * 0.05)
     return true
   }
 
+  function setPolicySetting(key, value) {
+    if (policyMutationBlocked) return
+    policy.setSetting(key, value)
+  }
+
   function setOutputOverdrive(enabled) {
+    if (audioMutationBusy) return
     setAudioControlSetting("outputOverdrive", enabled)
   }
 
@@ -290,10 +399,16 @@ Item {
   }
 
   function setAudioControlSetting(key, value) {
+    if (!audioControlSettingsWritable || audioControlWritePending
+        || (key !== "outputOverdrive" && key !== "captureNotifications")) return
     var next = ({})
-    for (var setting in audioControlSettings) next[setting] = audioControlSettings[setting]
+    for (var setting in audioControlSettings)
+      if (Model.hasOwn(audioControlSettings, setting)) next[setting] = audioControlSettings[setting]
     next.version = 1
     next[key] = value
+    previousAudioControlSettings = audioControlSettings
+    audioControlWritePending = true
+    settingsSaveError = ""
     audioControlSettings = next
     if (key === "outputOverdrive") outputOverdrive = value
     else if (key === "captureNotifications") captureNotifications = value
@@ -316,18 +431,22 @@ Item {
   }
 
   function stereoIndices(node) {
-    if (!node || !node.audio || !node.audio.channels || !node.audio.volumes)
+    try {
+      if (!mutableAudioNode(node) || !node.audio.channels || !node.audio.volumes)
+        return { left: -1, right: -1 }
+      var channels = node.audio.channels
+      var left = -1
+      var right = -1
+      for (var i = 0; i < channels.length && i < 64; i++) {
+        if (channels[i] === PwAudioChannel.FrontLeft) left = i
+        else if (channels[i] === PwAudioChannel.FrontRight) right = i
+      }
+      if ((left < 0 || right < 0) && node.audio.volumes.length === 2)
+        return { left: 0, right: 1 }
+      return { left: left, right: right }
+    } catch (_error) {
       return { left: -1, right: -1 }
-    var channels = node.audio.channels
-    var left = -1
-    var right = -1
-    for (var i = 0; i < channels.length; i++) {
-      if (channels[i] === PwAudioChannel.FrontLeft) left = i
-      else if (channels[i] === PwAudioChannel.FrontRight) right = i
     }
-    if ((left < 0 || right < 0) && node.audio.volumes.length === 2)
-      return { left: 0, right: 1 }
-    return { left: left, right: right }
   }
 
   function balanceAvailable(node) {
@@ -336,25 +455,35 @@ Item {
   }
 
   function balanceFor(node) {
-    if (!node || !node.audio) return 0
-    var indices = stereoIndices(node)
-    if (indices.left < 0 || indices.right < 0) return 0
-    return Model.balanceValue(node.audio.volumes[indices.left], node.audio.volumes[indices.right])
+    try {
+      if (!mutableAudioNode(node)) return 0
+      var indices = stereoIndices(node)
+      if (indices.left < 0 || indices.right < 0) return 0
+      return Model.balanceValue(node.audio.volumes[indices.left], node.audio.volumes[indices.right])
+    } catch (_error) {
+      return 0
+    }
   }
 
   function setBalance(node, value) {
-    if (!node || !node.audio) return
+    if (audioMutationBusy || !mutableAudioNode(node)) return false
     var indices = stereoIndices(node)
-    if (indices.left < 0 || indices.right < 0) return
-    node.audio.volumes = Model.applyBalance(node.audio.volumes, indices.left, indices.right, value)
+    if (indices.left < 0 || indices.right < 0) return false
+    try {
+      node.audio.volumes = Model.applyBalance(
+        node.audio.volumes, indices.left, indices.right, value)
+      return true
+    } catch (_error) {
+      return false
+    }
   }
 
   function adjustBalanceAtCursor(delta) {
+    if (audioMutationBusy) return false
     var node = selectedIndex === outputBalanceIndex ? outputDevice
       : (selectedIndex === inputBalanceIndex ? inputDevice : null)
     if (!node) return false
-    setBalance(node, balanceFor(node) + delta * 0.1)
-    return true
+    return setBalance(node, balanceFor(node) + delta * 0.1)
   }
 
   function clampCursor() {
@@ -383,6 +512,10 @@ Item {
         if (typeof row.closeTargetMenu === "function") row.closeTargetMenu()
       }
     }
+  }
+
+  function updateProfileMenu(open) {
+    profileMenuCount = Math.max(0, profileMenuCount + (open ? 1 : -1))
   }
 
   function selectTab(index) {
@@ -422,7 +555,10 @@ Item {
         if (ruleRow) ruleRow.toggleTargetMenu()
       } else {
         var deviceIndex = selectedIndex - 2 - audioRules.appRules.length
-        toggleDeviceFavorite(managedDevices[deviceIndex].name, managedDevices[deviceIndex].favorite)
+        if (deviceIndex >= 0 && deviceIndex < managedDevices.length) {
+          var managed = managedDevices[deviceIndex]
+          if (managed) toggleDeviceFavorite(managed.name, managed.favorite)
+        }
       }
       return
     }
@@ -438,7 +574,8 @@ Item {
       }
       var policyToggle = policyToggleAtCursor()
       if (policyToggle)
-        policy.setSetting(policyToggle.key, policySettings[policyToggle.key] !== true)
+        setPolicySetting(policyToggle.key,
+          Model.mapValue(policySettings, policyToggle.key, false) !== true)
       return
     }
     if (activeTab === 0 && selectedIndex === 0) {
@@ -458,6 +595,8 @@ Item {
       return
     }
     if (activeTab === 0 && selectedIndex === microphoneTestIndex) {
+      if (profileSetProc.running || portSetProc.running || sceneController.busy
+          || policy.busy || diagnosticsMutationBusy) return
       microphoneTest.activate()
       return
     }
@@ -476,7 +615,8 @@ Item {
   }
 
   function requestRecovery() {
-    if (!diagnostics.snapshot.capabilities.recovery) return
+    if (graphMutationBusy || diagnostics.busy
+        || !diagnostics.snapshot.capabilities.recovery) return
     recoveryConfirm.selectedIndex = 1
     recoveryConfirmOpen = true
   }
@@ -487,8 +627,8 @@ Item {
   }
 
   function confirmRecovery() {
-    recoveryConfirmOpen = false
     diagnostics.runRecovery()
+    recoveryConfirmOpen = false
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -513,41 +653,47 @@ Item {
   function setAudioProfile(card, profile) {
     if (!card || !card.name || !profile || audioMutationBusy) return
     profileSetError = ""
-    pendingSharedProfile = card.bluetooth && card.address ? {
-      address: String(card.address),
-      profile: String(profile)
-    } : null
-    profileSetProc.command = [runtime.script("audio-profile-set"), String(card.name), profile]
+    profileSetProc.command = runtime.scriptCommand(
+      "audio-profile-set", [String(card.name), profile])
     profileSetProc.running = true
   }
 
   function setAudioPort(port, value) {
     if (!port || !value || audioMutationBusy) return
     portSetError = ""
-    portSetProc.command = [runtime.script("audio-port-set"), port.direction, port.endpoint, value]
+    portSetProc.command = runtime.scriptCommand(
+      "audio-port-set", [port.direction, port.endpoint, value])
     portSetProc.running = true
   }
 
   function setBluetoothAutoSwitch(enabled) {
-    if (!bluetoothAutoSwitchLoaded || bluetoothAutoswitchProc.running) return
+    if (!bluetoothAutoSwitchLoaded || bluetoothAutoswitchProc.running
+        || autoswitchReconcilePending) return
     bluetoothAutoswitchError = ""
     autoswitchMutation = true
-    bluetoothAutoswitchProc.command = [runtime.script("audio-bluetooth-autoswitch"), enabled ? "on" : "off"]
+    bluetoothAutoswitchProc.responseValid = false
+    bluetoothAutoswitchProc.response = ""
+    bluetoothAutoswitchProc.command = runtime.scriptCommand(
+      "audio-bluetooth-autoswitch", [enabled ? "on" : "off"])
     bluetoothAutoswitchProc.running = true
   }
 
   function setBluetoothProfilePreference(value) {
     if (!bluetoothProfilePreferenceLoaded || bluetoothPreferenceProc.running
+        || bluetoothPreferenceReconcilePending
         || (value !== "quality" && value !== "latency")) return
     bluetoothPreferenceError = ""
     bluetoothProfilePreferenceMutation = true
-    bluetoothPreferenceProc.command = [runtime.script("audio-bluetooth-profile-preference"), value]
+    bluetoothPreferenceProc.responseValid = false
+    bluetoothPreferenceProc.response = ""
+    bluetoothPreferenceProc.command = runtime.scriptCommand(
+      "audio-bluetooth-profile-preference", [value])
     bluetoothPreferenceProc.running = true
   }
 
   Process {
     id: windowRuleProc
-    command: [runtime.script("prepare-advanced-window")]
+    command: runtime.scriptCommand("prepare-advanced-window")
     onExited: function(_exitCode) {
       // The placement helper below remains a fallback if Hyprland rejected
       // the pre-map rule. Do not leave the settings inaccessible on another
@@ -563,35 +709,97 @@ Item {
     watchChanges: true
     atomicWrites: true
     printErrors: false
-    onLoaded: root.loadAudioControlSettings(text())
-    onLoadFailed: root.loadAudioControlSettings("")
+    onLoaded: function() {
+      var raw = text()
+      if (!Model.isAudioControlSettingsDocument(raw)) {
+        var empty = String(raw || "").trim() === ""
+        root.audioControlSettingsWritable = empty
+        root.settingsFormatError = empty ? ""
+          : "Audio control settings use an unsupported or invalid format"
+        if (!root.settingsLoaded) {
+          root.loadAudioControlSettings("")
+          root.settingsLoaded = true
+        }
+        return
+      }
+      root.audioControlSettingsWritable = true
+      root.settingsFormatError = ""
+      root.loadAudioControlSettings(raw)
+      root.settingsLoaded = true
+    }
+    onLoadFailed: if (!root.settingsLoaded) {
+      root.audioControlSettingsWritable = true
+      root.loadAudioControlSettings("")
+      root.settingsLoaded = true
+    }
     onFileChanged: reload()
+    onSaved: {
+      root.audioControlWritePending = false
+      root.previousAudioControlSettings = null
+    }
+    onSaveFailed: function(_error) {
+      var previous = root.previousAudioControlSettings
+      root.audioControlWritePending = false
+      root.previousAudioControlSettings = null
+      if (previous) root.loadAudioControlSettings(JSON.stringify(previous))
+      root.settingsSaveError = "Could not save audio control settings"
+    }
   }
 
   FileView {
     path: runtime.preferencesPath
     watchChanges: true
     printErrors: false
-    onLoaded: root.loadAudioPreferences(text())
-    onLoadFailed: root.loadAudioPreferences("")
+    onLoaded: function() {
+      var raw = text()
+      if (!Model.isAudioPreferencesDocument(raw)) {
+        if (!root.preferencesLoaded) {
+          root.loadAudioPreferences("")
+          root.preferencesLoaded = true
+        }
+        return
+      }
+      root.loadAudioPreferences(raw)
+      root.preferencesLoaded = true
+    }
+    onLoadFailed: if (!root.preferencesLoaded) {
+      root.loadAudioPreferences("")
+      root.preferencesLoaded = true
+    }
     onFileChanged: reload()
   }
 
   FileView {
+    id: scenesFile
     path: runtime.scenesPath
     watchChanges: true
     printErrors: false
     onLoaded: function() {
-      root.audioScenes = Model.parseAudioScenes(text()).scenes
+      var raw = text()
+      if (!Model.isAudioScenesDocument(raw)) {
+        root.handleScenesLoadFailure()
+        return
+      }
+      root.audioScenes = Model.parseAudioScenes(raw).scenes
       root.scenesLoaded = true
       root.clampCursor()
+      sceneReloadWatchdog.stop()
+      root.sceneReloadPending = false
     }
-    onLoadFailed: function() {
-      root.audioScenes = []
-      root.scenesLoaded = true
-      root.clampCursor()
-    }
+    onLoadFailed: root.handleScenesLoadFailure()
     onFileChanged: reload()
+  }
+
+  function handleScenesLoadFailure() {
+      if (root.sceneReloadPending) {
+        sceneReloadWatchdog.stop()
+        root.sceneReloadPending = false
+        root.showSceneStatus("Saved scenes changed, but could not be reloaded", true)
+        return
+      }
+      if (!root.scenesLoaded) root.audioScenes = []
+      root.scenesLoaded = true
+      root.clampCursor()
   }
 
   function runRuleWrite(args) {
@@ -601,10 +809,12 @@ Item {
   AudioSceneController {
     id: sceneController
     scriptsDir: runtime.scriptsDir
+    outputVolumeMaximum: root.outputOverdrive ? 1.5 : 1.0
+    onCaptureFailed: function(error) { root.showSceneStatus(error, true) }
     onCaptureFinished: function(scene) {
       root.pendingSceneSave = scene
-      sceneStoreProc.command = [runtime.script("audio-scenes"), "save", scene.name,
-        JSON.stringify(scene)]
+      sceneStoreProc.command = runtime.scriptCommand(
+        "audio-scenes", ["save", scene.name, JSON.stringify(scene)])
       sceneStoreProc.running = true
     }
     onApplyFinished: function(result) {
@@ -632,6 +842,9 @@ Item {
         return
       }
       if (saving) root.showSceneStatus("Saved scene '" + name + "'", false)
+      root.sceneReloadPending = true
+      sceneReloadWatchdog.restart()
+      scenesFile.reload()
     }
   }
 
@@ -641,6 +854,16 @@ Item {
     onTriggered: root.sceneStatus = ""
   }
 
+  Timer {
+    id: sceneReloadWatchdog
+    interval: 3000
+    onTriggered: {
+      if (!root.sceneReloadPending) return
+      root.sceneReloadPending = false
+      root.showSceneStatus("Saved scenes changed, but could not be reloaded", true)
+    }
+  }
+
   function showSceneStatus(text, isError) {
     sceneStatus = text
     sceneStatusIsError = isError
@@ -648,30 +871,30 @@ Item {
   }
 
   function nextSceneName() {
-    var used = ({})
-    for (var i = 0; i < audioScenes.length; i++) used[audioScenes[i].name] = true
+    var used = []
+    for (var i = 0; i < audioScenes.length; i++) used.push(audioScenes[i].name)
     for (var n = 1; n < 100; n++)
-      if (!used["Scene " + n]) return "Scene " + n
+      if (used.indexOf("Scene " + n) === -1) return "Scene " + n
     return "Scene " + Math.floor(Math.random() * 100000)
   }
 
   function saveCurrentScene() {
-    if (sceneController.busy || sceneStoreProc.running) return
+    if (sceneMutationBusy) return
     sceneStatus = ""
     sceneController.capture(nextSceneName())
   }
 
   function applySceneAt(index) {
     var scene = index >= 0 ? audioScenes[index] : null
-    if (!scene || sceneController.busy || sceneStoreProc.running) return
+    if (!scene || sceneMutationBusy) return
     sceneStatus = ""
     sceneController.apply(scene)
   }
 
   function deleteSceneAt(index) {
     var scene = index >= 0 ? audioScenes[index] : null
-    if (!scene || sceneController.busy || sceneStoreProc.running) return
-    sceneStoreProc.command = [runtime.script("audio-scenes"), "delete", scene.name]
+    if (!scene || sceneMutationBusy) return
+    sceneStoreProc.command = runtime.scriptCommand("audio-scenes", ["delete", scene.name])
     sceneStoreProc.running = true
   }
 
@@ -699,6 +922,12 @@ Item {
 
   readonly property var managedDevices: rulesStore.managedDevices
   readonly property var newRuleAppOptions: rulesStore.availableApplicationLabels
+  onManagedDevicesChanged: {
+    if (aliasEditingDevice === "") return
+    for (var i = 0; i < managedDevices.length; i++)
+      if (managedDevices[i].name === aliasEditingDevice) return
+    cancelAliasEdit()
+  }
 
   function cancelAliasEdit() {
     aliasEditingDevice = ""
@@ -712,9 +941,9 @@ Item {
   }
 
   function commitAliasEdit(name, text) {
-    cancelAliasEdit()
     var trimmed = String(text || "").trim()
-    runRuleWrite(["set-alias", name, trimmed])
+    if (runRuleWrite(["set-alias", name, trimmed])) cancelAliasEdit()
+    else showSceneStatus("Another routing change is still finishing", true)
   }
 
   function toggleDeviceFavorite(name, currentFavorite) {
@@ -741,60 +970,80 @@ Item {
     id: microphoneTest
     scriptPath: runtime.script("audio-microphone-test")
     inputDevice: root.inputDevice
+    inputDeviceLive: root.mutableAudioNode(root.inputDevice)
     sessionActive: window.visible
   }
 
   Process {
     id: profilesProc
-    command: [runtime.script("audio-profiles")]
+    property string response: ""
+    command: runtime.scriptCommand("audio-profiles")
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.parseAudioProfiles(text)
+      onStreamFinished: profilesProc.response = String(text || "")
     }
     onExited: function(exitCode) {
-      root.profilesLoaded = true
+      if (exitCode === 0) root.parseAudioProfiles(response)
+      else root.profilesLoaded = true
       root.profileLoadError = exitCode !== 0 && window.visible
         ? "Could not load audio profiles" : ""
+      response = ""
     }
   }
 
   Process {
     id: volumeSinkProc
-    command: ["omarchy-audio-output-sink"]
+    property string response: ""
+    property string requestedDefaultName: ""
+    property string requestedDefaultObjectId: ""
+    command: runtime.scriptCommand("audio-resolve-output-sink")
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.volumeSinkName = String(text || "").trim()
+      onStreamFinished: volumeSinkProc.response = String(text || "").trim()
+    }
+    onExited: function(exitCode) {
+      var resolved = Model.sanitizeIdentifier(response, 160)
+      var currentDefaultName = Model.nodeName(root.defaultOutputDevice)
+      var currentDefaultObjectId = Model.nodeObjectId(root.defaultOutputDevice)
+      var requestStillCurrent = requestedDefaultName === currentDefaultName
+        && requestedDefaultObjectId === currentDefaultObjectId
+      var retry = root.volumeSinkResolvePending || !requestStillCurrent
+      if (requestStillCurrent)
+        root.volumeSinkName = exitCode === 0 && resolved !== "" ? resolved : ""
+      response = ""
+      requestedDefaultName = ""
+      requestedDefaultObjectId = ""
+      root.volumeSinkResolvePending = false
+      if (retry) Qt.callLater(root.resolveVolumeSink)
     }
   }
 
   Process {
     id: portsProc
-    command: [runtime.script("audio-ports")]
+    property string response: ""
+    command: runtime.scriptCommand("audio-ports")
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.parseAudioPorts(text)
+      onStreamFinished: portsProc.response = String(text || "")
     }
     onExited: function(exitCode) {
+      if (exitCode === 0) root.parseAudioPorts(response)
       root.portLoadError = exitCode !== 0 && window.visible
         ? "Could not load audio ports" : ""
+      response = ""
     }
   }
 
   Process {
     id: profileSetProc
     onExited: function(exitCode) {
-      if (exitCode !== 0) root.profileSetError = "Could not change the audio profile"
-      else {
-        root.profileSetError = ""
-        if (root.pendingSharedProfile)
-          Quickshell.execDetached([
-            runtime.script("audio-preferences"),
-            "set-profile",
-            root.pendingSharedProfile.address,
-            root.pendingSharedProfile.profile
-          ])
-      }
-      root.pendingSharedProfile = null
+      root.profileSetError = exitCode === 0 ? ""
+        : (exitCode === 2
+          ? "Audio profile changed, but its shared preference could not be saved"
+          : (exitCode === 4
+            ? "Audio profile changed, but endpoint volume or mute state was only partially restored"
+            : (exitCode === 3 ? "That audio profile is no longer available"
+              : "Could not change the audio profile")))
       profileRefreshTimer.restart()
     }
   }
@@ -802,52 +1051,122 @@ Item {
   Process {
     id: portSetProc
     onExited: function(exitCode) {
-      root.portSetError = exitCode !== 0 ? "Could not change the audio port" : ""
+      root.portSetError = exitCode === 0 ? ""
+        : (exitCode === 4 ? "Audio port changed, but the active port could not be verified"
+          : (exitCode === 3 ? "That audio port is no longer available"
+            : "Could not change the audio port"))
       portRefreshTimer.restart()
     }
   }
 
   Process {
     id: bluetoothAutoswitchProc
+    property bool responseValid: false
+    property string response: ""
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         var value = String(text || "").trim()
         if (value === "true" || value === "false") {
-          root.bluetoothAutoSwitch = value === "true"
-          root.bluetoothAutoSwitchLoaded = true
+          bluetoothAutoswitchProc.response = value
+          bluetoothAutoswitchProc.responseValid = true
         }
       }
     }
     onExited: function(exitCode) {
-      if (exitCode !== 0)
+      var wasMutation = root.autoswitchMutation
+      var succeeded = exitCode === 0 && responseValid
+      if (succeeded) {
+        root.bluetoothAutoSwitch = response === "true"
+        root.bluetoothAutoSwitchLoaded = true
+      }
+      if (!succeeded)
         root.bluetoothAutoswitchError = root.autoswitchMutation
-          ? "Could not change automatic headset mode"
+          ? (exitCode === 4
+            ? "Automatic headset mode changed and its previous value could not be restored"
+            : "Could not change automatic headset mode")
           : "Could not load automatic headset mode"
       else root.bluetoothAutoswitchError = ""
       root.autoswitchMutation = false
+      responseValid = false
+      response = ""
+      if (wasMutation && exitCode === 4) {
+        root.autoswitchReconcilePending = true
+        autoswitchReconcileTimer.restart()
+      }
     }
   }
 
   Process {
     id: bluetoothPreferenceProc
+    property bool responseValid: false
+    property string response: ""
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         var value = String(text || "").trim()
         if (value === "quality" || value === "latency") {
-          root.bluetoothProfilePreference = value
-          root.bluetoothProfilePreferenceLoaded = true
+          bluetoothPreferenceProc.response = value
+          bluetoothPreferenceProc.responseValid = true
         }
       }
     }
     onExited: function(exitCode) {
-      if (exitCode !== 0)
+      var wasMutation = root.bluetoothProfilePreferenceMutation
+      var succeeded = exitCode === 0 && responseValid
+      if (succeeded) {
+        root.bluetoothProfilePreference = response
+        root.bluetoothProfilePreferenceLoaded = true
+      }
+      if (!succeeded)
         root.bluetoothPreferenceError = root.bluetoothProfilePreferenceMutation
-          ? "Could not change Bluetooth profile preference"
+          ? (exitCode === 4
+            ? "Bluetooth profile preference changed and its previous value could not be restored"
+            : "Could not change Bluetooth profile preference")
           : "Could not load Bluetooth profile preference"
       else root.bluetoothPreferenceError = ""
       root.bluetoothProfilePreferenceMutation = false
+      responseValid = false
+      response = ""
+      if (wasMutation && exitCode === 4) {
+        root.bluetoothPreferenceReconcilePending = true
+        bluetoothPreferenceReconcileTimer.restart()
+      }
+    }
+  }
+
+  Timer {
+    id: autoswitchReconcileTimer
+    interval: 250
+    repeat: false
+    onTriggered: {
+      if (bluetoothAutoswitchProc.running) {
+        restart()
+        return
+      }
+      root.autoswitchReconcilePending = false
+      bluetoothAutoswitchProc.responseValid = false
+      bluetoothAutoswitchProc.response = ""
+      bluetoothAutoswitchProc.command = runtime.scriptCommand("audio-bluetooth-autoswitch")
+      bluetoothAutoswitchProc.running = true
+    }
+  }
+
+  Timer {
+    id: bluetoothPreferenceReconcileTimer
+    interval: 250
+    repeat: false
+    onTriggered: {
+      if (bluetoothPreferenceProc.running) {
+        restart()
+        return
+      }
+      root.bluetoothPreferenceReconcilePending = false
+      bluetoothPreferenceProc.responseValid = false
+      bluetoothPreferenceProc.response = ""
+      bluetoothPreferenceProc.command = runtime.scriptCommand(
+        "audio-bluetooth-profile-preference")
+      bluetoothPreferenceProc.running = true
     }
   }
 
@@ -1114,6 +1433,8 @@ Item {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
+                    enabled: root.audioControlSettingsWritable
+                      && !root.audioControlWritePending && !root.audioMutationBusy
                     onContainsMouseChanged: if (containsMouse) root.setCursor(0)
                     onClicked: root.setOutputOverdrive(!root.outputOverdrive)
                   }
@@ -1157,7 +1478,7 @@ Item {
                     onCursorRequested: root.setCursor(audioPortDelegate.rowIndex)
                     onPortSelected: function(value) { root.setAudioPort(audioPortDelegate.port, value) }
                     onMenuToggled: function(open) {
-                      root.profileMenuOpen = open
+                      root.updateProfileMenu(open)
                       if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
                     }
                   }
@@ -1227,6 +1548,7 @@ Item {
                       id: autoswitchToggle
                       checked: root.bluetoothAutoSwitch
                       busy: bluetoothAutoswitchProc.running
+                        || root.autoswitchReconcilePending
                       interactive: false
                       cursorRing: false
                       foreground: root.foreground
@@ -1236,7 +1558,9 @@ Item {
 
                   MouseArea {
                     anchors.fill: parent
-                    enabled: root.bluetoothAutoSwitchLoaded && !bluetoothAutoswitchProc.running
+                    enabled: root.bluetoothAutoSwitchLoaded
+                      && !bluetoothAutoswitchProc.running
+                      && !root.autoswitchReconcilePending
                     hoverEnabled: true
                     cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                     onContainsMouseChanged: if (containsMouse) root.setCursor(0)
@@ -1253,11 +1577,13 @@ Item {
                   fill: root.hoverFill
                   fontFamily: root.fontFamily
                   preference: root.bluetoothProfilePreference
-                  menuEnabled: root.bluetoothProfilePreferenceLoaded && !bluetoothPreferenceProc.running
+                  menuEnabled: root.bluetoothProfilePreferenceLoaded
+                    && !bluetoothPreferenceProc.running
+                    && !root.bluetoothPreferenceReconcilePending
                   onCursorRequested: root.setCursor(1)
                   onPreferenceSelected: function(value) { root.setBluetoothProfilePreference(value) }
                   onMenuToggled: function(open) {
-                    root.profileMenuOpen = open
+                    root.updateProfileMenu(open)
                     if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
                   }
                 }
@@ -1323,9 +1649,10 @@ Item {
                       required property int index
                       width: parent.width
                       definition: modelData
-                      checked: root.policySettings[modelData.key] === true
+                      checked: Model.mapValue(root.policySettings, modelData.key, false) === true
                       busy: policy.busy && root.pendingPolicyKey === modelData.key
                       enabled: root.policySettingsLoaded && !policy.busy
+                        && !root.policyMutationBlocked
                       opacity: enabled ? 1 : 0.6
                       hasCursor: root.cursorActive && root.activeTab === 2
                         && root.selectedIndex === index
@@ -1334,7 +1661,7 @@ Item {
                       fontFamily: root.fontFamily
                       onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(policyCoreRow)
                       onHovered: root.setCursor(index)
-                      onActivated: policy.setSetting(modelData.key, !checked)
+                      onActivated: root.setPolicySetting(modelData.key, !checked)
                     }
                   }
                 }
@@ -1367,8 +1694,9 @@ Item {
                       readonly property int rowIndex: root.policyVolumeStartIndex + index
                       width: parent.width
                       definition: modelData
-                      value: Number(root.policySettings[modelData.key])
+                      value: Number(Model.mapValue(root.policySettings, modelData.key, 0))
                       enabled: root.policySettingsLoaded && !policy.busy
+                        && !root.policyMutationBlocked
                       opacity: enabled ? 1 : 0.6
                       hasCursor: root.cursorActive && root.activeTab === 2
                         && root.selectedIndex === rowIndex
@@ -1377,7 +1705,7 @@ Item {
                       fontFamily: root.fontFamily
                       onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(policyVolumeRow)
                       onHovered: root.setCursor(rowIndex)
-                      onCommitted: function(value) { policy.setSetting(modelData.key, value) }
+                      onCommitted: function(value) { root.setPolicySetting(modelData.key, value) }
                     }
                   }
                 }
@@ -1409,9 +1737,10 @@ Item {
                       readonly property int rowIndex: root.policyExperimentalStartIndex + index
                       width: parent.width
                       definition: modelData
-                      checked: root.policySettings[modelData.key] === true
+                      checked: Model.mapValue(root.policySettings, modelData.key, false) === true
                       busy: policy.busy && root.pendingPolicyKey === modelData.key
                       enabled: root.policySettingsLoaded && !policy.busy
+                        && !root.policyMutationBlocked
                       opacity: enabled ? 1 : 0.6
                       hasCursor: root.cursorActive && root.activeTab === 2
                         && root.selectedIndex === rowIndex
@@ -1420,7 +1749,7 @@ Item {
                       fontFamily: root.fontFamily
                       onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(policyExperimentalRow)
                       onHovered: root.setCursor(rowIndex)
-                      onActivated: policy.setSetting(modelData.key, !checked)
+                      onActivated: root.setPolicySetting(modelData.key, !checked)
                     }
                   }
                 }
@@ -1445,7 +1774,8 @@ Item {
                     width: parent.width
                     definition: root.captureNotificationDefinition
                     checked: root.captureNotifications
-                    enabled: true
+                    enabled: root.audioControlSettingsWritable
+                      && !root.audioControlWritePending
                     hasCursor: root.cursorActive && root.activeTab === 2
                       && root.selectedIndex === root.captureNotificationIndex
                     foreground: root.foreground
@@ -1477,7 +1807,7 @@ Item {
                   id: sceneSaveRow
                   width: parent.width
                   implicitHeight: sceneSaveContent.implicitHeight + Style.space(18)
-                  enabled: !sceneController.busy && !sceneStoreProc.running
+                  enabled: !root.sceneMutationBusy
                   hasCursor: root.cursorActive && root.activeTab === 3 && root.selectedIndex === 0
                   onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sceneSaveRow)
                   foreground: root.foreground
@@ -1488,7 +1818,7 @@ Item {
                   // clickable; clicks landing anywhere else still save.
                   MouseArea {
                     anchors.fill: parent
-                    enabled: !sceneController.busy && !sceneStoreProc.running
+                    enabled: !root.sceneMutationBusy
                     hoverEnabled: true
                     cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                     onContainsMouseChanged: if (containsMouse) root.setCursor(0)
@@ -1520,8 +1850,9 @@ Item {
 
                       Text {
                         width: parent.width
-                        text: sceneController.busy || sceneStoreProc.running
-                          ? "Capturing the current audio state…"
+                        text: root.sceneMutationBusy
+                          ? (root.sceneReloadPending ? "Updating saved scenes…"
+                            : "Capturing the current audio state…")
                           : "Captures every connected device with its current settings."
                         color: Qt.darker(root.foreground, 1.35)
                         font.family: root.fontFamily
@@ -1553,7 +1884,7 @@ Item {
                     width: parent.width
                     sceneName: modelData ? String(modelData.name || "") : ""
                     summary: Model.sceneSummary(modelData)
-                    actionEnabled: !sceneController.busy && !sceneStoreProc.running
+                    actionEnabled: !root.sceneMutationBusy
                     hasCursor: root.cursorActive && root.activeTab === 3
                       && root.selectedIndex === 1 + sceneListRow.index
                     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sceneListRow)
@@ -1671,7 +2002,7 @@ Item {
                       onHovered: function(on) { if (on) root.setCursor(0) }
                       onChanged: function(value) { root.newRuleApp = value }
                       onPopupOpenChanged: {
-                        root.profileMenuOpen = popupOpen
+                        root.updateProfileMenu(popupOpen)
                         if (!popupOpen) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
                       }
                     }
@@ -1740,7 +2071,7 @@ Item {
                       value: ""
                       options: rulesStore.targetOptions
                       hasCursor: newRuleDeviceRow.hasCursor
-                      enabled: root.newRuleApp !== ""
+                      enabled: root.newRuleApp !== "" && !root.routingMutation
                       opacity: enabled ? 1 : 0.6
                       foreground: root.foreground
                       fontFamily: root.fontFamily
@@ -1756,7 +2087,7 @@ Item {
                         root.newRuleApp = ""
                       }
                       onPopupOpenChanged: {
-                        root.profileMenuOpen = popupOpen
+                        root.updateProfileMenu(popupOpen)
                         if (!popupOpen) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
                       }
                     }
@@ -1797,7 +2128,7 @@ Item {
                     fontFamily: root.fontFamily
                     onCursorRequested: root.setCursor(2 + routingRuleDelegate.index)
                     onMenuToggled: function(open) {
-                      root.profileMenuOpen = open
+                      root.updateProfileMenu(open)
                       if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
                     }
                     onTargetChosen: function(value) {
@@ -1820,7 +2151,7 @@ Item {
 
                 Text {
                   width: parent.width
-                  text: "Give a device a custom name, favorite it to sort it first, or hide it everywhere."
+                  text: "Give a device a custom name, favorite it to sort it first, or hide it from mixer device lists."
                   color: Qt.darker(root.foreground, 1.35)
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -1957,7 +2288,7 @@ Item {
                         root.setAudioProfile(bluetoothProfileDelegate.card, profile)
                       }
                       onMenuToggled: function(open) {
-                        root.profileMenuOpen = open
+                        root.updateProfileMenu(open)
                         if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
                       }
                     }
@@ -2000,7 +2331,7 @@ Item {
                         root.setAudioProfile(deviceProfileDelegate.card, profile)
                       }
                       onMenuToggled: function(open) {
-                        root.profileMenuOpen = open
+                        root.updateProfileMenu(open)
                         if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
                       }
                     }
@@ -2033,6 +2364,7 @@ Item {
                     rowIndex: root.outputBalanceIndex
                     deviceLabel: root.nodeLabel(root.outputDevice)
                     balanceValue: root.balanceFor(root.outputDevice)
+                    enabled: !root.audioMutationBusy
                     foreground: root.foreground
                     fill: root.hoverFill
                     fontFamily: root.fontFamily
@@ -2051,6 +2383,7 @@ Item {
                     rowIndex: root.inputBalanceIndex
                     deviceLabel: root.nodeLabel(root.inputDevice)
                     balanceValue: root.balanceFor(root.inputDevice)
+                    enabled: !root.audioMutationBusy
                     foreground: root.foreground
                     fill: root.hoverFill
                     fontFamily: root.fontFamily
@@ -2088,6 +2421,8 @@ Item {
                     microphoneMuted: root.inputDeviceMuted
                     error: microphoneTest.error
                     enabled: !profileSetProc.running && !portSetProc.running
+                      && !sceneController.busy && !policy.busy
+                      && !root.diagnosticsMutationBusy
                     hasCursor: root.cursorActive && root.activeTab === 0
                       && root.selectedIndex === root.microphoneTestIndex
                     foreground: root.foreground

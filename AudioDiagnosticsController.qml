@@ -13,6 +13,9 @@ Item {
   required property string speakerTestPath
   required property string recoveryPath
   property bool sessionActive: false
+  // Supplied by the host so service recovery and channel playback cannot race
+  // profile, port, scene, microphone, or policy mutations.
+  property bool mutationBlocked: false
 
   property var snapshot: Model.emptyAudioDiagnostics()
   property bool loaded: false
@@ -21,16 +24,22 @@ Item {
   property bool statusIsError: false
   property bool snapshotValid: false
   property bool speakerCancelled: false
+  property bool speakerStopping: false
+  property bool recoveryPending: false
 
   readonly property bool refreshing: snapshotProc.running
   readonly property bool copying: copyProc.running
-  readonly property bool speakerTesting: speakerProc.running
-  readonly property bool recovering: recoveryProc.running
+  readonly property bool speakerTesting: speakerProc.running || speakerStopping
+  readonly property bool recovering: recoveryProc.running || recoveryPending
   readonly property bool busy: refreshing || copying || recovering
 
   onSessionActiveChanged: {
     if (sessionActive) refresh()
     else stopSpeakerTest(false)
+  }
+  onMutationBlockedChanged: if (mutationBlocked) {
+    recoveryPending = false
+    stopSpeakerTest(false)
   }
 
   function showStatus(message, isError) {
@@ -53,54 +62,66 @@ Item {
   }
 
   function refresh() {
-    if (snapshotProc.running) return
+    if (snapshotProc.running || copyProc.running || speakerTesting || recovering) return
     error = ""
     snapshotValid = false
-    snapshotProc.command = [diagnosticsPath, "snapshot"]
+    snapshotProc.response = ""
+    snapshotProc.command = ["/bin/bash", diagnosticsPath, "snapshot"]
     snapshotProc.running = true
   }
 
   function copySupportReport() {
-    if (copyProc.running || !snapshot.capabilities.supportReport
+    if (copyProc.running || snapshotProc.running || speakerTesting || recovering
+        || !snapshot.capabilities.supportReport
         || !snapshot.capabilities.clipboard) return
-    copyProc.command = [diagnosticsPath, "copy-report"]
+    copyProc.command = ["/bin/bash", diagnosticsPath, "copy-report"]
     copyProc.running = true
   }
 
   function toggleSpeakerTest() {
+    if (speakerStopping) return
     if (speakerProc.running) {
       stopSpeakerTest(true)
       return
     }
+    if (mutationBlocked || busy) return
     var sink = snapshot.defaults ? String(snapshot.defaults.output || "") : ""
     if (!snapshot.capabilities.speakerTest || sink === "") return
     speakerCancelled = false
-    speakerProc.command = [speakerTestPath, sink]
+    speakerProc.command = ["/bin/bash", speakerTestPath, sink]
     speakerProc.running = true
     showStatus("Testing each reported output channel…", false)
   }
 
   function stopSpeakerTest(showFeedback) {
-    if (!speakerProc.running) return
+    if (speakerStopping || !speakerProc.running) return
     speakerCancelled = true
+    speakerStopping = true
     speakerProc.running = false
     if (showFeedback) showStatus("Stopped the speaker test", false)
   }
 
   function runRecovery() {
-    if (recoveryProc.running || !snapshot.capabilities.recovery) return
-    stopSpeakerTest(false)
-    recoveryProc.command = [recoveryPath]
+    if (mutationBlocked || busy || !snapshot.capabilities.recovery) return
+    if (speakerProc.running || speakerStopping) {
+      recoveryPending = true
+      stopSpeakerTest(false)
+      return
+    }
+    recoveryProc.command = ["/bin/bash", recoveryPath]
     recoveryProc.running = true
   }
 
   Process {
     id: snapshotProc
+    property string response: ""
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.loadSnapshot(text)
+      onStreamFinished: snapshotProc.response = String(text || "")
     }
     onExited: function(exitCode) {
+      if (exitCode === 0) root.loadSnapshot(response)
+      response = ""
       if (exitCode !== 0 || !root.snapshotValid) {
         root.loaded = true
         root.error = "Could not collect audio diagnostics"
@@ -124,11 +145,21 @@ Item {
     onExited: function(exitCode) {
       if (root.speakerCancelled) {
         root.speakerCancelled = false
+        root.speakerStopping = false
+        if (root.recoveryPending) {
+          root.recoveryPending = false
+          root.runRecovery()
+        }
         return
       }
+      root.speakerStopping = false
       root.showStatus(exitCode === 0
         ? "Finished the speaker channel test"
         : "Could not complete the speaker channel test", exitCode !== 0)
+      if (root.recoveryPending) {
+        root.recoveryPending = false
+        root.runRecovery()
+      }
     }
   }
 
@@ -136,8 +167,8 @@ Item {
     id: recoveryProc
     onExited: function(exitCode) {
       root.showStatus(exitCode === 0
-        ? "Opened Omarchy audio recovery in a terminal"
-        : "Could not open Omarchy audio recovery", exitCode !== 0)
+        ? "Finished Omarchy audio recovery"
+        : "Could not complete Omarchy audio recovery", exitCode !== 0)
       if (exitCode === 0) recoveryRefresh.restart()
     }
   }

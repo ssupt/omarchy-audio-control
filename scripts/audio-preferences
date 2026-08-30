@@ -6,8 +6,11 @@
 
 set -euo pipefail
 
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$script_dir/.audio-common"
 preferences_file=${OMARCHY_AUDIO_PREFERENCES_FILE:-${XDG_CONFIG_HOME:-${HOME:?}/.config}/omarchy/audio-preferences.json}
 action=${1:-show}
+maximum_store_bytes=1048576
 
 usage() {
   echo "Usage: audio-preferences [show | set-default <output|input> <node-name> | set-profile <bluetooth-address> <profile>]" >&2
@@ -19,20 +22,65 @@ default_preferences() {
 }
 
 read_preferences() {
-  if [[ ! -s $preferences_file ]]; then
+  if [[ -L $preferences_file || (-e $preferences_file && ! -f $preferences_file) ]]; then
+    echo "Audio preferences are not stored in a regular file" >&2
+    return 1
+  elif [[ ! -s $preferences_file ]]; then
     default_preferences
-  elif jq -e 'type == "object"' "$preferences_file" >/dev/null 2>&1; then
-    jq -c '
-      .version = 1
-      | .defaults = (if (.defaults | type) == "object" then .defaults else {} end)
-      | .defaults.output = (if (.defaults.output | type) == "string" then .defaults.output else "" end)
-      | .defaults.input = (if (.defaults.input | type) == "string" then .defaults.input else "" end)
-      | .bluetoothProfiles = (if (.bluetoothProfiles | type) == "object" then .bluetoothProfiles else {} end)
+  elif (( $(stat -c %s -- "$preferences_file" 2>/dev/null || printf '%s' "$((maximum_store_bytes + 1))") > maximum_store_bytes )); then
+    echo "Audio preferences are too large; refusing to overwrite them" >&2
+    return 1
+  elif jq -se 'length == 1 and (.[0] | type) == "object"
+      and ((.[0] | has("version") | not) or .[0].version == 1)' \
+      "$preferences_file" >/dev/null 2>&1; then
+    jq -cs '
+      def clean($maximum):
+        tostring
+        | gsub("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]"; " ")
+        | gsub(" +"; " ")
+        | sub("^ +"; "") | sub(" +$"; "")
+        | .[0:$maximum];
+      def identifier($maximum):
+        if type == "string" and length > 0 and length <= $maximum
+            and (test("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]") | not)
+          then . else "" end;
+      .[0]
+      | (if (.defaults | type) == "object" then .defaults else {} end) as $defaults
+      | (if (.bluetoothProfiles | type) == "object" then .bluetoothProfiles else {} end) as $profiles
+      | {
+          version: 1,
+          defaults: {
+            output: (($defaults.output // "") | identifier(160)),
+            input: (($defaults.input // "") | identifier(160))
+          },
+          bluetoothProfiles: (
+            reduce ([$profiles | to_entries[:512][]?
+              | (.key | ascii_downcase | gsub("[^0-9a-f]"; "")) as $address
+              | (.value | identifier(160)) as $profile
+              | select(($address | test("^[0-9a-f]{12}$")) and $profile != "")
+              | {key: $address, value: $profile}][]) as $entry
+              ({}; if length >= 128 or has($entry.key) then .
+                else .[$entry.key] = $entry.value end)
+          )
+        }
     ' "$preferences_file"
+  elif jq -se 'length == 1 and (.[0] | type) == "object"' \
+      "$preferences_file" >/dev/null 2>&1; then
+    echo "Audio preferences use an unsupported schema version; refusing to overwrite them" >&2
+    return 1
   else
     echo "Audio preferences contain invalid JSON; refusing to overwrite them" >&2
     return 1
   fi
+}
+
+validate_identifier() {
+  local value=$1 maximum=$2
+  jq -ner --arg value "$value" --argjson maximum "$maximum" '
+    $value
+    | select(length > 0 and length <= $maximum)
+    | select(test("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]") | not)
+  '
 }
 
 write_preferences() {
@@ -43,8 +91,8 @@ write_preferences() {
   preferences_dir=$(dirname -- "$preferences_file")
   mkdir -p -- "$preferences_dir"
   lock_file="${preferences_file}.lock"
-  exec 9>"$lock_file"
-  flock 9
+  audio_open_lock_path "$lock_file" 9 \
+    "Audio preferences are busy; try again" || return 1
 
   temporary_file=$(mktemp "$preferences_dir/.audio-preferences.XXXXXX")
   trap 'rm -f -- "$temporary_file"' EXIT
@@ -66,7 +114,7 @@ case "$action" in
   set-default)
     (( $# == 3 )) || usage
     direction=$2
-    node_name=$3
+    node_name=$(validate_identifier "$3" 160) || usage
     [[ $direction == output || $direction == input ]] || usage
     [[ -n $node_name ]] || usage
     write_preferences \
@@ -77,7 +125,7 @@ case "$action" in
     (( $# == 3 )) || usage
     address=${2,,}
     address=${address//[^0-9a-f]/}
-    profile=$3
+    profile=$(validate_identifier "$3" 160) || usage
     [[ $address =~ ^[0-9a-f]{12}$ && -n $profile ]] || usage
     write_preferences \
       '.version = 1 | .bluetoothProfiles[$address] = $profile' \

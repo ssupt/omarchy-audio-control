@@ -1,0 +1,27 @@
+#!/bin/bash
+
+# omarchy:summary=Read bounded output availability from Omarchy
+# omarchy:group=audio
+
+set -u -o pipefail
+LC_ALL=C
+
+(( $# == 0 )) || {
+  echo "Usage: audio-sink-availability" >&2
+  exit 1
+}
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=.audio-common
+source "$script_dir/.audio-common"
+
+audio_prepare_private_runtime || exit 1
+command -v omarchy-audio-sink-availability >/dev/null || exit 1
+
+# The upstream helper emits one <node-name><TAB><0|1> record per output. Its
+# result is parsed defensively in Model.js; this wrapper supplies the missing
+# process-time and byte ceilings before a StdioCollector holds it in memory.
+audio_capture_bounded availability 1048576 \
+  timeout 4 omarchy-audio-sink-availability || exit 1
+
+printf '%s\n' "$availability"

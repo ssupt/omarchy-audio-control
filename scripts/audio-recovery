@@ -5,16 +5,31 @@
 
 set -euo pipefail
 
-(( $# == 0 )) || {
+if (( $# == 0 )); then
+  :
+elif (( $# == 1 )) && [[ $1 == --run ]]; then
+  :
+else
   echo "Usage: audio-recovery" >&2
   exit 1
-}
+fi
 
 recovery_command=${AUDIO_CONTROL_RECOVERY_COMMAND:-omarchy-restart-audio}
 recovery_launcher=${AUDIO_CONTROL_RECOVERY_LAUNCHER:-omarchy-launch-floating-terminal-with-presentation}
 recovery_path=$(command -v "$recovery_command")
+script_path=$(readlink -f -- "${BASH_SOURCE[0]}")
+script_dir=$(dirname -- "$script_path")
+source "$script_dir/.audio-common"
+
+if [[ ${1:-} == --run ]]; then
+  audio_acquire_mutation_lock \
+    "Another audio change is still finishing; recovery was not started" || exit 1
+  exec "$recovery_path"
+fi
+
 launcher_path=$(command -v "$recovery_launcher")
+printf -v launch_command '%q --run' "$script_path"
 
 # The official recovery may need to explain a stuck USB device or request
 # authorization for usbreset. Never hide that interaction inside the shell.
-"$launcher_path" "$recovery_path" >/dev/null 2>&1 &
+exec "$launcher_path" "$launch_command"

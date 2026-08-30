@@ -5,7 +5,10 @@
 [[ ${AUDIO_CONTROL_MICROPHONE_TEST_RECORD_FAIL:-0} == 1 ]] && exit 1
 if [[ ${AUDIO_CONTROL_MICROPHONE_TEST_RECORD_WAIT:-0} == 1 ]]; then
   truncate -s 96000 "${!#}"
-  while true; do sleep 0.05; done
+  # Model pw-record as one long-lived process. Using a shell sleep loop here
+  # leaves a short-lived descendant holding inherited lock descriptors after
+  # the mock itself is killed, unlike the real recorder binary.
+  exec tail -f /dev/null
 fi
 truncate -s "${AUDIO_CONTROL_MICROPHONE_TEST_RECORD_BYTES:-480000}" "${!#}"
 exit "${AUDIO_CONTROL_MICROPHONE_TEST_RECORD_STATUS:-0}"

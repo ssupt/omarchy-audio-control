@@ -1,0 +1,35 @@
+#!/bin/bash
+
+# omarchy:summary=Resolve the bounded physical endpoint behind the default output
+# omarchy:group=audio
+
+set -u -o pipefail
+LC_ALL=C
+
+(( $# == 0 )) || {
+  echo "Usage: audio-resolve-output-sink" >&2
+  exit 1
+}
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=.audio-common
+source "$script_dir/.audio-common"
+
+audio_prepare_private_runtime || exit 1
+command -v omarchy-audio-output-sink >/dev/null || exit 1
+command -v jq >/dev/null || exit 1
+
+audio_capture_bounded resolved 1024 \
+  timeout 4 omarchy-audio-output-sink || exit 1
+
+# The resolver is an identity oracle. Accept exactly one short, printable
+# identifier so diagnostics or repeated output can never be mistaken for a
+# PipeWire node name by the QML caller.
+jq -ne --arg value "$resolved" '
+  ($value | length) > 0 and ($value | length) <= 160
+  and ($value
+    | test("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]")
+    | not)
+' >/dev/null || exit 1
+
+printf '%s\n' "$resolved"

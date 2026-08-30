@@ -6,8 +6,11 @@
 
 set -euo pipefail
 
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$script_dir/.audio-common"
 rules_file=${OMARCHY_AUDIO_RULES_FILE:-${XDG_CONFIG_HOME:-${HOME:?}/.config}/omarchy/audio-rules.json}
 action=${1:-}
+maximum_store_bytes=1048576
 
 usage() {
   echo "Usage: audio-app-rules set-app <app> <playback|recording> <target>" >&2
@@ -18,17 +21,76 @@ usage() {
 }
 
 read_rules() {
-  if [[ ! -s $rules_file ]]; then
+  if [[ -L $rules_file || (-e $rules_file && ! -f $rules_file) ]]; then
+    echo "Audio rules are not stored in a regular file" >&2
+    return 1
+  elif [[ ! -s $rules_file ]]; then
     printf '%s\n' '{"version":1,"appRules":[],"devices":{"aliases":{},"favorites":[],"hidden":[]}}'
-  elif jq -e 'type == "object"' "$rules_file" >/dev/null 2>&1; then
-    jq -c '
-      .version = 1
-      | .appRules = (if (.appRules | type) == "array" then .appRules else [] end)
-      | .devices = (if (.devices | type) == "object" then .devices else {} end)
-      | .devices.aliases = (if (.devices.aliases | type) == "object" then .devices.aliases else {} end)
-      | .devices.favorites = (if (.devices.favorites | type) == "array" then .devices.favorites else [] end)
-      | .devices.hidden = (if (.devices.hidden | type) == "array" then .devices.hidden else [] end)
+  elif (( $(stat -c %s -- "$rules_file" 2>/dev/null || printf '%s' "$((maximum_store_bytes + 1))") > maximum_store_bytes )); then
+    echo "Audio rules are too large; refusing to overwrite them" >&2
+    return 1
+  elif jq -se 'length == 1 and (.[0] | type) == "object"
+      and ((.[0] | has("version") | not) or .[0].version == 1)' \
+      "$rules_file" >/dev/null 2>&1; then
+    jq -cs '
+      def clean($maximum):
+        tostring
+        | gsub("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]"; " ")
+        | gsub(" +"; " ")
+        | sub("^ +"; "") | sub(" +$"; "")
+        | .[0:$maximum];
+      def identifier($maximum):
+        select(type == "string")
+        | select(length > 0 and length <= $maximum)
+        | select(test("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]") | not);
+      def raw_devices:
+        if (.devices | type) == "object" then .devices else {} end;
+      def ordered_strings($value; $maximum):
+        reduce ([(if ($value | type) == "array" then $value else [] end)[:256][]?
+          | identifier(160)][]) as $entry
+          ({seen: {}, values: []};
+            if (.seen | has($entry)) or (.values | length) >= $maximum then .
+            else .seen[$entry] = true | .values += [$entry] end)
+        | .values;
+      def normalized_rules:
+        reduce ([((if (.appRules | type) == "array" then .appRules else [] end)[:256][]?
+          | select(type == "object")
+          | ((.app // "") | clean(120) | ascii_downcase) as $app
+          | ((.target // "") | identifier(160)) as $target
+          | select($app != "" and $target != ""
+              and (.direction == "playback" or .direction == "recording"))
+          | {app: $app, direction: .direction, target: $target})][]) as $rule
+          ({seen: {}, values: []};
+            ($rule.direction + ":" + $rule.app) as $key
+            | if (.seen | has($key)) or (.values | length) >= 64 then .
+              else .seen[$key] = true | .values += [$rule] end)
+        | .values;
+      def normalized_aliases:
+        reduce ([((raw_devices
+          | if (.aliases | type) == "object" then .aliases else {} end)
+          | to_entries[:256][]?
+          | (.key | identifier(160)) as $node
+          | (.value | clean(80)) as $label
+          | select($node != "" and $label != "")
+          | {key: $node, value: $label})][]) as $entry
+          ({}; if length >= 128 or has($entry.key) then . else .[$entry.key] = $entry.value end);
+      .[0]
+      | {
+        version: 1,
+        appRules: normalized_rules,
+        devices: {
+          aliases: normalized_aliases,
+          favorites: ordered_strings(
+            (raw_devices | if (.favorites | type) == "array" then .favorites else [] end); 64),
+          hidden: ordered_strings(
+            (raw_devices | if (.hidden | type) == "array" then .hidden else [] end); 64)
+        }
+      }
     ' "$rules_file"
+  elif jq -se 'length == 1 and (.[0] | type) == "object"' \
+      "$rules_file" >/dev/null 2>&1; then
+    echo "Audio rules use an unsupported schema version; refusing to overwrite them" >&2
+    return 1
   else
     echo "Audio rules contain invalid JSON; refusing to overwrite them" >&2
     return 1
@@ -42,8 +104,8 @@ write_rules() {
   local rules_dir temporary_file
   rules_dir=$(dirname -- "$rules_file")
   mkdir -p -- "$rules_dir"
-  exec 9>"${rules_file}.lock"
-  flock 9
+  audio_open_lock_path "${rules_file}.lock" 9 \
+    "Audio rules are busy; try again" || return 1
 
   temporary_file=$(mktemp "$rules_dir/.audio-rules.XXXXXX")
   trap 'rm -f -- "$temporary_file"' EXIT
@@ -60,7 +122,30 @@ write_rules() {
 normalize_app() {
   # Rules match against the labels applications publish, compared without
   # case so Firefox, firefox, and firefox-bin style differences still hit.
-  printf '%s' "${1,,}" | tr -d '[:cntrl:]'
+  local value
+  local LC_ALL=C
+  value=$(normalize_string "$1" 120) || return 1
+  printf '%s' "${value,,}"
+}
+
+normalize_string() {
+  local value=$1 maximum=$2
+  jq -nr --arg value "$value" --argjson maximum "$maximum" '
+    $value
+    | gsub("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]"; " ")
+    | gsub(" +"; " ")
+    | sub("^ +"; "") | sub(" +$"; "")
+    | .[0:$maximum]
+  '
+}
+
+validate_identifier() {
+  local value=$1 maximum=$2
+  jq -ner --arg value "$value" --argjson maximum "$maximum" '
+    $value
+    | select(length > 0 and length <= $maximum)
+    | select(test("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]") | not)
+  '
 }
 
 case "$action" in
@@ -68,13 +153,14 @@ case "$action" in
     (( $# == 4 )) || usage
     app=$(normalize_app "$2")
     direction=$3
-    target=$4
+    target=$(validate_identifier "$4" 160) || usage
     [[ -n $app && -n $target ]] || usage
     [[ $direction == playback || $direction == recording ]] || usage
     write_rules '
       .version = 1
       | .appRules = (
-          (.appRules | map(select(.direction != $direction or .app != $app)))
+          (.appRules | map(select(.direction != $direction
+            or .app != $app)))
           + [{app: $app, direction: $direction, target: $target}]
           | .[-64:]
         )
@@ -87,16 +173,21 @@ case "$action" in
     [[ -n $app ]] || usage
     [[ $direction == playback || $direction == recording ]] || usage
     write_rules '.version = 1
-      | .appRules |= map(select(.direction != $direction or .app != $app))' \
+      | .appRules |= map(select(.direction != $direction
+        or .app != $app))' \
       --arg app "$app" --arg direction "$direction"
     ;;
   set-alias)
     (( $# == 3 )) || usage
-    node=${2:-}
-    label=${3:-}
+    node=$(validate_identifier "${2:-}" 160) || usage
+    label=$(normalize_string "${3:-}" 80)
     [[ -n $node ]] || usage
     if [[ -n $label ]]; then
-      write_rules '.version = 1 | .devices.aliases[$node] = $label' \
+      write_rules '.version = 1
+        | .devices.aliases = (
+            (.devices.aliases | del(.[$node])) + {($node): $label}
+            | to_entries | .[-128:] | from_entries
+          )' \
         --arg node "$node" --arg label "$label"
     else
       write_rules '.version = 1 | .devices.aliases |= del(.[$node])' \
@@ -105,7 +196,7 @@ case "$action" in
     ;;
   set-flag)
     (( $# == 4 )) || usage
-    node=${2:-}
+    node=$(validate_identifier "${2:-}" 160) || usage
     flag=$3
     value=$4
     [[ -n $node ]] || usage
@@ -119,7 +210,7 @@ case "$action" in
           (if (.devices[$flag] | type) == "array" then .devices[$flag] else [] end)
           | (if $on then (map(select(. != $node)) + [$node])
              else map(select(. != $node)) end)
-          | unique
+          | .[-64:]
         )
     ' --arg node "$node" --arg flag "$flag_key" \
       --argjson on "$( [[ $value == true ]] && echo true || echo false )"

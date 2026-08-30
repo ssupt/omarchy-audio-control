@@ -8,31 +8,89 @@ if (( $# != 0 )); then
   exit 1
 fi
 
-set -o pipefail
+set -u -o pipefail
+LC_ALL=C
 
-timeout 2 pactl -f json list 2>/dev/null | jq -c '
+maximum_pactl_bytes=16777216
+endpoints_json=$(timeout 2 pactl -f json list 2>/dev/null |
+  head -c "$((maximum_pactl_bytes + 1))") || exit 1
+(( ${#endpoints_json} <= maximum_pactl_bytes )) || {
+  echo "Audio endpoint information is too large" >&2
+  exit 1
+}
+
+if jq -c '
+  def identifier:
+    if type == "string" and length > 0 and length <= 160
+        and (test("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]") | not)
+      then . else "" end;
+  def clean_label($fallback):
+    (if type == "string" then . else "" end
+      | gsub("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]"; " ")
+      | gsub(" +"; " ") | sub("^ +"; "") | sub(" +$"; "") | .[:160])
+    | if length > 0 then . else $fallback end;
+  def active_port_name($endpoint):
+    $endpoint.active_port as $active
+    | (if ($active | type) == "object" then ($active.name // "")
+       elif ($active | type) == "string" then $active
+       else "" end) | identifier;
+
   def usable_ports($endpoint):
-    [
-      $endpoint.ports[]?
-      | select(.availability != "not available" or .name == $endpoint.active_port)
-      | { value: .name, label: (.description // .name) }
-    ];
+    ([
+      (if ($endpoint.ports | type) == "array" then $endpoint.ports[:256] else [] end)[]?
+      | select(type == "object")
+      | (.name | identifier) as $name
+      | select($name != "")
+      | select(.availability != "not available" or $name == active_port_name($endpoint))
+      | { value: $name, label: ((.description // $name) | clean_label($name)) }
+    ]) as $ports
+    | if (($ports | map(.value) | unique | length) != ($ports | length))
+        then error("ambiguous port identity")
+      else $ports[:64] end;
 
   def endpoints($direction; $values):
-    [
-      $values[]?
-      | select($direction == "output" or (.name | endswith(".monitor") | not))
+    ([
+      $values[:512][]?
       | . as $endpoint
-      | usable_ports($endpoint) as $ports
-      | select($ports | length > 1)
-      | {
-          direction: $direction,
-          endpoint: $endpoint.name,
-          label: ($endpoint.description // $endpoint.name),
-          activePort: ($endpoint.active_port // ""),
-          ports: $ports
-        }
-    ];
+      | select(type == "object")
+      | (.name | identifier) as $name
+      | select($name != "")
+      | select($direction == "output" or (
+          ($name | endswith(".monitor") | not)
+          and (((.properties // {})["device.class"] // "")
+            | tostring | ascii_downcase) != "monitor"))
+      | {name: $name, raw: $endpoint}
+    ]) as $candidates
+    | if any($candidates[]?;
+          (((.raw.index // "") | tostring) | test("^[0-9]{1,20}$") | not)
+          or ((((.raw.properties // {})."object.id" // "") | tostring)
+            | test("^[0-9]{1,20}$") | not))
+        or (($candidates | map(.name) | unique | length) != ($candidates | length))
+        or (($candidates | map(.raw.index | tostring) | unique | length)
+          != ($candidates | length))
+        or (($candidates | map((.raw.properties."object.id") | tostring) | unique | length)
+          != ($candidates | length))
+      then error("ambiguous endpoint identity")
+      else [
+        $candidates[]
+        | . as $candidate
+        | usable_ports($candidate.raw) as $ports
+        | select($ports | length > 1)
+        | {
+            direction: $direction,
+            endpoint: $candidate.name,
+            label: (($candidate.raw.description // $candidate.name)
+              | clean_label($candidate.name)),
+            activePort: active_port_name($candidate.raw),
+            ports: $ports
+          }
+      ][:64] end;
 
-  endpoints("output"; (.sinks // [])) + endpoints("input"; (.sources // []))
-' || exit 1
+  if type != "object" then error("expected an endpoint object") else . end
+  | endpoints("output"; (if (.sinks | type) == "array" then .sinks else [] end))
+    + endpoints("input"; (if (.sources | type) == "array" then .sources else [] end))
+' <<<"$endpoints_json"; then
+  :
+else
+  exit 1
+fi

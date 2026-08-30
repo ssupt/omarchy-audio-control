@@ -15,6 +15,7 @@ recovery_command=${AUDIO_CONTROL_RECOVERY_COMMAND:-omarchy-restart-audio}
 recovery_launcher=${AUDIO_CONTROL_RECOVERY_LAUNCHER:-omarchy-launch-floating-terminal-with-presentation}
 speaker_command=${AUDIO_CONTROL_SPEAKER_TEST_COMMAND:-speaker-test}
 clipboard_command=${AUDIO_CONTROL_CLIPBOARD_COMMAND:-wl-copy}
+maximum_capture_bytes=16777216
 
 usage() {
   echo "Usage: audio-diagnostics [snapshot | report | copy-report]" >&2
@@ -47,13 +48,24 @@ capture() {
   local destination="$work_dir/$key"
   local fixture="${fixture_dir:+$fixture_dir/$key}"
 
-  if [[ -n $fixture && -f $fixture && ! -L $fixture ]]; then
-    cp -- "$fixture" "$destination"
-    return 0
+  if [[ -n $fixture && ( -e $fixture || -L $fixture ) ]]; then
+    if [[ -f $fixture && ! -L $fixture ]] &&
+        (( $(stat -c %s -- "$fixture" 2>/dev/null || printf '%s' "$((maximum_capture_bytes + 1))") <= maximum_capture_bytes )); then
+      cp -- "$fixture" "$destination"
+      return 0
+    fi
+    : >"$destination"
+    return 1
   fi
 
-  if timeout 4s "$@" >"$destination" 2>"$destination.error"; then
-    return 0
+  # Command errors are summarized as curated warnings below. Discard raw
+  # stderr so a malfunctioning service cannot fill the temporary directory
+  # while stdout is correctly bounded.
+  if timeout 4s "$@" 2>/dev/null |
+      head -c "$((maximum_capture_bytes + 1))" >"$destination"; then
+    if (( $(stat -c %s -- "$destination" 2>/dev/null || printf '%s' "$((maximum_capture_bytes + 1))") <= maximum_capture_bytes )); then
+      return 0
+    fi
   fi
 
   : >"$destination"
@@ -68,7 +80,8 @@ metadata_value() {
 
 numeric_or_zero() {
   local value=$1
-  [[ $value =~ ^[0-9]+$ ]] && printf '%s\n' "$value" || printf '%s\n' 0
+  [[ $value =~ ^[0-9]+$ && ${#value} -le 12 ]] &&
+    printf '%s\n' "$value" || printf '%s\n' 0
 }
 
 version_from() {
@@ -81,7 +94,8 @@ service_snapshot() {
   local output active sub_state load_state restarts
 
   if output=$(timeout 3s systemctl --user show "$unit" \
-      --property=LoadState,ActiveState,SubState,NRestarts --no-pager 2>/dev/null); then
+      --property=LoadState,ActiveState,SubState,NRestarts --no-pager 2>/dev/null |
+      head -c 65537) && (( ${#output} <= 65536 )); then
     load_state=$(sed -n 's/^LoadState=//p' <<<"$output")
     active=$(sed -n 's/^ActiveState=//p' <<<"$output")
     sub_state=$(sed -n 's/^SubState=//p' <<<"$output")
@@ -109,33 +123,61 @@ service_snapshot() {
 
 build_routes() {
   jq '
+    def valid_id:
+      (type == "number" and isfinite and floor == . and . >= 0 and . <= 99999999999999999999)
+      or (type == "string" and test("^[0-9]{1,20}$"));
+    def clean($fallback):
+      (tostring
+        | gsub("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]"; " ")
+        | gsub(" +"; " ") | sub("^ +"; "") | sub(" +$"; "") | .[:160])
+      | if length > 0 then . else $fallback end;
     def props: (.info.props // {});
-    [ .[]
+    [ .[:16384][]
       | select(.type == "PipeWire:Interface:Node")
+      | select(.id | valid_id)
       | {
-          id: .id,
+          id: (.id | tostring),
           class: (props["media.class"] // ""),
           internal: ((props["application.id"] // "") == "ssupt.audio-control"),
           # Media titles and raw node names can contain private content or
           # hardware identifiers. A route needs roles, not those identifiers.
-          label: ((props["application.name"] // props["node.description"]
-            // props["node.nick"]
-            // (if ((props["media.class"] // "") | startswith("Stream/"))
-              then "Audio application" else "Audio node" end)) | tostring)
+          label: (
+            if ((props["media.class"] // "") | startswith("Stream/")) then
+              (props["application.name"] // "Audio application")
+            else
+              (props["node.description"] // props["node.nick"] // "Audio node")
+            end
+            | clean("Audio node")
+          )
         }
-    ] as $nodes
-    | [ .[]
+    ][:4096] as $nodes
+    | [ .[:16384][]
         | select(.type == "PipeWire:Interface:Link"
           and (.info.state == "active" or .info.state == "paused"))
-        | { from: .info["output-node-id"], to: .info["input-node-id"] }
-      ] | unique_by([.from, .to]) as $links
+        | select((.info["output-node-id"] | valid_id)
+          and (.info["input-node-id"] | valid_id))
+        | {
+            from: (.info["output-node-id"] | tostring),
+            to: (.info["input-node-id"] | tostring)
+          }
+      ][:8192] | unique_by([.from, .to]) as $links
+    | (reduce $nodes[] as $node ({};
+        if has($node.id) then . else .[$node.id] = $node.label end)) as $labels
+    | def add_neighbour($key; $value):
+        (.[$key] // []) as $current
+        | if ($current | index($value)) != null or ($current | length) >= 16
+          then . else .[$key] = ($current + [$value]) end;
+      (reduce $links[] as $link ({ forward: {}, reverse: {} };
+        .forward |= add_neighbour($link.from; $link.to)
+        | .reverse |= add_neighbour($link.to; $link.from)
+      )) as $adjacency
     | def node_label($id):
-        first($nodes[] | select(.id == $id) | .label) // "Unavailable audio node";
+        $labels[$id] // "Unavailable audio node";
       def neighbours($id; $reverse):
         if $reverse then
-          [ $links[] | select(.to == $id) | .from ]
+          ($adjacency.reverse[$id] // [])
         else
-          [ $links[] | select(.from == $id) | .to ]
+          ($adjacency.forward[$id] // [])
         end;
       def walk($id; $reverse; $seen):
         if ($seen | index($id)) != null or ($seen | length) >= 15 then [$id]
@@ -146,16 +188,20 @@ build_routes() {
               | [$id] + walk($candidate; $reverse; $seen + [$id])
             end
         end;
-      ([ $nodes[]
-         | select(.class == "Stream/Output/Audio" and (.internal | not))
-         | .id as $start
-         | { direction: "playback", ids: walk($start; false; []) }
+      ([ [ $nodes[]
+           | select(.class == "Stream/Output/Audio" and (.internal | not))
+           | .id
+         ][:64][] as $start
+         | limit(8; walk($start; false; [])) as $path
+         | { direction: "playback", ids: $path }
        ]
        +
-       [ $nodes[]
-         | select(.class == "Stream/Input/Audio" and (.internal | not))
-         | .id as $start
-         | { direction: "recording", ids: walk($start; true; []) }
+       [ [ $nodes[]
+           | select(.class == "Stream/Input/Audio" and (.internal | not))
+           | .id
+         ][:64][] as $start
+         | limit(8; walk($start; true; [])) as $path
+         | { direction: "recording", ids: $path }
        ])
     | map(. + { labels: [ .ids[] | node_label(.) ] } | del(.ids))
     | map(select((.labels | length) > 1))
@@ -182,8 +228,10 @@ build_snapshot() {
     warn "Recording devices could not be inspected."
   }
   if $sinks_ok && $sources_ok &&
-      jq -e 'type == "array"' "$work_dir/sinks.json" >/dev/null 2>&1 &&
-      jq -e 'type == "array"' "$work_dir/sources.json" >/dev/null 2>&1; then
+      jq -e 'type == "array" and length <= 512' \
+        "$work_dir/sinks.json" >/dev/null 2>&1 &&
+      jq -e 'type == "array" and length <= 512' \
+        "$work_dir/sources.json" >/dev/null 2>&1; then
     endpoints_ok=true
   else
     printf '[]\n' >"$work_dir/sinks.json"
@@ -194,7 +242,8 @@ build_snapshot() {
   fi
   capture pactl-info.txt pactl info || :
   if capture dump.json pw-dump; then
-    if jq -e 'type == "array"' "$work_dir/dump.json" >/dev/null 2>&1; then
+    if jq -e 'type == "array" and length <= 16384' \
+        "$work_dir/dump.json" >/dev/null 2>&1; then
       dump_ok=true
     else
       printf '[]\n' >"$work_dir/dump.json"
@@ -219,25 +268,26 @@ build_snapshot() {
   configured_quantum=$(numeric_or_zero "$(metadata_value clock.quantum)")
 
   jq -r '
-    .[]
-    | select(.type == "PipeWire:Interface:Node")
-    | select(((.info.props["media.class"] // "") | contains("Audio")))
-    | .id
+    [ .[:16384][]
+      | select(.type == "PipeWire:Interface:Node")
+      | select(((.info.props["media.class"] // "") | contains("Audio")))
+      | .id
+    ][:4096][]
   ' "$work_dir/dump.json" 2>/dev/null >"$work_dir/audio-node-ids.txt" ||
     : >"$work_dir/audio-node-ids.txt"
 
   awk '
     BEGIN { load = -1; errors = 0; active = 0; rate = 0; quantum = 0; audioCount = 0 }
     FILENAME == ARGV[1] {
-      if ($1 ~ /^[0-9]+$/) { audio[$1] = 1; audioCount++ }
+      if (length($1) <= 12 && $1 ~ /^[0-9]+$/) { audio[$1] = 1; audioCount++ }
       next
     }
     FNR > 1 && $2 ~ /^[0-9]+$/ {
       if (audioCount > 0 && !($2 in audio)) next
       if ($1 ~ /^[RrTt]$/) active++
-      if ($7 ~ /^[0-9]+([.][0-9]+)?$/ && ($7 + 0) > load) load = $7 + 0
-      if ($9 ~ /^[0-9]+$/) errors += $9
-      if (rate == 0 && $1 ~ /^[RrTt]$/ && $3 ~ /^[1-9][0-9]*$/ && $4 ~ /^[1-9][0-9]*$/) {
+      if (length($7) <= 20 && $7 ~ /^[0-9]+([.][0-9]+)?$/ && ($7 + 0) > load) load = $7 + 0
+      if (length($9) <= 12 && $9 ~ /^[0-9]+$/) errors += $9
+      if (rate == 0 && $1 ~ /^[RrTt]$/ && length($3) <= 12 && length($4) <= 12 && $3 ~ /^[1-9][0-9]*$/ && $4 ~ /^[1-9][0-9]*$/) {
         quantum = $3 + 0
         rate = $4 + 0
       }
@@ -247,7 +297,11 @@ build_snapshot() {
     }
   ' "$work_dir/audio-node-ids.txt" "$work_dir/pw-top.txt" >"$work_dir/top.json"
 
-  if [[ -n $fixture_dir && -f $fixture_dir/services.json && ! -L $fixture_dir/services.json ]]; then
+  if [[ -n $fixture_dir && -f $fixture_dir/services.json && ! -L $fixture_dir/services.json ]] &&
+      (( $(stat -c %s -- "$fixture_dir/services.json" 2>/dev/null ||
+          printf '%s' "$((maximum_capture_bytes + 1))") <= 1048576 )) &&
+      jq -e 'type == "array" and length <= 8' \
+        "$fixture_dir/services.json" >/dev/null 2>&1; then
     cp -- "$fixture_dir/services.json" "$work_dir/services.json"
   else
     {
@@ -256,8 +310,32 @@ build_snapshot() {
       service_snapshot pipewire-pulse.service "PipeWire Pulse"
     } | jq -s '.' >"$work_dir/services.json"
   fi
-  jq -e 'type == "array"' "$work_dir/services.json" >/dev/null 2>&1 ||
+  jq -e 'type == "array" and length <= 8' \
+    "$work_dir/services.json" >/dev/null 2>&1 ||
     printf '[]\n' >"$work_dir/services.json"
+  jq '
+    def clean($fallback; $maximum):
+      (tostring
+        | gsub("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]"; " ")
+        | gsub(" +"; " ") | sub("^ +"; "") | sub(" +$"; "") | .[:$maximum])
+      | if length > 0 then . else $fallback end;
+    [ .[:8][]
+      | select(type == "object")
+      | ((.name // "") | clean(""; 80)) as $name
+      | select($name != "")
+      | {
+          name: $name,
+          label: ((.label // $name) | clean($name; 80)),
+          loadState: ((.loadState // "unknown") | clean("unknown"; 32)),
+          activeState: ((.activeState // "unknown") | clean("unknown"; 32)),
+          subState: ((.subState // "unknown") | clean("unknown"; 32)),
+          active: (.active == true),
+          restarts: (if (.restarts | type) == "number" and .restarts >= 0
+              and .restarts <= 1000000 then (.restarts | floor) else 0 end)
+        }
+    ]
+  ' "$work_dir/services.json" >"$work_dir/services-normalized.json"
+  mv -f -- "$work_dir/services-normalized.json" "$work_dir/services.json"
 
   if ! jq -e 'length == 3 and all(.[]; .active == true)' "$work_dir/services.json" >/dev/null; then
     warn "One or more audio services are not running normally."
@@ -265,65 +343,110 @@ build_snapshot() {
 
   default_sink=$(sed -n 's/^Default Sink:[[:space:]]*//p' "$work_dir/pactl-info.txt" | head -n 1)
   default_source=$(sed -n 's/^Default Source:[[:space:]]*//p' "$work_dir/pactl-info.txt" | head -n 1)
+  jq -ne --arg value "$default_sink" '
+    ($value | length) > 0 and ($value | length) <= 160
+    and ($value | test("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]") | not)
+  ' >/dev/null 2>&1 || default_sink=""
+  jq -ne --arg value "$default_source" '
+    ($value | length) > 0 and ($value | length) <= 160
+    and ($value | test("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]") | not)
+  ' >/dev/null 2>&1 || default_source=""
   if [[ -n $default_source ]] && jq -e --arg source "$default_source" '
-      any(.[]; .name == $source and ((.monitor_source // "") != ""
-        or (.properties["device.class"] // "") == "monitor"))
+      any(.[:512][]?;
+        type == "object" and .name == $source
+        and ((.monitor_source // "") != ""
+          or ((.properties | if type == "object" then . else {} end)
+            | (."device.class" // "")) == "monitor"))
     ' "$work_dir/sources.json" >/dev/null; then
     default_source=""
   fi
 
   jq --arg defaultSink "$default_sink" '
+    def clean($fallback; $maximum):
+      (tostring
+        | gsub("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]"; " ")
+        | gsub(" +"; " ") | sub("^ +"; "") | sub(" +$"; "") | .[:$maximum])
+      | if length > 0 then . else $fallback end;
+    def identifier:
+      if type == "string" and length > 0 and length <= 160
+          and (test("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]") | not)
+        then . else "" end;
     def channel_count:
       try ((.sample_specification // "")
         | capture("(?<count>[0-9]+)ch").count | tonumber) catch 0;
-    [ .[] | {
+    [ .[:512][]
+      | select(type == "object")
+      | . as $endpoint
+      | (($endpoint.name // "") | identifier) as $name
+      | select($name != "")
+      | ($endpoint.properties
+          | if type == "object" then . else {} end) as $properties
+      | {
         direction: "output",
-        name: ((.name // "") | tostring),
-        label: ((.description // .name // "Unknown output") | tostring),
-        state: ((.state // "unknown") | ascii_downcase),
-        format: ((.sample_specification // "") | tostring),
-        channelMap: ((.channel_map // "") | tostring),
-        channels: channel_count,
-        port: (if (.active_port | type) == "object"
-          then ((.active_port.description // .active_port.name // "") | tostring)
-          else ((.active_port // "") | tostring) end),
-        profile: ((.properties["device.profile.description"]
-          // .properties["device.profile.name"] // "") | tostring),
-        codec: ((.properties["bluetooth.codec"] // .properties["api.bluez5.codec"]
-          // .properties["bluez5.codec"] // "") | tostring),
-        bluetooth: ((.properties["device.bus"] // "") == "bluetooth"
-          or ((.name // "") | startswith("bluez_"))),
-        default: ((.name // "") == $defaultSink)
-      } ]
+        name: $name,
+        label: (($endpoint.description // $name) | clean($name; 160)),
+        state: (($endpoint.state // "unknown") | clean("unknown"; 32) | ascii_downcase),
+        format: (($endpoint.sample_specification // "") | clean(""; 96)),
+        channelMap: (($endpoint.channel_map // "") | clean(""; 240)),
+        channels: ($endpoint | channel_count),
+        port: (if ($endpoint.active_port | type) == "object"
+          then (($endpoint.active_port.description // $endpoint.active_port.name // "")
+            | clean(""; 160))
+          else (($endpoint.active_port // "") | clean(""; 160)) end),
+        profile: (($properties["device.profile.description"]
+          // $properties["device.profile.name"] // "") | clean(""; 160)),
+        codec: (($properties["bluetooth.codec"] // $properties["api.bluez5.codec"]
+          // $properties["bluez5.codec"] // "") | clean(""; 64)),
+        bluetooth: (($properties["device.bus"] // "") == "bluetooth"
+          or ($name | startswith("bluez_"))),
+        default: ($name == $defaultSink)
+      }
+    ][:64]
   ' "$work_dir/sinks.json" >"$work_dir/output-devices.json"
 
   jq --arg defaultSource "$default_source" '
+    def clean($fallback; $maximum):
+      (tostring
+        | gsub("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]"; " ")
+        | gsub(" +"; " ") | sub("^ +"; "") | sub(" +$"; "") | .[:$maximum])
+      | if length > 0 then . else $fallback end;
+    def identifier:
+      if type == "string" and length > 0 and length <= 160
+          and (test("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]") | not)
+        then . else "" end;
     def channel_count:
       try ((.sample_specification // "")
         | capture("(?<count>[0-9]+)ch").count | tonumber) catch 0;
-    [ .[]
-      | select((.monitor_source // "") == ""
-        and (.properties["device.class"] // "") != "monitor")
+    [ .[:512][]
+      | select(type == "object")
+      | . as $endpoint
+      | (($endpoint.name // "") | identifier) as $name
+      | select($name != "")
+      | ($endpoint.properties
+          | if type == "object" then . else {} end) as $properties
+      | select(($endpoint.monitor_source // "") == ""
+        and ($properties["device.class"] // "") != "monitor")
       | {
           direction: "input",
-          name: ((.name // "") | tostring),
-          label: ((.description // .name // "Unknown input") | tostring),
-          state: ((.state // "unknown") | ascii_downcase),
-          format: ((.sample_specification // "") | tostring),
-          channelMap: ((.channel_map // "") | tostring),
-          channels: channel_count,
-          port: (if (.active_port | type) == "object"
-            then ((.active_port.description // .active_port.name // "") | tostring)
-            else ((.active_port // "") | tostring) end),
-          profile: ((.properties["device.profile.description"]
-            // .properties["device.profile.name"] // "") | tostring),
-          codec: ((.properties["bluetooth.codec"] // .properties["api.bluez5.codec"]
-            // .properties["bluez5.codec"] // "") | tostring),
-          bluetooth: ((.properties["device.bus"] // "") == "bluetooth"
-            or ((.name // "") | startswith("bluez_"))),
-          default: ((.name // "") == $defaultSource)
+          name: $name,
+          label: (($endpoint.description // $name) | clean($name; 160)),
+          state: (($endpoint.state // "unknown") | clean("unknown"; 32) | ascii_downcase),
+          format: (($endpoint.sample_specification // "") | clean(""; 96)),
+          channelMap: (($endpoint.channel_map // "") | clean(""; 240)),
+          channels: ($endpoint | channel_count),
+          port: (if ($endpoint.active_port | type) == "object"
+            then (($endpoint.active_port.description // $endpoint.active_port.name // "")
+              | clean(""; 160))
+            else (($endpoint.active_port // "") | clean(""; 160)) end),
+          profile: (($properties["device.profile.description"]
+            // $properties["device.profile.name"] // "") | clean(""; 160)),
+          codec: (($properties["bluetooth.codec"] // $properties["api.bluez5.codec"]
+            // $properties["bluez5.codec"] // "") | clean(""; 64)),
+          bluetooth: (($properties["device.bus"] // "") == "bluetooth"
+            or ($name | startswith("bluez_"))),
+          default: ($name == $defaultSource)
         }
-    ]
+    ][:64]
   ' "$work_dir/sources.json" >"$work_dir/input-devices.json"
 
   jq -s 'add | sort_by(.direction, (.default | not), (.label | ascii_downcase))' \
@@ -372,7 +495,10 @@ build_snapshot() {
           generatedAt: $generatedAt,
           healthy: (($services[0] | length) == 3
             and all($services[0][]; .active == true)
-            and $endpointsAvailable),
+            and $endpointsAvailable
+            and ($metadataAvailable or $topAvailable)
+            and $defaultOutput != ""
+            and ($stats.errors // 0) == 0),
           versions: {
             plugin: $pluginVersion,
             pipewire: $pipewireVersion,
@@ -407,40 +533,64 @@ build_snapshot() {
 }
 
 print_report() {
-  jq -r '
+  local report_user report_host
+  report_user=${USER:-${LOGNAME:-}}
+  report_host=${HOSTNAME:-}
+  [[ -n $report_host ]] || report_host=$(hostname 2>/dev/null || true)
+  report_user=${report_user:0:256}
+  report_host=${report_host:0:256}
+
+  jq -r --arg reportUser "$report_user" --arg reportHost "$report_host" '
     def shown($value): if ($value // "") == "" then "unknown" else $value end;
+    def redact_literal($needle; $replacement):
+      if ($needle | length) == 0 then .
+      elif . == $needle then $replacement
+      elif ($needle | length) >= 3 then split($needle) | join($replacement)
+      else . end;
     def safe: tostring
-      | gsub("([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}"; "[redacted-address]");
+      | gsub("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]"; " ")
+      | gsub(" +"; " ")
+      | redact_literal($reportUser; "[redacted-user]")
+      | redact_literal($reportHost; "[redacted-host]")
+      | gsub("(?i)([0-9a-f]{2}[:_-]){5}[0-9a-f]{2}"; "[redacted-address]")
+      | gsub("(?i)[0-9a-f]{12}"; "[redacted-address]")
+      | .[0:240];
     def load:
       if .graph.loadPercent >= 0 then ((.graph.loadPercent * 10 | round) / 10 | tostring) + "%"
       else "idle/unavailable" end;
     [
       "Advanced Audio Control support report",
-      "Generated: " + shown(.generatedAt),
+      "Generated: " + (shown(.generatedAt) | safe),
       "",
       "Versions",
-      "  Advanced Audio Control: " + shown(.versions.plugin),
-      "  PipeWire: " + shown(.versions.pipewire),
-      "  WirePlumber: " + shown(.versions.wireplumber),
+      "  Advanced Audio Control: " + (shown(.versions.plugin) | safe),
+      "  PipeWire: " + (shown(.versions.pipewire) | safe),
+      "  WirePlumber: " + (shown(.versions.wireplumber) | safe),
       "",
       "Graph",
       "  Health: " + (if .healthy then "healthy" else "attention required" end),
-      "  Rate / quantum (" + .graph.source + "): " + (.graph.rate | tostring)
+      "  Rate / quantum (" + (.graph.source | safe) + "): " + (.graph.rate | tostring)
         + " Hz / " + (.graph.quantum | tostring),
       "  Scheduling latency: " + (.graph.latencyMs | tostring) + " ms",
       "  Peak DSP load: " + load,
       "  XRUNs/errors: " + (.graph.errors | tostring),
       "",
       "Services",
-      (.services[]? | "  " + .label + ": " + .activeState + "/" + .subState
+      (.services[]? | "  " + (.label | safe) + ": " + (.activeState | safe)
+        + "/" + (.subState | safe)
         + " (restarts " + (.restarts | tostring) + ")"),
       "",
       "Devices",
-      (.devices[]? | "  " + (if .direction == "output" then "Output" else "Input" end)
-        + (if .default then " [default]" else "" end) + ": " + (.label | safe)
-        + " · " + shown(.format) + " · " + shown(.channelMap)
-        + (if .profile != "" then " · " + .profile else "" end)
-        + (if .codec != "" then " · codec " + .codec else "" end)),
+      (.devices[]? as $device
+        | "  " + (if $device.direction == "output" then "Output" else "Input" end)
+        + (if $device.default then " [default]" else "" end) + ": "
+        + (if $device.label == $device.name
+            or ($device.name != "" and ($device.label | contains($device.name))) then
+            (if $device.direction == "output" then "Unnamed output device" else "Unnamed input device" end)
+          else ($device.label | safe) end)
+        + " · " + (shown($device.format) | safe) + " · " + (shown($device.channelMap) | safe)
+        + (if $device.profile != "" then " · " + ($device.profile | safe) else "" end)
+        + (if $device.codec != "" then " · codec " + ($device.codec | safe) else "" end)),
       "",
       "Active routes",
       (if (.routes | length) == 0 then "  None reported"
@@ -448,7 +598,7 @@ print_report() {
       "",
       "Warnings",
       (if (.warnings | length) == 0 then "  None"
-        else (.warnings[] | "  " + .) end),
+        else (.warnings[] | "  " + (. | safe)) end),
       "",
       "This report omits logs, usernames, hostnames, configuration files and internal device identifiers."
     ] | .[]

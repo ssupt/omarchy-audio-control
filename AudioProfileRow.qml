@@ -11,6 +11,7 @@ CursorSurface {
   required property var options
   required property bool menuEnabled
   property string fontFamily: Style.font.family
+  property bool menuReportedOpen: false
 
   signal cursorRequested()
   signal profileSelected(string profile)
@@ -22,8 +23,14 @@ CursorSurface {
 
   function toggleProfileMenu() { if (profileDropdown.enabled) profileDropdown.toggle() }
   function closeProfileMenu() { profileDropdown.close() }
+  function reportMenu(open) {
+    var next = open === true
+    if (menuReportedOpen === next) return
+    menuReportedOpen = next
+    menuToggled(next)
+  }
 
-  Component.onDestruction: if (profileDropdown.popupOpen) root.menuToggled(false)
+  Component.onDestruction: root.reportMenu(false)
 
   Row {
     anchors.left: parent.left
@@ -76,7 +83,7 @@ CursorSurface {
 
       onHovered: function(on) { if (on) root.cursorRequested() }
       onChanged: function(profile) { root.profileSelected(profile) }
-      onPopupOpenChanged: root.menuToggled(popupOpen)
+      onPopupOpenChanged: root.reportMenu(popupOpen)
     }
   }
 }

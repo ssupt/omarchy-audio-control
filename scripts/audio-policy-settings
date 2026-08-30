@@ -6,6 +6,9 @@
 
 set -euo pipefail
 
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$script_dir/.audio-common"
+
 readonly boolean_settings=(
   node.features.audio.mono
   linking.pause-playback
@@ -40,24 +43,38 @@ setting_kind() {
 
 read_raw_setting() {
   local setting=$1 output
-  output=$(wpctl settings "$setting" 2>/dev/null) || return 1
+  audio_capture_bounded output 65536 timeout 3 wpctl settings "$setting" || return 1
   awk '
-    $1 == "Value:" { print $2; found=1; exit }
-    END { if (!found) exit 1 }
+    $1 == "Value:" { count++; value=$2 }
+    END {
+      if (count != 1) exit 1
+      print value
+    }
   ' <<<"$output"
 }
 
+values_equal() {
+  local kind=$1 actual=$2 expected=$3
+  if [[ $kind == boolean ]]; then
+    [[ $actual == "$expected" ]]
+  else
+    jq -ne --arg actual "$actual" --arg expected "$expected" '
+      (($actual | tonumber) - ($expected | tonumber) | fabs) < 0.000001
+    ' >/dev/null 2>&1
+  fi
+}
+
 snapshot() {
-  local result='{}' setting kind raw display
+  local result='{}' setting kind raw display successful_reads=0
 
   for setting in "${boolean_settings[@]}" "${volume_settings[@]}"; do
     kind=$(setting_kind "$setting")
     raw=$(read_raw_setting "$setting") || continue
-
     if [[ $kind == boolean ]]; then
       [[ $raw == true || $raw == false ]] || continue
       result=$(jq -c --arg key "$setting" --argjson value "$raw" \
         '. + {($key): $value}' <<<"$result")
+      successful_reads=$((successful_reads + 1))
       continue
     fi
 
@@ -68,15 +85,26 @@ snapshot() {
     ') || continue
     result=$(jq -c --arg key "$setting" --argjson value "$display" \
       '. + {($key): $value}' <<<"$result")
+    successful_reads=$((successful_reads + 1))
   done
 
+  if (( successful_reads == 0 )); then
+    echo "Could not read any supported audio policy" >&2
+    return 1
+  fi
   printf '%s\n' "$result"
 }
 
 action=${1:-show}
+command -v wpctl >/dev/null 2>&1 || {
+  echo "wpctl is required to manage audio policies" >&2
+  exit 1
+}
+audio_prepare_private_runtime || exit 1
 case "$action" in
   show)
     (( $# <= 1 )) || usage
+    audio_acquire_settings_lock || exit 1
     snapshot
     ;;
   set)
@@ -85,17 +113,29 @@ case "$action" in
     value=$3
     kind=$(setting_kind "$setting") || usage
 
+    audio_acquire_settings_lock || exit 1
+
     # Query first so unsupported settings remain hidden and cannot be created
     # accidentally on WirePlumber versions that do not provide them.
-    read_raw_setting "$setting" >/dev/null || {
+    old_value=$(read_raw_setting "$setting") || {
       echo "Unsupported audio policy: $setting" >&2
       exit 1
     }
 
     if [[ $kind == boolean ]]; then
+      [[ $old_value == true || $old_value == false ]] || {
+        echo "Audio policy returned an invalid current value" >&2
+        exit 1
+      }
       [[ $value == true || $value == false ]] || usage
       wireplumber_value=$value
     else
+      jq -ne --arg value "$old_value" '
+        ($value | tonumber) as $number | $number >= 0 and $number <= 1
+      ' >/dev/null 2>&1 || {
+        echo "Audio policy returned an invalid current value" >&2
+        exit 1
+      }
       wireplumber_value=$(jq -ner --arg value "$value" '
         ($value | tonumber) as $linear
         | select($linear >= 0 and $linear <= 1)
@@ -103,7 +143,26 @@ case "$action" in
       ') || usage
     fi
 
-    wpctl settings --save "$setting" "$wireplumber_value" >/dev/null
+    if values_equal "$kind" "$old_value" "$wireplumber_value"; then
+      snapshot
+      exit 0
+    fi
+
+    timeout 3 wpctl settings --save "$setting" "$wireplumber_value" >/dev/null || true
+    confirmed_value=$(read_raw_setting "$setting") || confirmed_value=
+    if ! values_equal "$kind" "$confirmed_value" "$wireplumber_value"; then
+      if values_equal "$kind" "$confirmed_value" "$old_value"; then
+        echo "Audio policy change was not applied" >&2
+        exit 1
+      fi
+      rollback_complete=false
+      timeout 3 wpctl settings --save "$setting" "$old_value" >/dev/null 2>&1 || true
+      restored_value=$(read_raw_setting "$setting") || restored_value=
+      values_equal "$kind" "$restored_value" "$old_value" && rollback_complete=true
+      echo "Audio policy change could not be verified" >&2
+      [[ $rollback_complete == true ]] || exit 4
+      exit 1
+    fi
     snapshot
     ;;
   *) usage ;;

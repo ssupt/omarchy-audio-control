@@ -34,7 +34,8 @@ Column {
     if (index === 0) controller.refresh()
     else if (index === 1) controller.toggleSpeakerTest()
     else if (index === 2) controller.copySupportReport()
-    else if (index === 3 && snapshot.capabilities.recovery) recoveryRequested()
+    else if (index === 3 && snapshot.capabilities.recovery
+        && !controller.mutationBlocked && !controller.busy) recoveryRequested()
   }
 
   function graphDescription() {
@@ -121,7 +122,7 @@ Column {
             Text {
               width: parent.width
               text: root.controller.refreshing ? "Checking audio services…"
-                : (root.snapshot.healthy ? "Audio services are healthy" : "Audio needs attention")
+                : (root.snapshot.healthy ? "Audio system is healthy" : "Audio needs attention")
               color: root.snapshot.healthy ? root.foreground : root.urgent
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
@@ -362,6 +363,8 @@ Column {
         : "Recheck services, graph statistics, devices, formats, and routes."
       icon: "󰑐"
       busy: root.controller.refreshing
+      actionEnabled: !root.controller.copying && !root.controller.speakerTesting
+        && !root.controller.recovering
       hasCursor: root.tabActive && root.cursorActive && root.selectedIndex === 0
       foreground: root.foreground
       fill: root.fill
@@ -384,7 +387,9 @@ Column {
             + " at a conservative level."
           : "No testable default output or speaker-test command is available.")
       icon: root.controller.speakerTesting ? "󰓛" : "󰓃"
-      actionEnabled: root.controller.speakerTesting || root.snapshot.capabilities.speakerTest
+      actionEnabled: root.controller.speakerTesting
+        || (root.snapshot.capabilities.speakerTest
+          && !root.controller.mutationBlocked && !root.controller.busy)
       hasCursor: root.tabActive && root.cursorActive && root.selectedIndex === 1
       foreground: root.foreground
       fill: root.fill
@@ -405,7 +410,8 @@ Column {
       icon: "󰆏"
       busy: root.controller.copying
       actionEnabled: root.snapshot.capabilities.supportReport
-        && root.snapshot.capabilities.clipboard
+        && root.snapshot.capabilities.clipboard && !root.controller.refreshing
+        && !root.controller.speakerTesting && !root.controller.recovering
       hasCursor: root.tabActive && root.cursorActive && root.selectedIndex === 2
       foreground: root.foreground
       fill: root.fill
@@ -424,6 +430,7 @@ Column {
         : "Omarchy's recovery command or terminal launcher is not available."
       icon: "󰑓"
       actionEnabled: root.snapshot.capabilities.recovery
+        && !root.controller.mutationBlocked && !root.controller.busy
       urgentAction: true
       hasCursor: root.tabActive && root.cursorActive && root.selectedIndex === 3
       foreground: root.foreground
