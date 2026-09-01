@@ -74,8 +74,12 @@ if jq -c --argjson explicit "$explicit_targets" '
       else ($entries[:512] | map(del(.object)) | from_entries) end;
 
   if type != "object" then error("expected a route object") else . end
-  | (bounded_array("sink_inputs"; 2048)) as $sinkInputs
-  | (bounded_array("source_outputs"; 2048)) as $sourceOutputs
+  | (bounded_array("sink_inputs"; 2048)) as $allSinkInputs
+  | (bounded_array("source_outputs"; 2048)) as $allSourceOutputs
+  # Module-owned loopback/combine streams are implementation details, not
+  # applications. They must never appear in the mixer or accept manual routes.
+  | [$allSinkInputs[] | select(.owner_module == null)] as $sinkInputs
+  | [$allSourceOutputs[] | select(.owner_module == null)] as $sourceOutputs
   | {
       playback: routes($sinkInputs; "sink"),
       recording: routes($sourceOutputs; "source")

@@ -180,6 +180,7 @@ if [[ -n $old_sink_index && $old_sink_name != "$sink_name" ]]; then
   input_rows=$(jq -r --arg sink "$old_sink_index" '
     if type != "array" or length > 1024 then error("invalid stream list") else . end
     | [.[]
+      | select(.owner_module == null)
       | select((.sink | tostring) == $sink)
       | select((.properties."application.name" // "") != "EasyEffects")
     ] as $streams

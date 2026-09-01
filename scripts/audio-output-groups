@@ -1,0 +1,571 @@
+#!/bin/bash
+
+# omarchy:summary=Create and reconcile named multi-output audio groups
+# omarchy:group=audio
+# omarchy:args=[reconcile | create <name> <members-json> | update <id> <name> <members-json> | delete <id> | show]
+
+set -u -o pipefail
+LC_ALL=C
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=.audio-common
+source "$script_dir/.audio-common"
+
+action=${1:-reconcile}
+rules_helper=$script_dir/audio-app-rules
+group_prefix=omarchy_audio_group_
+owner_id=ssupt.audio-control
+
+usage() {
+  echo "Usage: audio-output-groups [reconcile | show]" >&2
+  echo "       audio-output-groups create <name> <members-json>" >&2
+  echo "       audio-output-groups update <id> <name> <members-json>" >&2
+  echo "       audio-output-groups delete <id>" >&2
+  exit 1
+}
+
+rules_show() {
+  /bin/bash "$rules_helper" show
+}
+
+normalize_name() {
+  local value=${1:-}
+  jq -ner --arg value "$value" '
+    $value
+    | gsub("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]"; " ")
+    | gsub(" +"; " ")
+    | sub("^ +"; "") | sub(" +$"; "")
+    | .[0:48]
+    | select(length > 0)
+  '
+}
+
+normalize_members() {
+  jq -cer '
+    if type != "array" or length < 2 or length > 8
+      or (all(.[];
+        type == "string"
+        and length > 0 and length <= 160
+        and test("^[A-Za-z0-9_.:-]{1,160}$")
+        and (test("^omarchy_audio_group_[0-9a-f]{16}$") | not)) | not)
+      then error("invalid output group members")
+      else unique | sort
+      | if length < 2 or length > 8
+          then error("duplicate output group members") else . end
+    end
+  ' <<<"${1:-}"
+}
+
+new_group_id() {
+  local rules=$1 id attempt existing
+  for (( attempt = 0; attempt < 16; attempt++ )); do
+    id=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n') || return 1
+    [[ $id =~ ^[0-9a-f]{16}$ ]] || continue
+    existing=$(jq -r --arg id "$id" '[.outputGroups[]? | select(.id == $id)] | length' \
+      <<<"$rules") || return 1
+    if [[ $existing == 0 ]]; then
+      printf '%s\n' "$id"
+      return 0
+    fi
+  done
+  return 1
+}
+
+valid_group_id() {
+  [[ ${1:-} =~ ^[0-9a-f]{16}$ ]]
+}
+
+read_sinks() {
+  audio_capture_bounded AUDIO_GROUP_SINKS 16777216 \
+    timeout 3 pactl -f json list sinks
+}
+
+read_modules() {
+  audio_capture_bounded AUDIO_GROUP_MODULES 8388608 \
+    timeout 3 pactl -f json list modules
+}
+
+owned_sink_record() {
+  local id=$1 sink=$2
+  read_sinks || return 1
+  jq -er --arg id "$id" --arg sink "$sink" --arg owner "$owner_id" '
+    if type != "array" or length > 512 then error("invalid sink list") else . end
+    | [.[] | select(.name == $sink)] as $matches
+    | if ($matches | length) == 0 then "__absent__"
+      elif ($matches | length) != 1 then error("ambiguous group sink")
+      else ($matches[0]) as $match
+        | ($match.properties // {}) as $properties
+        | (($properties."application.id" // "") | tostring) as $application
+        | (($properties."omarchy.audio.group.id" // "") | tostring) as $group
+        | (($properties."node.virtual" // "") | tostring | ascii_downcase) as $virtual
+        | (($match.owner_module // "") | tostring) as $module
+        | (($properties."pulse.module.id" // "") | tostring) as $pulseModule
+        | if (($application == $owner and $group == $id)
+              or ($application == "" and $group == ""
+                and (($match.description // "") == "Omarchy_Output_Group"))) | not
+            or ($virtual != "true" and $virtual != "1")
+            or (($match.index | tostring) | test("^[0-9]{1,20}$") | not)
+            or ($module | test("^[0-9]{1,20}$") | not)
+            or $pulseModule != $module
+          then error("group sink is not plugin-owned")
+          else [($match.index | tostring), $module] | @tsv
+          end
+      end
+  ' <<<"$AUDIO_GROUP_SINKS" 2>/dev/null
+}
+
+owned_sink_index() {
+  local record
+  record=$(owned_sink_record "$1" "$2") || return 1
+  if [[ $record == __absent__ ]]; then
+    printf '%s\n' "$record"
+  else
+    printf '%s\n' "${record%%$'\t'*}"
+  fi
+}
+
+owned_sink_module_id() {
+  local record
+  record=$(owned_sink_record "$1" "$2") || return 1
+  if [[ $record == __absent__ ]]; then
+    printf '%s\n' "$record"
+  else
+    printf '%s\n' "${record#*$'\t'}"
+  fi
+}
+
+owned_module_match_count() {
+  local id=$1 sink=$2
+  read_modules || return 1
+  jq -er --arg id "$id" --arg sink "$sink" --arg owner "$owner_id" '
+    if type != "array" or length > 1024 then error("invalid module list") else . end
+    | [.[]
+      | select(.name == "module-combine-sink")
+      | (.argument // "" | tostring) as $argument
+      | select($argument | contains("sink_name=" + $sink))
+      | select($argument | contains("application.id=" + $owner))
+      | select($argument | contains("omarchy.audio.group.id=" + $id))
+    ] | length
+  ' <<<"$AUDIO_GROUP_MODULES" 2>/dev/null
+}
+
+owned_module_index() {
+  local id=$1 sink=$2 count module_id
+  count=$(owned_module_match_count "$id" "$sink") || return 1
+  if [[ $count == 0 ]]; then
+    printf '%s\n' __absent__
+    return 0
+  fi
+  [[ $count == 1 ]] || return 1
+  module_id=$(owned_sink_module_id "$id" "$sink") || return 1
+  [[ $module_id != __absent__ ]] || return 1
+  printf '%s\n' "$module_id"
+}
+
+module_id_is_owned() {
+  local module_id=$1 id=$2 sink=$3 count observed
+  count=$(owned_module_match_count "$id" "$sink") || return 1
+  [[ $count == 1 ]] || return 1
+  observed=$(owned_sink_module_id "$id" "$sink") || return 1
+  [[ $observed == "$module_id" ]]
+}
+
+group_live_state() {
+  local id=$1 sink=$2 sink_index module_index
+  sink_index=$(owned_sink_index "$id" "$sink") || return 2
+  module_index=$(owned_module_index "$id" "$sink") || return 2
+  if [[ $sink_index == __absent__ && $module_index == __absent__ ]]; then
+    return 1
+  fi
+  [[ $sink_index != __absent__ && $module_index != __absent__ ]] || return 2
+  return 0
+}
+
+members_are_live() {
+  local members=$1 status
+  read_sinks || return 1
+  jq -e --argjson members "$members" --arg owner "$owner_id" '
+    if type != "array" or length > 512 then error("invalid sink list") else . end
+    | . as $sinks
+    | all($members[];
+        . as $member
+        | ([$sinks[] | select(.name == $member)] | length) == 1
+          and ([$sinks[] | select(.name == $member)][0]
+            | ((.properties."application.id" // "") != $owner)
+              and (.name | test("^omarchy_audio_group_[0-9a-f]{16}$") | not)
+              and (((.properties."node.virtual" // "") | tostring | ascii_downcase)
+                | . != "true" and . != "1")
+              and (((.properties."device.class" // "") | tostring | ascii_downcase)
+                | . != "filter" and . != "monitor")
+              and (((.properties."factory.name" // "") | tostring | ascii_downcase)
+                | contains("null-audio-sink") | not)
+              and (((.properties."factory.name" // "") | tostring | ascii_downcase)
+                | contains("filter-chain") | not)))
+  ' <<<"$AUDIO_GROUP_SINKS" >/dev/null 2>&1
+  status=$?
+  (( status == 0 )) && return 0
+  # jq uses 1 for a valid false result and a different status for malformed
+  # input. Keep a disconnected endpoint distinct from an unsafe graph read.
+  (( status == 1 )) && return 3
+  return 1
+}
+
+load_group() {
+  local id=$1 sink=$2 members=$3 members_csv module_output module_id
+  local sink_index module_index attempt member_status
+
+  sink_index=$(owned_sink_index "$id" "$sink") || return 1
+  module_index=$(owned_module_index "$id" "$sink") || return 1
+  if [[ $sink_index != __absent__ || $module_index != __absent__ ]]; then
+    [[ $sink_index != __absent__ && $module_index != __absent__ ]] || {
+      echo "Output group ownership could not be verified" >&2
+      return 1
+    }
+    return 0
+  fi
+
+  members_are_live "$members"
+  member_status=$?
+  if (( member_status != 0 )); then
+    if (( member_status == 3 )); then
+      echo "Every output in the group must be connected" >&2
+      return 3
+    fi
+    echo "Output group members could not be inspected safely" >&2
+    return 1
+  fi
+  members_csv=$(jq -r 'join(",")' <<<"$members") || return 1
+  module_output=$(timeout 4 pactl load-module module-combine-sink \
+    "sink_name=$sink" \
+    "sinks=$members_csv" \
+    "sink_properties=\"device.description=Omarchy_Output_Group application.id=$owner_id node.virtual=true omarchy.audio.group.id=$id\"" \
+    latency_compensate=true 2>/dev/null) || {
+      echo "PipeWire could not create the output group" >&2
+      return 1
+    }
+  module_id=${module_output//$'\n'/}
+  [[ $module_id =~ ^[0-9]{1,20}$ ]] || {
+    echo "PipeWire returned an invalid module identity" >&2
+    return 1
+  }
+  for (( attempt = 0; attempt < 20; attempt++ )); do
+    if module_id_is_owned "$module_id" "$id" "$sink"; then
+      return 0
+    fi
+    sleep 0.05
+  done
+
+  # The numeric identity came directly from this load request, so it remains
+  # the only safe rollback handle when the sink never becomes inspectable.
+  timeout 3 pactl unload-module "$module_id" >/dev/null 2>&1 || true
+  echo "The new output group did not appear" >&2
+  return 1
+}
+
+group_in_use() {
+  local sink=$1 sink_index=$2 default_sink inputs
+  audio_capture_bounded default_sink 1024 timeout 3 pactl get-default-sink || return 1
+  [[ $default_sink != "$sink" ]] || return 3
+  audio_capture_bounded inputs 16777216 \
+    timeout 3 pactl -f json list sink-inputs || return 1
+  jq -e --arg sink "$sink_index" '
+    if type != "array" or length > 2048 then error("invalid stream list") else . end
+    | any(.[]; ((.sink // "") | tostring) == $sink) | not
+  ' <<<"$inputs" >/dev/null 2>&1 || return 3
+  return 0
+}
+
+unload_group() {
+  local id=$1 sink=$2 sink_index module_index use_status
+  sink_index=$(owned_sink_index "$id" "$sink") || return 1
+  module_index=$(owned_module_index "$id" "$sink") || return 1
+  if [[ $sink_index == __absent__ && $module_index == __absent__ ]]; then
+    return 0
+  fi
+  [[ $sink_index != __absent__ && $module_index != __absent__ ]] || {
+    echo "Output group ownership could not be verified" >&2
+    return 1
+  }
+
+  group_in_use "$sink" "$sink_index"
+  use_status=$?
+  if (( use_status != 0 )); then
+    if (( use_status == 3 )); then
+      echo "Switch applications and the default output away from this group first" >&2
+      return 3
+    fi
+    echo "Output group use could not be inspected safely" >&2
+    return 1
+  fi
+
+  timeout 3 pactl unload-module "$module_index" >/dev/null 2>&1 || {
+    echo "PipeWire could not remove the output group" >&2
+    return 1
+  }
+  sink_index=$(owned_sink_index "$id" "$sink") || return 1
+  module_index=$(owned_module_index "$id" "$sink") || return 1
+  [[ $sink_index == __absent__ && $module_index == __absent__ ]] || {
+    echo "The output group remained after removal" >&2
+    return 1
+  }
+}
+
+group_record() {
+  local rules=$1 id=$2
+  jq -cer --arg id "$id" '
+    [.outputGroups[]? | select(.id == $id)] as $matches
+    | if ($matches | length) == 1 then $matches[0]
+      else error("unknown or ambiguous output group") end
+  ' <<<"$rules"
+}
+
+definition_conflicts() {
+  local rules=$1 id=$2 name=$3 members=$4
+  jq -e --arg id "$id" --arg name "$name" --argjson members "$members" '
+    ($name | ascii_downcase) as $nameKey
+    | any(.outputGroups[]?;
+        .id != $id and (((.name | ascii_downcase) == $nameKey) or .members == $members))
+  ' <<<"$rules" >/dev/null 2>&1
+}
+
+store_group() {
+  /bin/bash "$rules_helper" set-output-group "$1" "$2" "$3"
+}
+
+delete_stored_group() {
+  /bin/bash "$rules_helper" del-output-group "$1"
+}
+
+create_group() {
+  local name members id sink rules group_count was_live=false rollback_status
+  name=$(normalize_name "${1:-}") || usage
+  members=$(normalize_members "${2:-}") || usage
+  rules=$(rules_show) || return 1
+  group_count=$(jq -er '.outputGroups | length' <<<"$rules") || return 1
+  if (( group_count >= 16 )); then
+    echo "Up to 16 output groups can be stored" >&2
+    return 1
+  fi
+  id=$(new_group_id "$rules") || return 1
+  sink=$group_prefix$id
+  if definition_conflicts "$rules" "$id" "$name" "$members"; then
+    echo "An output group already uses that name or device set" >&2
+    return 1
+  fi
+
+  group_live_state "$id" "$sink"
+  case $? in
+    0) was_live=true ;;
+    1) ;;
+    *) echo "Output group ownership could not be verified" >&2; return 1 ;;
+  esac
+  load_group "$id" "$sink" "$members" || return $?
+  if store_group "$id" "$name" "$members"; then
+    printf '%s\n' "$id"
+    return 0
+  fi
+
+  if [[ $was_live == false ]]; then
+    unload_group "$id" "$sink"
+    rollback_status=$?
+    (( rollback_status == 0 )) || return 4
+  fi
+  return 1
+}
+
+update_group() {
+  local id=$1 name members rules record sink old_members was_live=false
+  local status rollback_complete=true
+  valid_group_id "$id" || usage
+  name=$(normalize_name "${2:-}") || usage
+  members=$(normalize_members "${3:-}") || usage
+  rules=$(rules_show) || return 1
+  record=$(group_record "$rules" "$id") || {
+    echo "That output group no longer exists" >&2
+    return 3
+  }
+  sink=$(jq -r '.sink' <<<"$record")
+  old_members=$(jq -c '.members' <<<"$record")
+  if definition_conflicts "$rules" "$id" "$name" "$members"; then
+    echo "An output group already uses that name or device set" >&2
+    return 1
+  fi
+
+  if [[ $members == "$old_members" ]]; then
+    load_group "$id" "$sink" "$members" || return $?
+    store_group "$id" "$name" "$members"
+    return $?
+  fi
+  members_are_live "$members"
+  status=$?
+  if (( status != 0 )); then
+    if (( status == 3 )); then
+      echo "Every output in the group must be connected" >&2
+      return 3
+    fi
+    echo "Output group members could not be inspected safely" >&2
+    return 1
+  fi
+
+  group_live_state "$id" "$sink"
+  case $? in
+    0) was_live=true ;;
+    1) ;;
+    *) echo "Output group ownership could not be verified" >&2; return 1 ;;
+  esac
+  if [[ $was_live == true ]]; then
+    unload_group "$id" "$sink"
+    status=$?
+    (( status == 0 )) || return "$status"
+  fi
+  load_group "$id" "$sink" "$members"
+  status=$?
+  if (( status != 0 )); then
+    if [[ $was_live == true ]]; then
+      load_group "$id" "$sink" "$old_members" || rollback_complete=false
+    fi
+    [[ $rollback_complete == true ]] && return 1
+    return 4
+  fi
+  if store_group "$id" "$name" "$members"; then
+    return 0
+  fi
+
+  unload_group "$id" "$sink" || rollback_complete=false
+  if [[ $was_live == true ]]; then
+    load_group "$id" "$sink" "$old_members" || rollback_complete=false
+  fi
+  [[ $rollback_complete == true ]] && return 1
+  return 4
+}
+
+delete_group() {
+  local id=$1 rules record sink members was_live=false status rollback_complete=true
+  valid_group_id "$id" || usage
+  rules=$(rules_show) || return 1
+  record=$(group_record "$rules" "$id") || {
+    echo "That output group no longer exists" >&2
+    return 3
+  }
+  sink=$(jq -r '.sink' <<<"$record")
+  members=$(jq -c '.members' <<<"$record")
+  if jq -e --arg sink "$sink" 'any(.appRules[]?; .target == $sink)' \
+      <<<"$rules" >/dev/null 2>&1; then
+    echo "Remove application rules using this output group first" >&2
+    return 3
+  fi
+
+  group_live_state "$id" "$sink"
+  case $? in
+    0) was_live=true ;;
+    1) ;;
+    *) echo "Output group ownership could not be verified" >&2; return 1 ;;
+  esac
+  if [[ $was_live == true ]]; then
+    unload_group "$id" "$sink"
+    status=$?
+    (( status == 0 )) || return "$status"
+  fi
+  if delete_stored_group "$id"; then
+    return 0
+  fi
+  if [[ $was_live == true ]]; then
+    load_group "$id" "$sink" "$members" || rollback_complete=false
+  fi
+  [[ $rollback_complete == true ]] && return 1
+  return 4
+}
+
+reconcile_groups() {
+  local rules row id sink members module_rows argument stale_id stale_sink status
+  local failed=false
+  local -a rows
+  rules=$(rules_show) || return 1
+  mapfile -t rows < <(jq -c '.outputGroups[]?' <<<"$rules") || return 1
+  for row in "${rows[@]}"; do
+    id=$(jq -r '.id' <<<"$row")
+    sink=$(jq -r '.sink' <<<"$row")
+    members=$(jq -c '.members' <<<"$row")
+    members_are_live "$members"
+    status=$?
+    if (( status == 0 )); then
+      load_group "$id" "$sink" "$members" || failed=true
+    elif (( status == 3 )); then
+      # An unused degraded group is safer absent: it cannot be selected by a
+      # client that bypasses the plugin, and reconnecting every member will
+      # recreate it on the next reconciliation. Never interrupt a current
+      # default or a group with active streams.
+      unload_group "$id" "$sink"
+      status=$?
+      (( status == 0 || status == 3 )) || failed=true
+    else
+      failed=true
+    fi
+  done
+
+  read_modules || return 1
+  module_rows=$(jq -r --arg owner "$owner_id" '
+    if type != "array" or length > 1024 then error("invalid module list") else . end
+    | .[]
+    | select(.name == "module-combine-sink")
+    | (.argument // "" | tostring) as $argument
+    | select($argument | contains("application.id=" + $owner))
+    | $argument
+  ' <<<"$AUDIO_GROUP_MODULES") || return 1
+  while IFS= read -r argument; do
+    [[ -n $argument ]] || continue
+    if [[ $argument =~ omarchy\.audio\.group\.id=([0-9a-f]{16}) ]]; then
+      stale_id=${BASH_REMATCH[1]}
+    else
+      continue
+    fi
+    stale_sink=$group_prefix$stale_id
+    [[ $argument == *"sink_name=$stale_sink"* ]] || continue
+    if jq -e --arg id "$stale_id" 'any(.outputGroups[]?; .id == $id)' \
+        <<<"$rules" >/dev/null 2>&1; then
+      continue
+    fi
+    unload_group "$stale_id" "$stale_sink"
+    status=$?
+    (( status == 0 || status == 3 )) || failed=true
+  done <<<"$module_rows"
+
+  [[ $failed == false ]]
+}
+
+case "$action" in
+  show)
+    (( $# == 1 )) || usage
+    rules_show
+    ;;
+  create)
+    (( $# == 3 )) || usage
+    command -v jq >/dev/null && command -v od >/dev/null \
+      && command -v tr >/dev/null && command -v pactl >/dev/null || exit 1
+    audio_prepare_private_runtime || exit 1
+    audio_acquire_mutation_lock || exit 1
+    create_group "$2" "$3"
+    ;;
+  update)
+    (( $# == 4 )) || usage
+    command -v jq >/dev/null && command -v pactl >/dev/null || exit 1
+    audio_prepare_private_runtime || exit 1
+    audio_acquire_mutation_lock || exit 1
+    update_group "$2" "$3" "$4"
+    ;;
+  delete)
+    (( $# == 2 )) || usage
+    command -v jq >/dev/null && command -v pactl >/dev/null || exit 1
+    audio_prepare_private_runtime || exit 1
+    audio_acquire_mutation_lock || exit 1
+    delete_group "$2"
+    ;;
+  reconcile)
+    (( $# == 0 || $# == 1 )) || usage
+    command -v jq >/dev/null && command -v pactl >/dev/null || exit 1
+    audio_prepare_private_runtime || exit 1
+    audio_acquire_mutation_lock || exit 1
+    reconcile_groups
+    ;;
+  *) usage ;;
+esac

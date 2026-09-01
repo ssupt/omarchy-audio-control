@@ -129,6 +129,24 @@ if command -v qmllint >/dev/null 2>&1; then
   echo "PASS: QML lint"
 fi
 
+# Native PwNode QObjects can disappear between a PipeWire removal event and a
+# Repeater regeneration. Keep them out of Qt's JavaScript-list delegate model;
+# delegates may resolve the panel snapshot by a stable integer index instead.
+for live_model in displayAudioSinks displayAudioSources \
+    displayAudioStreams displayRecordingStreams; do
+  grep -q "model: root\\.${live_model}\\.length$" "$ROOT/Panel.qml" ||
+    fail "safe numeric Repeater model: $live_model"
+  if grep -q "model: root\\.${live_model}$" "$ROOT/Panel.qml"; then
+    fail "native PipeWire objects used directly as Repeater rows: $live_model"
+  fi
+done
+grep -q 'model: root\.memberLevels\.length$' "$ROOT/AudioOutputGroupRow.qml" ||
+  fail "safe numeric output-group member level model"
+if grep -q 'model: root\.memberLevels$' "$ROOT/AudioOutputGroupRow.qml"; then
+  fail "native PipeWire group members used directly as Repeater rows"
+fi
+echo "PASS: unplug-safe PipeWire delegate models"
+
 node - "$ROOT/Model.js" <<'JS'
 const assert = require('node:assert/strict')
 const model = require(process.argv[2])
@@ -155,6 +173,20 @@ assert.deepEqual(model.parseAudioControlSettings('not json'), {
   captureNotifications: true
 })
 assert.equal(model.parseAudioControlSettings('{"captureNotifications":false}').captureNotifications, false)
+assert.deepEqual(model.parseAudioOpenRequest(''), { advanced: false, tab: 0 })
+assert.deepEqual(model.parseAudioOpenRequest('{}'), { advanced: false, tab: 0 })
+assert.deepEqual(model.parseAudioOpenRequest('{"view":"advanced"}'), { advanced: true, tab: 0 })
+assert.deepEqual(model.parseAudioOpenRequest('{"advanced":true,"tab":"routing"}'), {
+  advanced: true, tab: 4
+})
+assert.deepEqual(model.parseAudioOpenRequest('{"tab":"bluetooth"}'), { advanced: true, tab: 1 })
+assert.deepEqual(model.parseAudioOpenRequest('{"view":"quick","tab":"diagnostics"}'), {
+  advanced: false, tab: 0
+})
+assert.deepEqual(model.parseAudioOpenRequest('{"tab":"unknown"}'), { advanced: false, tab: 0 })
+assert.deepEqual(model.parseAudioOpenRequest('[' + '0,'.repeat(4096) + '0]'), {
+  advanced: false, tab: 0
+})
 assert.equal(model.sanitizeIdentifier(' exact identifier ', 160), ' exact identifier ')
 assert.equal(model.sanitizeIdentifier('invalid\nidentifier', 160), '')
 assert.equal(model.sanitizeIdentifier('x'.repeat(161), 160), '')
@@ -168,6 +200,7 @@ assert.equal(model.isAudioScenesDocument('{"version":2,"scenes":[]}'), false)
 assert.equal(model.isAudioScenesDocument('{"scenes":{}}'), false)
 assert.equal(model.isAudioRulesDocument('{"appRules":[],"devices":{}}'), true)
 assert.equal(model.isAudioRulesDocument('{"appRules":{}}'), false)
+assert.equal(model.isAudioRulesDocument('{"outputGroups":{}}'), false)
 assert.equal(model.isAudioRulesDocument('x'.repeat(1048577)), false)
 assert.deepEqual(
   model.parseAudioScenes(JSON.stringify({
@@ -388,6 +421,10 @@ assert.deepEqual(model.streamOutputOptions([defaultOutput, headphones], defaultO
   { value: 'override:10', label: 'Always use Desk Speakers' },
   { value: 'override:11', label: 'Always use Headphones' }
 ])
+assert.equal(model.streamRouteDestinationCount(
+  model.streamOutputOptions([defaultOutput], defaultOutput)), 1)
+assert.equal(model.streamRouteDestinationCount(
+  model.streamOutputOptions([defaultOutput, headphones], defaultOutput)), 2)
 assert.deepEqual(model.recordingInputOptions([defaultInput, headsetInput], defaultInput), [
   { value: 'default:20', label: 'Follow default input' },
   { value: 'override:20', label: 'Always use Desk Microphone' },
@@ -399,6 +436,12 @@ assert.deepEqual(model.streamOutputOptions([headphones], defaultOutput), [
   { value: 'default:10', label: 'Follow default output' },
   { value: 'override:11', label: 'Always use Headphones' }
 ])
+assert.equal(model.streamRouteDestinationCount(
+  model.streamOutputOptions([headphones], defaultOutput)), 2)
+assert.equal(model.streamRouteDestinationCount([
+  { value: 'default:10' }, { value: 'override:10' },
+  { value: 'invalid' }, null
+]), 1)
 assert.deepEqual(model.streamOutputOptions([
   defaultOutput,
   { name: 'duplicate-default', ready: true, properties: { 'object.serial': 10 } },
@@ -440,6 +483,24 @@ const obsStream = {
 }
 const classified = model.classifyAudioNodes([
   { name: 'speakers', isStream: false, isSink: true },
+  {
+    name: 'omarchy_audio_group_0123456789abcdef',
+    isStream: true,
+    isSink: true,
+    ready: true,
+    properties: {
+      'application.id': 'ssupt.audio-control',
+      'node.virtual': 'true',
+      'omarchy.audio.group.id': '0123456789abcdef'
+    }
+  },
+  {
+    name: 'omarchy_audio_group_fedcba9876543210',
+    isStream: true,
+    isSink: true,
+    ready: true,
+    properties: { 'application.id': 'untrusted.application' }
+  },
   { name: 'microphone', isStream: false, isSink: false, ready: true, audio: {} },
   { name: 'audio-filter', isStream: false, ready: true, audio: {}, type: 'Audio/Filter' },
   { name: 'speakers.monitor', isStream: false, isSink: false, ready: true, audio: {} },
@@ -452,7 +513,9 @@ const classified = model.classifyAudioNodes([
     properties: { 'application.id': 'ssupt.audio-control' }
   }
 ])
-assert.deepEqual(classified.sinks.map(node => node.name), ['speakers'])
+assert.deepEqual(classified.sinks.map(node => node.name), [
+  'speakers', 'omarchy_audio_group_0123456789abcdef'
+])
 assert.deepEqual(classified.sources.map(node => node.name), ['microphone'])
 assert.deepEqual(classified.playbackStreams.map(node => node.name), ['firefox'])
 assert.deepEqual(classified.recordingStreams.map(node => node.name), ['firefox-capture'])
@@ -495,6 +558,78 @@ assert.equal(model.findAppRule(Array.from({ length: 300 }, (_, index) => ({
 assert.deepEqual(model.parseAudioRules(JSON.stringify({
   devices: { favorites: ['speakers', 'speakers'], hidden: ['mic', 'mic'] }
 })).devices, { aliases: {}, favorites: ['speakers'], hidden: ['mic'] })
+const parsedOutputGroups = model.parseAudioRules(JSON.stringify({
+  outputGroups: [{
+    id: '0123456789abcdef',
+    name: 'Desk',
+    sink: 'omarchy_audio_group_0123456789abcdef',
+    members: ['speakers', 'headphones', 'speakers']
+  }, {
+    id: 'fedcba9876543210',
+    name: 'Recursive',
+    sink: 'omarchy_audio_group_fedcba9876543210',
+    members: ['speakers', 'omarchy_audio_group_0123456789abcdef']
+  }, {
+    id: '1111111111111111',
+    name: 'Duplicate members',
+    sink: 'omarchy_audio_group_1111111111111111',
+    members: ['headphones', 'speakers']
+  }]
+})).outputGroups
+assert.deepEqual(parsedOutputGroups, [{
+  id: '0123456789abcdef',
+  name: 'Desk',
+  sink: 'omarchy_audio_group_0123456789abcdef',
+  members: ['headphones', 'speakers']
+}])
+assert.equal(model.outputGroupForSink(
+  parsedOutputGroups, 'omarchy_audio_group_0123456789abcdef').name, 'Desk')
+assert.equal(model.outputGroupForSink(parsedOutputGroups, 'speakers'), null)
+assert.equal(model.outputGroupFallbackMember(parsedOutputGroups[0], ['speakers']), 'speakers')
+assert.equal(model.outputGroupFallbackMember(parsedOutputGroups[0], ['headphones']), 'headphones')
+assert.equal(model.outputGroupFallbackMember(
+  parsedOutputGroups[0], ['headphones', 'speakers']), 'headphones')
+assert.equal(model.outputGroupFallbackMember(
+  parsedOutputGroups[0], ['headphones', 'headphones', 'speakers']), 'speakers')
+assert.equal(model.outputGroupFallbackMember(
+  parsedOutputGroups[0], ['headphones', 'headphones']), '')
+assert.equal(model.outputGroupFallbackMember(null, ['speakers']), '')
+assert.equal(model.isOutputGroupSink('omarchy_audio_group_0123456789abcdef'), true)
+assert.equal(model.isOutputGroupSink('omarchy_audio_group_not-a-group'), false)
+assert.equal(model.isManagedOutputGroupSink({
+  name: 'omarchy_audio_group_0123456789abcdef',
+  isStream: true,
+  isSink: true,
+  ready: true,
+  properties: {
+    'application.id': 'ssupt.audio-control',
+    'node.virtual': true,
+    'omarchy.audio.group.id': '0123456789abcdef'
+  }
+}), true)
+assert.equal(model.isManagedOutputGroupSink({
+  name: 'omarchy_audio_group_0123456789abcdef',
+  isStream: true,
+  isSink: true,
+  ready: true,
+  properties: {
+    'application.id': 'ssupt.audio-control',
+    'node.virtual': true,
+    'omarchy.audio.group.id': 'fedcba9876543210'
+  }
+}), false)
+assert.equal(model.isOutputGroupMemberSink({
+  name: 'speakers', ready: true, isSink: true, isStream: false,
+  properties: { 'device.api': 'alsa', 'factory.name': 'api.alsa.pcm.sink' }
+}), true)
+assert.equal(model.isOutputGroupMemberSink({
+  name: 'effects', ready: true, isSink: true, isStream: false,
+  properties: { 'node.virtual': true, 'factory.name': 'support.null-audio-sink' }
+}), false)
+assert.equal(model.isOutputGroupMemberSink({
+  name: 'filter', ready: true, isSink: true, isStream: false,
+  properties: { 'device.class': 'filter' }
+}), false)
 const prototypeRules = model.parseAudioRules(
   '{"appRules":[{"app":"__proto__","direction":"playback","target":"speakers"},' +
   '{"app":"constructor","direction":"recording","target":"mic"}],' +
@@ -585,7 +720,7 @@ diagnostics_snapshot=$(
 )
 jq -e '
   .healthy == false
-  and .versions == {"plugin":"0.7.1","pipewire":"1.6.8","wireplumber":"0.5.15"}
+  and .versions == {"plugin":"0.8.0","pipewire":"1.6.8","wireplumber":"0.5.15"}
   and .graph.rate == 48000
   and .graph.quantum == 256
   and .graph.latencyMs == 5.3
@@ -619,7 +754,7 @@ support_report=$(
 )
 grep -q '^  playback: Browser -> Output Filter -> Wireless Headphones$' <<<"$support_report" ||
   fail "support report active route"
-grep -q '^  Advanced Audio Control: 0.7.1$' <<<"$support_report" ||
+grep -q '^  Advanced Audio Control: 0.8.0$' <<<"$support_report" ||
   fail "support report plugin version"
 grep -q '^  Peak DSP load: 5%$' <<<"$support_report" || fail "support report DSP load"
 ! grep -q 'bluez_output.test\|alsa_input.usb-microphone' <<<"$support_report" ||
@@ -767,6 +902,14 @@ pw-metadata -n default -- 900 target.node 1001 Spa:Id
 EOF
 )
 [[ $(<"$route_log") == "$expected_route_log" ]] || fail "persistent stream target"
+
+: >"$route_log"
+if AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_STREAM_OWNER_MODULE=1 \
+  PATH="$TEST_DIR/mocks:$PATH" \
+  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
+  fail "module-owned playback stream accepted a manual route"
+fi
+[[ ! -s $route_log ]] || fail "module-owned playback stream was moved"
 
 : >"$route_log"
 AUDIO_CONTROL_ROUTE_LOG="$route_log" PATH="$TEST_DIR/mocks:$PATH" \
@@ -1623,8 +1766,48 @@ jq -e '(.devices.aliases | has("speakers") | not)
   fail "device preference removal"
 printf '%s\n' '{}' >"$rules_file"
 "$ROOT/scripts/audio-app-rules" set-alias missing ""
-jq -e '.appRules == [] and .devices == {"aliases":{},"favorites":[],"hidden":[]}' \
+jq -e '.appRules == [] and .outputGroups == []
+  and .devices == {"aliases":{},"favorites":[],"hidden":[]}' \
   "$rules_file" >/dev/null || fail "sparse audio rules normalization"
+"$ROOT/scripts/audio-app-rules" set-output-group 0123456789abcdef Desk \
+  '["speakers","headphones"]'
+jq -e '.outputGroups == [{
+    "id":"0123456789abcdef",
+    "name":"Desk",
+    "sink":"omarchy_audio_group_0123456789abcdef",
+    "members":["headphones","speakers"]
+  }]' "$rules_file" >/dev/null || fail "output group rule storage"
+if "$ROOT/scripts/audio-app-rules" set-output-group fedcba9876543210 Recursive \
+    '["speakers","omarchy_audio_group_0123456789abcdef"]' >/dev/null 2>&1; then
+  fail "recursive output group member accepted"
+fi
+"$ROOT/scripts/audio-app-rules" set-app player playback \
+  omarchy_audio_group_0123456789abcdef
+if "$ROOT/scripts/audio-app-rules" del-output-group 0123456789abcdef \
+    >/dev/null 2>&1; then
+  fail "output group used by an application rule was deleted"
+fi
+"$ROOT/scripts/audio-app-rules" del-app player playback
+"$ROOT/scripts/audio-app-rules" del-output-group 0123456789abcdef
+jq -e '.outputGroups == []' "$rules_file" >/dev/null ||
+  fail "output group rule deletion"
+jq -nc '
+  {version:1, appRules:[], outputGroups:[
+    range(0; 16) as $index
+    | (("000000000000000" + ($index | tostring))[-16:]) as $id
+    | {id:$id, name:("Group " + ($index | tostring)),
+       sink:("omarchy_audio_group_" + $id),
+       members:[("left-" + ($index | tostring)),
+         ("right-" + ($index | tostring))]}
+  ], devices:{aliases:{},favorites:[],hidden:[]}}
+' >"$rules_file"
+full_group_rules_before=$(<"$rules_file")
+if "$ROOT/scripts/audio-app-rules" set-output-group ffffffffffffffff Overflow \
+    '["speakers","headphones"]' >/dev/null 2>&1; then
+  fail "output group storage limit was exceeded"
+fi
+[[ $(<"$rules_file") == "$full_group_rules_before" ]] ||
+  fail "output group limit evicted an existing definition"
 jq -nc '
   {version:1, appRules:[], devices:{
     aliases:(reduce range(0; 128) as $index
@@ -1652,6 +1835,218 @@ fi
 unset OMARCHY_AUDIO_RULES_FILE
 echo "PASS: application rules and device preference store"
 rm -rf -- "$scenes_dir"
+
+output_group_dir=$(mktemp -d)
+output_group_rules="$output_group_dir/audio-rules.json"
+output_group_state="$output_group_dir/pactl-state.json"
+output_group_log="$output_group_dir/pactl.log"
+output_group_runtime="$output_group_dir/runtime"
+mkdir -m 700 -- "$output_group_runtime"
+printf '%s\n' \
+  '{"version":1,"appRules":[],"outputGroups":[],"devices":{"aliases":{},"favorites":[],"hidden":[]}}' \
+  >"$output_group_rules"
+printf '%s\n' \
+  '{"nextModule":70,"defaultSink":"speakers","modules":[],"sinkInputs":[],"sinks":[{"index":10,"name":"speakers","properties":{"object.id":"110"}},{"index":11,"name":"headphones","properties":{"object.id":"111"}},{"index":12,"name":"hdmi","properties":{"object.id":"112"}},{"index":13,"name":"virtual-filter","properties":{"object.id":"113","node.virtual":true,"device.class":"filter","factory.name":"support.null-audio-sink"}}]}' \
+  >"$output_group_state"
+
+run_output_group() {
+  AUDIO_CONTROL_PRIVATE_RUNTIME_DIR="$output_group_runtime" \
+    AUDIO_CONTROL_GROUP_STATE="$output_group_state" \
+    AUDIO_CONTROL_GROUP_LOG="$output_group_log" \
+    OMARCHY_AUDIO_RULES_FILE="$output_group_rules" \
+    PATH="$TEST_DIR/mocks:$PATH" \
+    "$ROOT/scripts/audio-output-groups" "$@"
+}
+
+output_group_id=$(run_output_group create Desk '["speakers","headphones"]')
+[[ $output_group_id =~ ^[0-9a-f]{16}$ ]] || fail "output group identity"
+output_group_sink=omarchy_audio_group_$output_group_id
+jq -e --arg id "$output_group_id" --arg sink "$output_group_sink" '
+  .outputGroups == [{
+    id: $id,
+    name: "Desk",
+    sink: $sink,
+    members: ["headphones", "speakers"]
+  }]
+' "$output_group_rules" >/dev/null || fail "output group definition"
+jq -e --arg id "$output_group_id" --arg sink "$output_group_sink" '
+  (.modules | length) == 1
+  and .modules[0].name == "module-combine-sink"
+  and (.modules[0].argument | contains("sinks=headphones,speakers"))
+  and (.modules[0].argument | contains("application.id=ssupt.audio-control"))
+  and ([.sinks[] | select(.name == $sink
+      and .properties."application.id" == "ssupt.audio-control"
+      and .properties."omarchy.audio.group.id" == $id)] | length) == 1
+' "$output_group_state" >/dev/null || fail "owned combine sink creation"
+[[ $(stat -c '%a' "$output_group_rules") == 600 ]] ||
+  fail "output group store permissions"
+
+if run_output_group create Solo '["speakers"]' >/dev/null 2>&1; then
+  fail "single-device output group accepted"
+fi
+if run_output_group create Recursive \
+    '["hdmi","omarchy_audio_group_0123456789abcdef"]' >/dev/null 2>&1; then
+  fail "nested output group accepted"
+fi
+if run_output_group create Virtual '["speakers","virtual-filter"]' \
+    >/dev/null 2>&1; then
+  fail "virtual sink accepted as an output group member"
+fi
+
+run_output_group update "$output_group_id" Desk '["speakers","hdmi"]'
+jq -e '.outputGroups[0].members == ["hdmi", "speakers"]' \
+  "$output_group_rules" >/dev/null || fail "output group member update"
+jq -e --arg sink "$output_group_sink" '
+  (.modules | length) == 1
+  and (.modules[0].argument | contains("sinks=hdmi,speakers"))
+  and ([.sinks[] | select(.name == $sink)] | length) == 1
+' "$output_group_state" >/dev/null || fail "combine sink member update"
+
+output_group_state_next="$output_group_dir/state-next.json"
+jq --arg sink "$output_group_sink" '.defaultSink = $sink' \
+  "$output_group_state" >"$output_group_state_next"
+mv -f -- "$output_group_state_next" "$output_group_state"
+if run_output_group update "$output_group_id" Desk \
+    '["speakers","headphones"]' >/dev/null 2>&1; then
+  fail "active default output group was replaced"
+else
+  [[ $? == 3 ]] || fail "active output group update exit code"
+fi
+jq -e '.outputGroups[0].members == ["hdmi", "speakers"]' \
+  "$output_group_rules" >/dev/null || fail "active output group definition changed"
+jq '.defaultSink = "speakers"' "$output_group_state" >"$output_group_state_next"
+mv -f -- "$output_group_state_next" "$output_group_state"
+
+if AUDIO_CONTROL_GROUP_LOAD_FAIL_MEMBERS=hdmi,headphones \
+    run_output_group update "$output_group_id" Desk \
+      '["headphones","hdmi"]' >/dev/null 2>&1; then
+  fail "failed combine sink replacement reported success"
+fi
+jq -e '.outputGroups[0].members == ["hdmi", "speakers"]' \
+  "$output_group_rules" >/dev/null || fail "failed output group update was persisted"
+jq -e '(.modules | length) == 1
+  and (.modules[0].argument | contains("sinks=hdmi,speakers"))' \
+  "$output_group_state" >/dev/null || fail "failed output group update was not rolled back"
+
+original_pair_id=$(run_output_group create "Original pair" \
+  '["speakers","headphones"]') || fail "original member set could not be reused"
+[[ $original_pair_id =~ ^[0-9a-f]{16}$ && $original_pair_id != "$output_group_id" ]] ||
+  fail "output group identities were not independent of member sets"
+run_output_group delete "$original_pair_id"
+
+# Reconciliation removes an unused group while a physical member is absent,
+# retains its definition, and restores it once every member comes back.
+jq '.sinks |= map(select(.name != "hdmi"))' \
+  "$output_group_state" >"$output_group_state_next"
+mv -f -- "$output_group_state_next" "$output_group_state"
+run_output_group reconcile
+jq -e --arg sink "$output_group_sink" '
+  (.modules | length) == 0
+  and ([.sinks[] | select(.name == $sink)] | length) == 0
+' "$output_group_state" >/dev/null || fail "degraded output group remained selectable"
+jq -e '(.outputGroups | length) == 1
+  and .outputGroups[0].members == ["hdmi", "speakers"]' \
+  "$output_group_rules" >/dev/null || fail "degraded output group definition was removed"
+jq '.sinks += [{index:12,name:"hdmi",properties:{"object.id":"112"}}]' \
+  "$output_group_state" >"$output_group_state_next"
+mv -f -- "$output_group_state_next" "$output_group_state"
+run_output_group reconcile
+jq -e --arg sink "$output_group_sink" '
+  (.modules | length) == 1
+  and ([.sinks[] | select(.name == $sink)] | length) == 1
+' "$output_group_state" >/dev/null || fail "reconnected output group was not restored"
+
+OMARCHY_AUDIO_RULES_FILE="$output_group_rules" \
+  "$ROOT/scripts/audio-app-rules" set-app player playback "$output_group_sink"
+if run_output_group delete "$output_group_id" >/dev/null 2>&1; then
+  fail "output group used by an offline rule was deleted"
+else
+  [[ $? == 3 ]] || fail "used output group delete exit code"
+fi
+OMARCHY_AUDIO_RULES_FILE="$output_group_rules" \
+  "$ROOT/scripts/audio-app-rules" del-app player playback
+
+if AUDIO_CONTROL_GROUP_UNLOAD_NO_EFFECT=1 \
+    run_output_group delete "$output_group_id" >/dev/null 2>&1; then
+  fail "unverified output group removal reported success"
+fi
+jq -e '(.outputGroups | length) == 1' "$output_group_rules" >/dev/null ||
+  fail "unverified output group removal changed storage"
+run_output_group delete "$output_group_id"
+jq -e '.outputGroups == []' "$output_group_rules" >/dev/null ||
+  fail "output group deletion"
+jq -e '(.modules | length) == 0
+  and ([.sinks[].name | select(startswith("omarchy_audio_group_"))] | length) == 0' \
+  "$output_group_state" >/dev/null || fail "output group module cleanup"
+
+if AUDIO_CONTROL_GROUP_LOAD_FAIL_MEMBERS=hdmi,headphones \
+    run_output_group create Broken '["headphones","hdmi"]' >/dev/null 2>&1; then
+  fail "failed output group creation reported success"
+fi
+jq -e '.outputGroups == []' "$output_group_rules" >/dev/null &&
+  jq -e '(.modules | length) == 0' "$output_group_state" >/dev/null ||
+  fail "failed output group creation left state"
+
+# PipeWire-Pulse does not include module indexes in `list modules`; recover a
+# group created by the earlier unquoted-property implementation through the
+# owning sink's verified pulse.module.id instead.
+legacy_group_id=eeeeeeeeeeeeeeee
+legacy_group_sink=omarchy_audio_group_$legacy_group_id
+jq --arg sink "$legacy_group_sink" --arg id "$legacy_group_id" '
+  .modules += [{
+    index: 98,
+    name: "module-combine-sink",
+    argument: ("sink_name=" + $sink
+      + " sinks=speakers,headphones"
+      + " sink_properties=device.description=Omarchy_Output_Group"
+      + " application.id=ssupt.audio-control node.virtual=true"
+      + " omarchy.audio.group.id=" + $id),
+    sink: $sink
+  }]
+  | .sinks += [{
+    index: 1098,
+    name: $sink,
+    description: "Omarchy_Output_Group",
+    owner_module: 98,
+    properties: {
+      "object.id":"2098",
+      "node.virtual":"true",
+      "pulse.module.id":"98"
+    }
+  }]
+' "$output_group_state" >"$output_group_state_next"
+mv -f -- "$output_group_state_next" "$output_group_state"
+run_output_group reconcile
+jq -e --arg sink "$legacy_group_sink" '
+  ([.modules[] | select(.index == 98)] | length) == 0
+  and ([.sinks[] | select(.name == $sink)] | length) == 0
+' "$output_group_state" >/dev/null || fail "legacy orphan output group was not cleaned"
+
+foreign_group_id=ffffffffffffffff
+foreign_group_sink=omarchy_audio_group_$foreign_group_id
+jq --arg sink "$foreign_group_sink" '
+  .modules += [{
+    index: 99,
+    name: "module-combine-sink",
+    argument: ("sink_name=" + $sink + " sinks=speakers,headphones"),
+    sink: $sink
+  }]
+  | .sinks += [{
+    index: 1099,
+    name: $sink,
+    properties: {"application.id":"someone.else"}
+  }]
+' "$output_group_state" >"$output_group_state_next"
+mv -f -- "$output_group_state_next" "$output_group_state"
+run_output_group reconcile
+jq -e --arg sink "$foreign_group_sink" '
+  ([.modules[] | select(.index == 99)] | length) == 1
+  and ([.sinks[] | select(.name == $sink)] | length) == 1
+' "$output_group_state" >/dev/null || fail "foreign combine sink was removed"
+
+rm -rf -- "$output_group_dir"
+unset -f run_output_group
+echo "PASS: named multi-output groups"
 
 microphone_test_dir=$(mktemp -d)
 microphone_test_log="$microphone_test_dir/commands.log"
@@ -2337,6 +2732,8 @@ const raw = fs.readFileSync(process.argv[2], 'utf8')
 const parsed = JSON.parse(raw.replace(/^\s*\/\/[^\n]*(\n|$)/gm, '').replace(/,(\s*[}\]])/g, '$1'))
 assert.equal(parsed['personal.notes'].label, 'Notes')
 assert.equal(parsed['setup.audio'].label, 'Audio')
+assert.equal(parsed['setup.audio'].action,
+  'omarchy-shell shell summon ssupt.audio-control \'{"view":"advanced"}\'')
 assert.equal((raw.match(/"setup\.audio"/g) || []).length, 1)
 JS
 
@@ -2399,7 +2796,7 @@ echo "PASS: menu integration"
 jq -e '
   .schemaVersion == 1
   and .id == "ssupt.audio-control"
-  and .version == "0.7.1"
+  and .version == "0.8.0"
   and .author == "ssupt"
   and (.kinds | index("bar-widget") != null)
   and (.kinds | index("panel") != null)

@@ -33,6 +33,8 @@ instead of introducing a separate mixer application.
   absent are skipped and reported.
 - Pin any application to a device with offline routing rules that are enforced
   whenever the application starts and the device is present.
+- Create named output groups that play through two to eight connected outputs
+  at once, then use them as defaults or per-application destinations.
 - Rename devices with aliases, mark favorites so they sort first, and hide
   devices everywhere.
 - Inspect PipeWire and WirePlumber health from a Diagnostics tab: graph rate,
@@ -46,6 +48,9 @@ instead of introducing a separate mixer application.
 The bar audio icon uses left-click for the quick mixer, middle-click to mute or
 unmute the microphone, right-click to mute or unmute all audio, and the wheel to
 adjust output volume. Hovering it lists applications with active microphone access.
+
+`Super+Ctrl+A` opens the same quick mixer as Omarchy's built-in audio widget.
+Use the gear in that pullout—or **Setup > Audio**—for the advanced window.
 
 The optional [Advanced Bluetooth Audio](https://github.com/ssupt/omarchy-bluetooth-audio)
 companion brings the same codec controls into Omarchy's Bluetooth panel while
@@ -92,6 +97,24 @@ preferences in `~/.config/omarchy/audio-rules.json`; both are plugin-owned and
 edited through the **Scenes** and **Routing** tabs. Manual route changes on a
 pinned application update its rule, and choosing follow-default deletes it.
 Hidden devices disappear from the mixer until shown again in the Routing tab.
+
+Output groups are configured under **Routing > Output groups**. A live group
+behaves like one regular output throughout the plugin, so it can be selected as
+the default, used by a running stream or saved as an offline application rule.
+The quick mixer marks these destinations as **GROUP**. If a member disconnects,
+the definition stays saved and the Routing tab names the missing output. If the
+group was selected, following applications move to the first surviving member
+before the broken virtual output disappears from the mixer. The group is
+restored automatically when every member is available again. Each group card
+also exposes member-level sliders; these change the physical device volumes, so
+the same levels apply when those devices are used outside the group.
+The plugin creates PipeWire's
+[`module-combine-sink`](https://docs.pipewire.org/page_pulse_module_combine_sink.html)
+only while the group exists and reconciles its own marked modules without a
+background service. Updating or deleting a group first requires moving the
+default and active applications away from it. Outputs driven by separate clocks,
+especially Bluetooth devices, can drift slightly; this is a limitation of
+combining independent hardware rather than a UI synchronization issue.
 
 The Diagnostics tab refreshes only while it is visible. Its support report
 contains versions, health counters, human-readable device formats, service

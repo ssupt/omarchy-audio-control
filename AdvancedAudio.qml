@@ -26,7 +26,31 @@ Item {
     scriptPath: runtime.script("audio-app-rules")
     onRulesChanged: root.clampCursor()
     onWriteFinished: function(success) {
-      if (!success) root.showSceneStatus(rulesStore.error, true)
+      if (!success) root.showRoutingStatus(rulesStore.error, true)
+    }
+  }
+  AudioOutputGroupsController {
+    id: outputGroupController
+    scriptPath: runtime.script("audio-output-groups")
+    groups: rulesStore.outputGroups
+    autoReconcile: window.visible
+    onOperationFinished: function(action, _groupId, success, exitCode) {
+      if (success) {
+        if (action === "create") {
+          root.newOutputGroupName = ""
+          root.newOutputGroupMembers = []
+          root.showOutputGroupStatus("Created output group", false)
+        } else if (action === "update") {
+          root.showOutputGroupStatus("Updated output group", false)
+        } else if (action === "delete") {
+          root.showOutputGroupStatus("Deleted output group", false)
+        }
+      } else if (action !== "reconcile") {
+        root.showOutputGroupStatus(exitCode === 3
+          ? "Switch away from the group and make sure every selected output is connected"
+          : outputGroupController.error, true)
+      }
+      root.clampCursor()
     }
   }
   AudioDiagnosticsController {
@@ -39,8 +63,10 @@ Item {
   }
 
   property var shell: null
+  property var manifest: null
   property bool closingFromHost: false
   property bool openRequested: false
+  property bool quickPanelProxyOpen: false
   property bool windowRuleReady: false
   property bool recoveryConfirmOpen: false
   readonly property bool opened: window.visible
@@ -63,8 +89,10 @@ Item {
   property bool sceneReloadPending: false
   readonly property var audioRules: rulesStore.rules
   property string newRuleApp: ""
+  property string newOutputGroupName: ""
+  property var newOutputGroupMembers: []
   property string aliasEditingDevice: ""
-  readonly property bool routingMutation: rulesStore.busy
+  readonly property bool routingMutation: rulesStore.busy || outputGroupController.busy
   readonly property bool diagnosticsMutationBusy: diagnostics.speakerTesting
     || diagnostics.recovering
   readonly property bool graphMutationBusy: sceneController.busy
@@ -75,6 +103,10 @@ Item {
   property var pendingSceneSave: null
   property string sceneStatus: ""
   property bool sceneStatusIsError: false
+  property string outputGroupStatus: ""
+  property bool outputGroupStatusIsError: false
+  property string routingStatus: ""
+  property bool routingStatusIsError: false
   property string profileLoadError: ""
   property string portLoadError: ""
   property string profileSetError: ""
@@ -91,9 +123,14 @@ Item {
   readonly property string pendingPolicyKey: policy.pendingKey
   readonly property string policyError: policy.error
   readonly property string error: {
-    var errors = [profileSetError, portSetError, bluetoothAutoswitchError,
-      bluetoothPreferenceError, settingsSaveError, settingsFormatError,
-      policyError, profileLoadError, portLoadError]
+    var errors = activeTab === 0
+      ? [profileSetError, portSetError, settingsSaveError, settingsFormatError,
+        profileLoadError, portLoadError]
+      : (activeTab === 1
+        ? [profileSetError, bluetoothAutoswitchError, bluetoothPreferenceError,
+          profileLoadError]
+        : (activeTab === 2
+          ? [settingsSaveError, settingsFormatError, policyError] : []))
     for (var i = 0; i < errors.length; i++) if (errors[i] !== "") return errors[i]
     return ""
   }
@@ -149,7 +186,8 @@ Item {
     }
   }
   readonly property var rawInputDevice: Pipewire.defaultAudioSource
-  readonly property var inputDevice: usableInputNode(rawInputDevice) ? rawInputDevice : null
+  readonly property var inputDevice: usableInputNode(rawInputDevice)
+    && mutableAudioNode(rawInputDevice) ? rawInputDevice : null
   readonly property bool inputDeviceMuted: audioNodeMuted(inputDevice, true)
   readonly property bool outputBalanceAvailable: balanceAvailable(outputDevice)
   readonly property bool inputBalanceAvailable: balanceAvailable(inputDevice)
@@ -168,10 +206,16 @@ Item {
     + availablePolicyExperimental.length
   readonly property int captureNotificationIndex: wireplumberPolicyItemCount
   readonly property int policyItemCount: wireplumberPolicyItemCount + 1
+  readonly property int outputGroupCreateIndex: 0
+  readonly property int outputGroupStartIndex: 1
+  readonly property int newRuleAppIndex: outputGroupStartIndex + audioRules.outputGroups.length
+  readonly property int newRuleDeviceIndex: newRuleAppIndex + 1
+  readonly property int routingRuleStartIndex: newRuleDeviceIndex + 1
+  readonly property int managedDeviceStartIndex: routingRuleStartIndex + audioRules.appRules.length
   readonly property int itemCount: activeTab === 5
     ? diagnosticsView.itemCount
     : (activeTab === 4
-      ? 2 + audioRules.appRules.length + managedDevices.length
+      ? managedDeviceStartIndex + managedDevices.length
       : (activeTab === 3
         ? 1 + audioScenes.length
         : (activeTab === 0
@@ -190,18 +234,31 @@ Item {
   }
   onOutputDeviceChanged: enforceOutputVolumeLimit()
 
+  function pluginId() {
+    var id = manifest && typeof manifest.id === "string" ? String(manifest.id) : ""
+    return id !== "" ? id : "ssupt.audio-control"
+  }
+
+  function toggleQuickPanel() {
+    var hostBar = shell ? shell.bar : null
+    if (!hostBar || typeof hostBar.isBarWidgetOpen !== "function"
+        || typeof hostBar.summonBarWidget !== "function"
+        || typeof hostBar.hideBarWidget !== "function") return false
+
+    var id = pluginId()
+    var wasOpen = hostBar.isBarWidgetOpen(id) === true
+    var changed = wasOpen ? hostBar.hideBarWidget(id) : hostBar.summonBarWidget(id)
+    if (changed !== true) return false
+    quickPanelProxyOpen = !wasOpen
+    return true
+  }
+
   function open(payloadJson) {
-    var payload = ({})
-    var rawPayload = typeof payloadJson === "string" ? payloadJson : ""
-    if (rawPayload.length <= 4096) {
-      try { payload = JSON.parse(rawPayload || "{}") } catch (e) { payload = ({}) }
-    }
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) payload = ({})
-    activeTab = payload.tab === "bluetooth" ? 1
-      : payload.tab === "policy" ? 2
-      : payload.tab === "scenes" ? 3
-      : payload.tab === "routing" ? 4
-      : payload.tab === "diagnostics" ? 5 : 0
+    var request = Model.parseAudioOpenRequest(payloadJson)
+    if (!request.advanced && toggleQuickPanel()) return
+
+    quickPanelProxyOpen = false
+    activeTab = request.tab
     openRequested = true
     closingFromHost = false
     cursorActive = false
@@ -225,6 +282,9 @@ Item {
     bluetoothAutoswitchError = ""
     bluetoothPreferenceError = ""
     settingsSaveError = ""
+    sceneStatus = ""
+    outputGroupStatus = ""
+    routingStatus = ""
     policy.clearError()
   }
 
@@ -240,6 +300,12 @@ Item {
   }
 
   function close() {
+    if (quickPanelProxyOpen) {
+      var hostBar = shell ? shell.bar : null
+      if (hostBar && typeof hostBar.hideBarWidget === "function")
+        hostBar.hideBarWidget(pluginId())
+      quickPanelProxyOpen = false
+    }
     openRequested = false
     closingFromHost = true
     closeProfileMenus()
@@ -262,6 +328,7 @@ Item {
 
   function refresh() {
     if (!window.visible) return
+    outputGroupController.scheduleReconcile()
     if (!profilesProc.running && !profileSetProc.running) profilesProc.running = true
     if (!bluetoothAutoswitchProc.running) {
       autoswitchReconcileTimer.stop()
@@ -319,7 +386,8 @@ Item {
 
   function usableInputNode(node) {
     try {
-      return !!node && node.isStream !== true && node.isSink !== true
+      return !!node && node.ready === true && !!node.audio
+        && node.isStream !== true && node.isSink !== true
         && Model.nodeName(node) !== "" && Model.isAudioSource(node)
         && !Model.isMonitorSource(node)
         && !Model.isInternalAudioNode(Model.nodeName(node), Model.nodeProps(node))
@@ -331,6 +399,19 @@ Item {
   function audioNodeMuted(node, fallback) {
     if (!mutableAudioNode(node)) return fallback === true
     try { return node.audio.muted === true } catch (_error) { return fallback === true }
+  }
+
+  function setOutputGroupMemberVolume(node, value) {
+    if (audioMutationBusy || routingMutation || !mutableAudioNode(node)) return false
+    var requested = Number(value)
+    var maximum = outputOverdrive ? 1.5 : 1.0
+    if (!isFinite(requested)) return false
+    try {
+      node.audio.volume = Math.max(0, Math.min(maximum, requested))
+      return true
+    } catch (_error) {
+      return false
+    }
   }
 
   function enforceOutputVolumeLimit() {
@@ -427,6 +508,9 @@ Item {
   }
 
   function nodeLabel(node) {
+    var name = Model.nodeName(node)
+    var alias = name !== "" ? rulesStore.aliasFor(name) : ""
+    if (alias !== "") return alias
     return Model.nodeLabel(node)
   }
 
@@ -500,7 +584,9 @@ Item {
     if (bluetoothPreferenceRow) bluetoothPreferenceRow.closePreferenceMenu()
     if (newAppDropdown) newAppDropdown.close()
     if (newDeviceDropdown) newDeviceDropdown.close()
-    var repeaters = [deviceProfileRepeater, bluetoothProfileRepeater, audioPortRepeater, routingRuleRepeater]
+    if (outputGroupCreateRow) outputGroupCreateRow.closeMemberMenu()
+    var repeaters = [deviceProfileRepeater, bluetoothProfileRepeater,
+      audioPortRepeater, outputGroupRepeater, routingRuleRepeater]
     for (var r = 0; r < repeaters.length; r++) {
       var repeater = repeaters[r]
       if (!repeater) continue
@@ -510,6 +596,7 @@ Item {
         if (typeof row.closeProfileMenu === "function") row.closeProfileMenu()
         if (typeof row.closePortMenu === "function") row.closePortMenu()
         if (typeof row.closeTargetMenu === "function") row.closeTargetMenu()
+        if (typeof row.closeMemberMenu === "function") row.closeMemberMenu()
       }
     }
   }
@@ -548,13 +635,17 @@ Item {
       return
     }
     if (activeTab === 4) {
-      if (selectedIndex === 0) newRuleAppRow.toggleAppMenu()
-      else if (selectedIndex === 1) newRuleDeviceRow.toggleDeviceMenu()
-      else if (selectedIndex < 2 + audioRules.appRules.length) {
-        var ruleRow = routingRuleRepeater.itemAt(selectedIndex - 2)
+      if (selectedIndex === outputGroupCreateIndex) outputGroupCreateRow.activate()
+      else if (selectedIndex < newRuleAppIndex) {
+        var groupRow = outputGroupRepeater.itemAt(selectedIndex - outputGroupStartIndex)
+        if (groupRow) groupRow.toggleMemberMenu()
+      } else if (selectedIndex === newRuleAppIndex) newRuleAppRow.toggleAppMenu()
+      else if (selectedIndex === newRuleDeviceIndex) newRuleDeviceRow.toggleDeviceMenu()
+      else if (selectedIndex < managedDeviceStartIndex) {
+        var ruleRow = routingRuleRepeater.itemAt(selectedIndex - routingRuleStartIndex)
         if (ruleRow) ruleRow.toggleTargetMenu()
       } else {
-        var deviceIndex = selectedIndex - 2 - audioRules.appRules.length
+        var deviceIndex = selectedIndex - managedDeviceStartIndex
         if (deviceIndex >= 0 && deviceIndex < managedDevices.length) {
           var managed = managedDevices[deviceIndex]
           if (managed) toggleDeviceFavorite(managed.name, managed.favorite)
@@ -803,6 +894,7 @@ Item {
   }
 
   function runRuleWrite(args) {
+    routingStatus = ""
     return rulesStore.write(args)
   }
 
@@ -870,6 +962,30 @@ Item {
     sceneStatusTimer.restart()
   }
 
+  Timer {
+    id: outputGroupStatusTimer
+    interval: 6000
+    onTriggered: root.outputGroupStatus = ""
+  }
+
+  function showOutputGroupStatus(text, isError) {
+    outputGroupStatus = text
+    outputGroupStatusIsError = isError
+    outputGroupStatusTimer.restart()
+  }
+
+  Timer {
+    id: routingStatusTimer
+    interval: 6000
+    onTriggered: root.routingStatus = ""
+  }
+
+  function showRoutingStatus(text, isError) {
+    routingStatus = text
+    routingStatusIsError = isError
+    routingStatusTimer.restart()
+  }
+
   function nextSceneName() {
     var used = []
     for (var i = 0; i < audioScenes.length; i++) used.push(audioScenes[i].name)
@@ -920,8 +1036,39 @@ Item {
     return rulesStore.optionsFor("recording", storedTarget)
   }
 
+  readonly property var outputGroups: rulesStore.outputGroups
+  readonly property var outputGroupMemberOptions: rulesStore.outputGroupMemberOptions
   readonly property var managedDevices: rulesStore.managedDevices
   readonly property var newRuleAppOptions: rulesStore.availableApplicationLabels
+
+  function createOutputGroup() {
+    var name = String(newOutputGroupName || "").trim()
+    var members = Model.listSnapshot(newOutputGroupMembers)
+    if (name === "" || members.length < 2 || routingMutation) return
+    outputGroupStatus = ""
+    if (!outputGroupController.createGroup(name, members))
+      showOutputGroupStatus("Another routing change is still finishing", true)
+  }
+
+  function updateOutputGroup(group, members) {
+    if (!group || routingMutation) return
+    var next = Model.listSnapshot(members)
+    if (next.length < 2) {
+      showOutputGroupStatus("An output group needs at least two devices", true)
+      return
+    }
+    outputGroupStatus = ""
+    if (!outputGroupController.updateGroup(group.id, group.name, next))
+      showOutputGroupStatus("Another routing change is still finishing", true)
+  }
+
+  function deleteOutputGroup(group) {
+    if (!group || routingMutation) return
+    outputGroupStatus = ""
+    if (!outputGroupController.deleteGroup(group.id))
+      showOutputGroupStatus("Another routing change is still finishing", true)
+  }
+
   onManagedDevicesChanged: {
     if (aliasEditingDevice === "") return
     for (var i = 0; i < managedDevices.length; i++)
@@ -943,7 +1090,7 @@ Item {
   function commitAliasEdit(name, text) {
     var trimmed = String(text || "").trim()
     if (runRuleWrite(["set-alias", name, trimmed])) cancelAliasEdit()
-    else showSceneStatus("Another routing change is still finishing", true)
+    else showRoutingStatus("Another routing change is still finishing", true)
   }
 
   function toggleDeviceFavorite(name, currentFavorite) {
@@ -1924,6 +2071,107 @@ Item {
                 width: parent.width
                 spacing: Style.space(8)
 
+                PanelSectionHeader {
+                  text: "OUTPUT GROUPS"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Text {
+                  width: parent.width
+                  text: "Play through two or more connected outputs at once. Groups appear as one destination everywhere else in the mixer. Devices with separate clocks—especially Bluetooth—may drift slightly."
+                  color: Qt.darker(root.foreground, 1.35)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+
+                AudioOutputGroupCreateRow {
+                  id: outputGroupCreateRow
+                  width: parent.width
+                  groupName: root.newOutputGroupName
+                  selectedMembers: root.newOutputGroupMembers
+                  options: root.outputGroupMemberOptions
+                  busy: root.routingMutation
+                  hasCursor: root.cursorActive && root.activeTab === 4
+                    && root.selectedIndex === root.outputGroupCreateIndex
+                  onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(outputGroupCreateRow)
+                  foreground: root.foreground
+                  fill: root.hoverFill
+                  fontFamily: root.fontFamily
+                  onNameEdited: function(value) { root.newOutputGroupName = value }
+                  onMembersEdited: function(values) { root.newOutputGroupMembers = values }
+                  onCreateRequested: root.createOutputGroup()
+                  onCursorRequested: root.setCursor(root.outputGroupCreateIndex)
+                  onMenuToggled: function(open) {
+                    root.updateProfileMenu(open)
+                    if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+                  }
+                }
+
+                Repeater {
+                  id: outputGroupRepeater
+                  model: root.outputGroups
+
+                  AudioOutputGroupRow {
+                    id: outputGroupDelegate
+                    required property var modelData
+                    required property int index
+                    width: parent.width
+                    groupName: modelData ? String(modelData.name || "") : ""
+                    groupId: modelData ? String(modelData.id || "") : ""
+                    members: modelData && modelData.members ? modelData.members : []
+                    memberLevels: rulesStore.outputGroupMemberLevels(modelData)
+                    options: rulesStore.memberOptionsFor(modelData)
+                    available: rulesStore.outputGroupAvailable(modelData)
+                    statusText: rulesStore.outputGroupStatusText(modelData)
+                    busy: root.routingMutation
+                    memberVolumeBusy: root.audioMutationBusy || root.routingMutation
+                    volumeMaximum: root.outputOverdrive ? 1.5 : 1.0
+                    hasCursor: root.cursorActive && root.activeTab === 4
+                      && root.selectedIndex === root.outputGroupStartIndex
+                        + outputGroupDelegate.index
+                    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(outputGroupDelegate)
+                    foreground: root.foreground
+                    fill: root.hoverFill
+                    urgent: root.urgent
+                    fontFamily: root.fontFamily
+                    onMembersChosen: function(values) {
+                      root.updateOutputGroup(outputGroupDelegate.modelData, values)
+                    }
+                    onMemberVolumeMoved: function(node, value) {
+                      root.setOutputGroupMemberVolume(node, value)
+                    }
+                    onDeleted: root.deleteOutputGroup(outputGroupDelegate.modelData)
+                    onCursorRequested: root.setCursor(
+                      root.outputGroupStartIndex + outputGroupDelegate.index)
+                    onMenuToggled: function(open) {
+                      root.updateProfileMenu(open)
+                      if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+                    }
+                  }
+                }
+
+                Text {
+                  visible: root.outputGroupStatus !== ""
+                    || outputGroupController.error !== ""
+                  width: parent.width
+                  text: root.outputGroupStatus !== "" ? root.outputGroupStatus
+                    : outputGroupController.error
+                  color: root.outputGroupStatus !== ""
+                    ? (root.outputGroupStatusIsError ? root.urgent : root.foreground)
+                    : root.urgent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+
+                PanelSectionHeader {
+                  text: "APPLICATION ROUTING"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
                 Text {
                   width: parent.width
                   text: "Pin an application to a device and it is routed there every time it starts, whenever the device is present. Rules keep working while the application or device is offline."
@@ -1937,7 +2185,8 @@ Item {
                   id: newRuleAppRow
                   width: parent.width
                   implicitHeight: Math.max(newAppLabels.implicitHeight, newAppDropdown.implicitHeight) + Style.space(18)
-                  hasCursor: root.cursorActive && root.activeTab === 4 && root.selectedIndex === 0
+                  hasCursor: root.cursorActive && root.activeTab === 4
+                    && root.selectedIndex === root.newRuleAppIndex
                   onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(newRuleAppRow)
                   foreground: root.foreground
                   fill: root.hoverFill
@@ -1999,7 +2248,7 @@ Item {
                       fontFamily: root.fontFamily
                       anchors.verticalCenter: parent.verticalCenter
 
-                      onHovered: function(on) { if (on) root.setCursor(0) }
+                      onHovered: function(on) { if (on) root.setCursor(root.newRuleAppIndex) }
                       onChanged: function(value) { root.newRuleApp = value }
                       onPopupOpenChanged: {
                         root.updateProfileMenu(popupOpen)
@@ -2012,7 +2261,7 @@ Item {
                     anchors.fill: parent
                     acceptedButtons: Qt.NoButton
                     hoverEnabled: true
-                    onContainsMouseChanged: if (containsMouse) root.setCursor(0)
+                    onContainsMouseChanged: if (containsMouse) root.setCursor(root.newRuleAppIndex)
                   }
                 }
 
@@ -2020,7 +2269,8 @@ Item {
                   id: newRuleDeviceRow
                   width: parent.width
                   implicitHeight: Math.max(newDeviceLabels.implicitHeight, newDeviceDropdown.implicitHeight) + Style.space(18)
-                  hasCursor: root.cursorActive && root.activeTab === 4 && root.selectedIndex === 1
+                  hasCursor: root.cursorActive && root.activeTab === 4
+                    && root.selectedIndex === root.newRuleDeviceIndex
                   onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(newRuleDeviceRow)
                   foreground: root.foreground
                   fill: root.hoverFill
@@ -2077,13 +2327,13 @@ Item {
                       fontFamily: root.fontFamily
                       anchors.verticalCenter: parent.verticalCenter
 
-                      onHovered: function(on) { if (on) root.setCursor(1) }
+                      onHovered: function(on) { if (on) root.setCursor(root.newRuleDeviceIndex) }
                       onChanged: function(value) {
                         if (value === "") return
                         var direction = rulesStore.directionForTarget(value)
                         if (direction === "" || !root.runRuleWrite(
                             ["set-app", root.newRuleApp, direction, value])) return
-                        root.showSceneStatus("Pinned '" + root.newRuleApp + "'", false)
+                        root.showRoutingStatus("Pinned '" + root.newRuleApp + "'", false)
                         root.newRuleApp = ""
                       }
                       onPopupOpenChanged: {
@@ -2097,7 +2347,7 @@ Item {
                     anchors.fill: parent
                     acceptedButtons: Qt.NoButton
                     hoverEnabled: true
-                    onContainsMouseChanged: if (containsMouse) root.setCursor(1)
+                    onContainsMouseChanged: if (containsMouse) root.setCursor(root.newRuleDeviceIndex)
                   }
                 }
 
@@ -2120,13 +2370,15 @@ Item {
                       : root.ruleTargetOptions(routingRuleDelegate.currentValue)
                     menuEnabled: !root.routingMutation
                     hasCursor: root.cursorActive && root.activeTab === 4
-                      && root.selectedIndex === 2 + routingRuleDelegate.index
+                      && root.selectedIndex === root.routingRuleStartIndex
+                        + routingRuleDelegate.index
                     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(routingRuleDelegate)
                     foreground: root.foreground
                     fill: root.hoverFill
                     urgent: root.urgent
                     fontFamily: root.fontFamily
-                    onCursorRequested: root.setCursor(2 + routingRuleDelegate.index)
+                    onCursorRequested: root.setCursor(
+                      root.routingRuleStartIndex + routingRuleDelegate.index)
                     onMenuToggled: function(open) {
                       root.updateProfileMenu(open)
                       if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
@@ -2178,14 +2430,15 @@ Item {
                     }
                     busy: root.routingMutation
                     hasCursor: root.cursorActive && root.activeTab === 4
-                      && root.selectedIndex === 2 + root.audioRules.appRules.length + managedDeviceDelegate.index
+                      && root.selectedIndex === root.managedDeviceStartIndex
+                        + managedDeviceDelegate.index
                     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(managedDeviceDelegate)
                     foreground: root.foreground
                     fill: root.hoverFill
                     urgent: root.urgent
                     fontFamily: root.fontFamily
                     onCursorRequested: root.setCursor(
-                      2 + root.audioRules.appRules.length + managedDeviceDelegate.index)
+                      root.managedDeviceStartIndex + managedDeviceDelegate.index)
                     onAliasEditStarted: root.aliasEditingDevice = managedDeviceDelegate.deviceName
                     onAliasCommitted: function(text) {
                       root.commitAliasEdit(managedDeviceDelegate.deviceName, text)
@@ -2199,10 +2452,12 @@ Item {
                 }
 
                 Text {
-                  visible: root.sceneStatus !== ""
+                  visible: root.routingStatus !== "" || rulesStore.error !== ""
                   width: parent.width
-                  text: root.sceneStatus
-                  color: root.sceneStatusIsError ? root.urgent : root.foreground
+                  text: root.routingStatus !== "" ? root.routingStatus : rulesStore.error
+                  color: root.routingStatus !== ""
+                    ? (root.routingStatusIsError ? root.urgent : root.foreground)
+                    : root.urgent
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
                   wrapMode: Text.WordWrap

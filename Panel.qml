@@ -15,13 +15,14 @@ Panel {
 
   AudioRuntime { id: runtime }
 
+  readonly property var nodes: Pipewire.nodes ? Pipewire.nodes.values : []
   readonly property var sink: Pipewire.defaultAudioSink
   readonly property var rawSource: Pipewire.defaultAudioSource
   // PipeWire permits a sink monitor to be the default source. Treating that
   // loopback node as a microphone would expose the wrong mute/level controls
   // and produce misleading capture state in the panel.
-  readonly property var source: usableInputNode(rawSource) ? rawSource : null
-  readonly property var nodes: Pipewire.nodes ? Pipewire.nodes.values : []
+  readonly property var source: usableInputNode(rawSource) && mutableAudioNode(rawSource)
+    ? rawSource : null
   AudioRulesController {
     id: rulesStore
     nodes: root.nodes
@@ -30,12 +31,25 @@ Panel {
     onRulesChanged: {
       root.resetRoutingEnforcement()
       Qt.callLater(root.enforceRoutingRules)
+      Qt.callLater(root.scheduleOutputTopologyRecovery)
     }
     onWriteFinished: function(success) {
       if (success) return
       root.streamRouteSetError = "Application route changed, but its saved rule could not be updated"
       root.resetRoutingEnforcement()
       Qt.callLater(root.enforceRoutingRules)
+    }
+  }
+  AudioOutputGroupsController {
+    id: outputGroups
+    scriptPath: runtime.script("audio-output-groups")
+    groups: rulesStore.outputGroups
+    // A degraded group that is still the default must first move its
+    // following streams to a surviving member. Reconciliation can safely
+    // unload the virtual sink after that transactional default change ends.
+    autoReconcile: !defaultSinkProc.running
+    onOperationFinished: function(_action, _groupId, success, _exitCode) {
+      if (success) Qt.callLater(root.enforceRoutingRules)
     }
   }
   readonly property var mprisPlayers: Mpris.players ? Mpris.players.values : []
@@ -72,7 +86,8 @@ Panel {
 
   function usableInputNode(node) {
     try {
-      return !!node && node.isStream !== true && node.isSink !== true
+      return !!node && node.ready === true && !!node.audio
+        && node.isStream !== true && node.isSink !== true
         && Model.nodeName(node) !== "" && Model.isAudioSource(node)
         && !Model.isMonitorSource(node)
         && !Model.isInternalAudioNode(Model.nodeName(node), Model.nodeProps(node))
@@ -109,12 +124,23 @@ Panel {
   property var cachedAudioSinks: []
   property var cachedAudioSources: []
 
+  // A combine sink can survive temporarily while one of its physical members
+  // is disconnected. Keep the current default visible so the user can move
+  // away from it, but never offer a degraded or unowned group as a new route.
+  function outputSinkRouteAvailable(node) {
+    var name = Model.nodeName(node)
+    if (name === "" || !sinkAvailable(node)) return false
+    if (!Model.isOutputGroupSink(name)) return true
+    var group = rulesStore.groupForSink(name)
+    return !!group && rulesStore.outputGroupAvailable(group)
+  }
+
   readonly property var rawAudioSinks: {
     var list = []
     for (var i = 0; i < candidateSinks.length; i++) {
       var candidate = candidateSinks[i]
       var candidateName = Model.nodeName(candidate)
-      if (candidateName !== "" && sinkAvailable(candidate)
+      if (candidateName !== "" && outputSinkRouteAvailable(candidate)
           && !deviceHidden(candidateName)) list.push(candidate)
     }
     var sinkName = Model.nodeName(sink)
@@ -130,10 +156,12 @@ Panel {
     for (var i = 0; i < candidateSources.length; i++) {
       var candidate = candidateSources[i]
       var candidateName = Model.nodeName(candidate)
-      if (candidateName !== "" && !deviceHidden(candidateName)) list.push(candidate)
+      if (candidateName !== "" && usableInputNode(candidate)
+          && mutableAudioNode(candidate) && !deviceHidden(candidateName)) list.push(candidate)
     }
     var sourceName = Model.nodeName(source)
-    if (sourceName !== "" && !Model.isMonitorSource(source) && !deviceHidden(sourceName)
+    if (sourceName !== "" && usableInputNode(source) && mutableAudioNode(source)
+        && !deviceHidden(sourceName)
         && list.indexOf(source) < 0) list.unshift(source)
     var sorted = list.slice()
     sorted.sort(Model.deviceSortComparator(audioRules.devices.favorites))
@@ -142,18 +170,19 @@ Panel {
 
   readonly property var cachedVisibleAudioSinks: cachedAudioSinks.filter(function(node) {
     var name = Model.nodeName(node)
-    return name !== "" && sinkAvailable(node) && !deviceHidden(name)
+    return name !== "" && outputSinkRouteAvailable(node) && !deviceHidden(name)
   })
   readonly property var cachedVisibleAudioSources: cachedAudioSources.filter(function(node) {
     var name = Model.nodeName(node)
-    return name !== "" && !deviceHidden(name) && !Model.isMonitorSource(node)
+    return name !== "" && usableInputNode(node) && mutableAudioNode(node)
+      && !deviceHidden(name)
   })
   readonly property var audioSinks: rawAudioSinks.length > 0
     ? rawAudioSinks : cachedVisibleAudioSinks
   readonly property var audioSources: rawAudioSources.length > 0
     ? rawAudioSources : cachedVisibleAudioSources
   readonly property var routingSinks: candidateSinks.filter(function(node) {
-    return root.sinkAvailable(node)
+    return root.outputSinkRouteAvailable(node)
   })
   readonly property var routingSources: candidateSources
   readonly property string preferredOutputName: Model.preferredAudioNodeName(
@@ -231,6 +260,10 @@ Panel {
   // removal signal; rebuilding a Repeater from that signal path has crashed
   // in Quickshell's PipeWire service. The snapshot timer lets that mutation
   // settle first, and closed panels keep their repeaters detached entirely.
+  // The Repeaters below use only the snapshot lengths as their models and
+  // resolve each node by index. Passing native PwNode objects as JavaScript
+  // list rows makes Qt synthesize delegate properties from an object that may
+  // disappear mid-regeneration when hardware is unplugged.
   property var displayAudioSinks: []
   property var displayAudioSources: []
   property var displayAudioStreams: []
@@ -252,25 +285,38 @@ Panel {
     ? streamRouteSetError : streamRouteReadError
   property string defaultOutputError: ""
   property string defaultInputError: ""
+  // Suppress immediate retry loops after a transactional fallback failure.
+  // A new physical topology makes the attempt eligible again.
+  property string degradedGroupFallbackFrom: ""
+  property string degradedGroupFallbackBlockedSink: ""
+  property string degradedGroupFallbackBlockedTopology: ""
   readonly property string defaultDeviceError: defaultOutputError !== ""
     ? defaultOutputError : defaultInputError
   readonly property string panelError: defaultDeviceError !== ""
-    ? defaultDeviceError : (streamRouteError !== "" ? streamRouteError : rulesStore.error)
+    ? defaultDeviceError : (streamRouteError !== "" ? streamRouteError
+      : (outputGroups.error !== "" ? outputGroups.error : rulesStore.error))
   property var pendingStreamRoute: null
   readonly property bool routeMutationBusy: defaultSinkProc.running
     || defaultSourceProc.running || streamRouteSetProc.running
-    || pendingStreamRoute !== null || rulesStore.busy
+    || pendingStreamRoute !== null || rulesStore.busy || outputGroups.busy
   readonly property bool directDeviceMutationBusy: sceneController.busy
     || defaultSinkProc.running || defaultSourceProc.running
   onDirectDeviceMutationBusyChanged: if (!directDeviceMutationBusy)
     enforceOutputVolumeLimit()
   readonly property bool sceneMutationBusy: sceneController.busy || routeMutationBusy
     || streamOutputMenuOpen
+  readonly property bool outputTopologyRecoveryBusy: !rulesLoaded
+    || sceneController.busy || rulesStore.busy || outputGroups.busy
+    || defaultSinkProc.running || defaultSourceProc.running
+    || streamRouteSetProc.running || pendingStreamRoute !== null
 
   // The default is ordered first and named by behavior. Applications on that
   // option follow later default changes; all other choices are persistent.
+  readonly property var streamRouteSinks: displayAudioSinks.filter(function(node) {
+    return root.outputSinkRouteAvailable(node)
+  })
   readonly property var streamOutputOptions: Model.streamOutputOptions(
-    displayAudioSinks, sink, nodeLabel)
+    streamRouteSinks, sink, routeNodeLabel)
   readonly property var recordingInputOptions: Model.recordingInputOptions(
     displayAudioSources, source, nodeLabel)
 
@@ -312,10 +358,15 @@ Panel {
   // Re-resolve whenever the selected output changes; the timer below is only a
   // safety net for the tuning being applied or removed underneath us.
   onSinkChanged: {
+    if (Model.nodeName(sink) !== degradedGroupFallbackBlockedSink) {
+      degradedGroupFallbackBlockedSink = ""
+      degradedGroupFallbackBlockedTopology = ""
+    }
     // Never expose the physical endpoint resolved for the previous default
     // while a newer asynchronous lookup is still in flight.
     volumeSinkName = ""
     resolveVolumeSink()
+    Qt.callLater(scheduleOutputTopologyRecovery)
   }
 
   function resolveVolumeSink() {
@@ -455,7 +506,7 @@ Panel {
   function sectionVisible(section) {
     if (section === "scenes") return audioScenes.length > 0
     if (section === "output") return true
-    if (section === "input") return displayAudioSources.length > 0 || !!source
+    if (section === "input") return displayAudioSources.length > 0 || hasInput
     if (section === "streams") return displayAudioStreams.length > 0
     if (section === "recording") return displayRecordingStreams.length > 0
     return false
@@ -463,7 +514,7 @@ Panel {
 
   function sectionHasSlider(section) {
     if (section === "output") return true
-    if (section === "input") return !!source
+    if (section === "input") return hasInput
     return false  // stream rows carry their own sliders inline; not a section-level slider
   }
 
@@ -615,9 +666,11 @@ Panel {
     if (sceneMutationBusy) return
     controller.hide()
     if (bar && bar.shell && typeof bar.shell.summon === "function")
-      bar.shell.summon("ssupt.audio-control", "{}")
+      bar.shell.summon("ssupt.audio-control", '{"view":"advanced"}')
     else
-      Quickshell.execDetached(["omarchy-shell", "shell", "summon", "ssupt.audio-control", "{}"])
+      Quickshell.execDetached([
+        "omarchy-shell", "shell", "summon", "ssupt.audio-control", '{"view":"advanced"}'
+      ])
   }
 
   function updateStreamOutputMenu(open) {
@@ -648,6 +701,7 @@ Panel {
   // routed as soon as it appears, panel open or not.
   onAudioSinksChanged: {
     scheduleDisplayAudioModelRefresh()
+    scheduleOutputTopologyRecovery()
     Qt.callLater(enforceRoutingRules)
   }
   onAudioSourcesChanged: {
@@ -867,6 +921,7 @@ Panel {
 
   function enforceRoutingRules() {
     if (!rulesLoaded || rulesStore.busy || sceneController.busy
+        || outputGroups.busy
         || defaultSinkProc.running || defaultSourceProc.running || streamRouteSetProc.running
         || pendingStreamRoute || streamOutputMenuOpen) return
     pruneRoutingEnforcement()
@@ -1038,11 +1093,33 @@ Panel {
     if (hasInput) setAudioNodeMuted(source, mute)
   }
 
+  function scheduleOutputTopologyRecovery() {
+    outputTopologyRecoveryTimer.restart()
+  }
+
+  function recoverDegradedDefaultGroup() {
+    if (outputTopologyRecoveryBusy) return false
+    var currentSinkName = Model.nodeName(sink)
+    var group = rulesStore.groupForSink(currentSinkName)
+    if (!group || rulesStore.outputGroupAvailable(group)) return false
+
+    var topology = serialSignature(rulesStore.physicalSinks)
+    if (degradedGroupFallbackBlockedSink === group.sink
+        && degradedGroupFallbackBlockedTopology === topology) return false
+
+    var fallback = rulesStore.outputGroupFallbackNode(group)
+    if (!mutableAudioNode(fallback)) return false
+    degradedGroupFallbackFrom = group.sink
+    if (setDefaultSink(fallback)) return true
+    degradedGroupFallbackFrom = ""
+    return false
+  }
+
   function setDefaultSink(node) {
     var objectId = Model.nodeObjectId(node)
     var name = Model.nodeName(node)
     if (!mutableAudioNode(node) || objectId === "" || name === ""
-        || sceneController.busy || routeMutationBusy) return
+        || sceneController.busy || routeMutationBusy) return false
     var previousSinkName = Model.nodeName(sink)
     var previousSinkObjectId = Model.nodeObjectId(sink)
     defaultOutputError = ""
@@ -1053,6 +1130,7 @@ Panel {
       previousSinkObjectId
     ])
     defaultSinkProc.running = true
+    return true
   }
 
   function setDefaultSource(node) {
@@ -1102,6 +1180,11 @@ Panel {
       if (alias !== "") return alias
     }
     return Model.nodeLabel(node)
+  }
+
+  function routeNodeLabel(node) {
+    var label = nodeLabel(node)
+    return Model.isOutputGroupSink(node) ? label + " · Output group" : label
   }
 
   function nodeProps(node) {
@@ -1349,10 +1432,25 @@ Panel {
   Process {
     id: defaultSinkProc
     onExited: function(exitCode) {
+      var fallbackFrom = root.degradedGroupFallbackFrom
+      root.degradedGroupFallbackFrom = ""
       root.defaultOutputError = exitCode === 0 ? ""
         : (exitCode === 2 ? "Default output changed, but its preference could not be saved"
           : (exitCode === 4 ? "Default output change could not be fully restored"
             : "Could not change the default audio output"))
+      if (fallbackFrom === "") return
+
+      if (Model.nodeName(root.sink) !== fallbackFrom) {
+        root.degradedGroupFallbackBlockedSink = ""
+        root.degradedGroupFallbackBlockedTopology = ""
+        root.scheduleOutputTopologyRecovery()
+      } else {
+        root.degradedGroupFallbackBlockedSink = fallbackFrom
+        root.degradedGroupFallbackBlockedTopology = root.serialSignature(
+          rulesStore.physicalSinks)
+        outputTopologyRecoveryTimer.stop()
+        outputGroups.scheduleReconcile()
+      }
     }
   }
 
@@ -1437,6 +1535,20 @@ Panel {
     interval: 75
     repeat: false
     onTriggered: root.refreshDisplayAudioModels()
+  }
+
+  Timer {
+    id: outputTopologyRecoveryTimer
+    interval: 350
+    repeat: false
+    onTriggered: {
+      if (!root.rulesLoaded) return
+      if (root.outputTopologyRecoveryBusy) {
+        restart()
+        return
+      }
+      if (!root.recoverDegradedDefaultGroup()) outputGroups.scheduleReconcile()
+    }
   }
 
   Timer {
@@ -1834,18 +1946,18 @@ Panel {
             }
 
             Repeater {
-              model: root.displayAudioSinks
+              model: root.displayAudioSinks.length
 
               AudioSinkRow {
                 id: sinkDelegate
-                required property var modelData
                 required property int index
                 width: panelColumn.width
-                node: modelData
+                node: root.displayAudioSinks[index]
                 rowIndex: index
                 bar: root.bar
                 preferredName: root.preferredOutputName
                 label: root.nodeLabel(sinkDelegate.node)
+                outputGroup: Model.isOutputGroupSink(sinkDelegate.node)
                 defaultSetBusy: root.sceneMutationBusy
                 hasCursor: root.cursorActive && root.focusSection === "output"
                   && root.selectedIndex === sinkDelegate.rowIndex
@@ -1865,14 +1977,14 @@ Panel {
 
           // ---- Input ----
           PanelSeparator {
-            visible: root.displayAudioSources.length > 0 || !!root.source
+            visible: root.displayAudioSources.length > 0 || root.hasInput
             foreground: root.bar.foreground
           }
 
           Column {
             width: parent.width
             spacing: Style.space(6)
-            visible: root.displayAudioSources.length > 0 || !!root.source
+            visible: root.displayAudioSources.length > 0 || root.hasInput
 
             Item {
               width: parent.width
@@ -1905,7 +2017,7 @@ Panel {
 
             CursorSurface {
               id: inputSliderRow
-              visible: !!root.source
+              visible: root.hasInput
               width: parent.width
               height: inputControls.implicitHeight + Style.spacing.controlGap
               hasCursor: root.cursorActive && root.focusSection === "input" && root.selectedIndex === -1
@@ -1970,14 +2082,13 @@ Panel {
             }
 
             Repeater {
-              model: root.displayAudioSources
+              model: root.displayAudioSources.length
 
               AudioSourceRow {
                 id: sourceDelegate
-                required property var modelData
                 required property int index
                 width: panelColumn.width
-                node: modelData
+                node: root.displayAudioSources[index]
                 rowIndex: index
                 bar: root.bar
                 preferredName: root.preferredInputName
@@ -2018,14 +2129,13 @@ Panel {
 
             Repeater {
               id: streamRepeater
-              model: root.displayAudioStreams
+              model: root.displayAudioStreams.length
 
               AudioStreamRow {
                 id: streamDelegate
-                required property var modelData
                 required property int index
                 width: panelColumn.width
-                node: modelData
+                node: root.displayAudioStreams[index]
                 nodeLive: root.mutableAudioNode(streamDelegate.node)
                 rowIndex: index
                 recording: false
@@ -2091,14 +2201,13 @@ Panel {
 
             Repeater {
               id: recordingStreamRepeater
-              model: root.displayRecordingStreams
+              model: root.displayRecordingStreams.length
 
               AudioStreamRow {
                 id: recordingStreamDelegate
-                required property var modelData
                 required property int index
                 width: panelColumn.width
-                node: modelData
+                node: root.displayRecordingStreams[index]
                 nodeLive: root.mutableAudioNode(recordingStreamDelegate.node)
                 rowIndex: index
                 recording: true

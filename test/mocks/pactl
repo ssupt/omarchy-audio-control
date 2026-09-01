@@ -1,5 +1,109 @@
 #!/bin/bash
 
+if [[ -n ${AUDIO_CONTROL_GROUP_STATE:-} ]]; then
+  group_state_write() {
+    local temporary
+    temporary=${AUDIO_CONTROL_GROUP_STATE}.tmp
+    jq "$@" "$AUDIO_CONTROL_GROUP_STATE" >"$temporary" || return 1
+    mv -f -- "$temporary" "$AUDIO_CONTROL_GROUP_STATE"
+  }
+
+  case "$*" in
+    "-f json list sinks")
+      jq -c '.sinks' "$AUDIO_CONTROL_GROUP_STATE"
+      exit $?
+      ;;
+    "-f json list modules")
+      # PipeWire-Pulse omits a module index from JSON even though load-module
+      # and unload-module use one. The owning sink exposes it instead.
+      jq -c '.modules | map(del(.index, .sink))' "$AUDIO_CONTROL_GROUP_STATE"
+      exit $?
+      ;;
+    "-f json list sink-inputs")
+      jq -c '.sinkInputs' "$AUDIO_CONTROL_GROUP_STATE"
+      exit $?
+      ;;
+    "get-default-sink")
+      jq -er '.defaultSink | select(type == "string" and length > 0)' \
+        "$AUDIO_CONTROL_GROUP_STATE"
+      exit $?
+      ;;
+    load-module\ module-combine-sink\ *)
+      group_sink=
+      group_members=
+      group_id=
+      group_argument=
+      for group_arg in "${@:3}"; do
+        group_argument+="${group_argument:+ }$group_arg"
+        [[ $group_arg != sink_name=* ]] || group_sink=${group_arg#sink_name=}
+        [[ $group_arg != sinks=* ]] || group_members=${group_arg#sinks=}
+        if [[ $group_arg =~ omarchy\.audio\.group\.id=([0-9a-f]{16}) ]]; then
+          group_id=${BASH_REMATCH[1]}
+        fi
+      done
+      [[ $group_sink =~ ^omarchy_audio_group_[0-9a-f]{16}$
+          && $group_id =~ ^[0-9a-f]{16}$ && -n $group_members ]] || exit 1
+      [[ ${AUDIO_CONTROL_GROUP_LOAD_FAIL_MEMBERS:-} != "$group_members" ]] || exit 1
+      jq -e --arg sink "$group_sink" 'any(.sinks[]; .name == $sink) | not' \
+        "$AUDIO_CONTROL_GROUP_STATE" >/dev/null || exit 1
+      group_module=$(jq -er '.nextModule | select(type == "number")' \
+        "$AUDIO_CONTROL_GROUP_STATE") || exit 1
+      group_sink_index=$((group_module + 1000))
+      group_object_id=$((group_module + 2000))
+      group_state_write --argjson module "$group_module" \
+        --argjson sinkIndex "$group_sink_index" --arg object "$group_object_id" \
+        --arg sink "$group_sink" --arg id "$group_id" --arg argument "$group_argument" '
+        .nextModule += 1
+        | .modules += [{
+            index: $module,
+            name: "module-combine-sink",
+            argument: $argument,
+            sink: $sink
+          }]
+        | .sinks += [{
+            index: $sinkIndex,
+            name: $sink,
+            description: "Omarchy_Output_Group",
+            owner_module: $module,
+            properties: {
+              "object.id": $object,
+              "application.id": "ssupt.audio-control",
+              "omarchy.audio.group.id": $id,
+              "node.virtual": "true",
+              "pulse.module.id": ($module | tostring)
+            }
+          }]
+      ' || exit 1
+      [[ -z ${AUDIO_CONTROL_GROUP_LOG:-} ]] ||
+        printf 'load %s %s %s\n' "$group_module" "$group_sink" "$group_members" \
+          >>"$AUDIO_CONTROL_GROUP_LOG"
+      printf '%s\n' "$group_module"
+      exit 0
+      ;;
+    unload-module\ *)
+      group_module=${2:-}
+      [[ $group_module =~ ^[0-9]{1,20}$ ]] || exit 1
+      [[ ${AUDIO_CONTROL_GROUP_UNLOAD_FAIL:-0} != 1 ]] || exit 1
+      group_sink=$(jq -er --arg module "$group_module" '
+        [.modules[] | select((.index | tostring) == $module)] as $matches
+        | if ($matches | length) == 1 then $matches[0].sink
+          else error("unknown module") end
+      ' "$AUDIO_CONTROL_GROUP_STATE") || exit 1
+      if [[ ${AUDIO_CONTROL_GROUP_UNLOAD_NO_EFFECT:-0} != 1 ]]; then
+        group_state_write --arg module "$group_module" --arg sink "$group_sink" '
+          .modules |= map(select((.index | tostring) != $module))
+          | .sinks |= map(select(.name != $sink))
+        ' || exit 1
+      fi
+      [[ -z ${AUDIO_CONTROL_GROUP_LOG:-} ]] ||
+        printf 'unload %s %s\n' "$group_module" "$group_sink" \
+          >>"$AUDIO_CONTROL_GROUP_LOG"
+      exit 0
+      ;;
+  esac
+  exit 1
+fi
+
 if [[ $* == "-f json list sinks" && -n ${AUDIO_CONTROL_DIAGNOSTIC_SINK_FIXTURE:-} ]]; then
   command cat "$AUDIO_CONTROL_DIAGNOSTIC_SINK_FIXTURE"
   exit 0
@@ -159,10 +263,10 @@ if [[ -n ${AUDIO_CONTROL_OUTPUT_DEFAULT_LOG:-} ]]; then
         fi
       done <"$AUDIO_CONTROL_OUTPUT_DEFAULT_LOG"
       if [[ ${AUDIO_CONTROL_DEFAULT_DUPLICATE_STREAM:-} == output ]]; then
-        printf '[{"index":300,"sink":%s,"properties":{"object.id":"900","application.name":"Player"}},{"index":302,"sink":%s,"properties":{"object.id":"900","application.name":"Duplicate"}},{"index":301,"sink":100,"properties":{"object.id":"901","application.name":"Pinned"}}]\n' \
+        printf '[{"index":300,"sink":%s,"properties":{"object.id":"900","application.name":"Player"}},{"index":302,"sink":%s,"properties":{"object.id":"900","application.name":"Duplicate"}},{"index":301,"sink":100,"properties":{"object.id":"901","application.name":"Pinned"}},{"index":303,"sink":100,"owner_module":77,"properties":{"object.id":"903","application.name":"Combine follower"}}]\n' \
           "$input_sink" "$input_sink"
       else
-        printf '[{"index":300,"sink":%s,"properties":{"object.id":"900","application.name":"Player"}},{"index":301,"sink":100,"properties":{"object.id":"901","application.name":"Pinned"}}]\n' "$input_sink"
+        printf '[{"index":300,"sink":%s,"properties":{"object.id":"900","application.name":"Player"}},{"index":301,"sink":100,"properties":{"object.id":"901","application.name":"Pinned"}},{"index":303,"sink":100,"owner_module":77,"properties":{"object.id":"903","application.name":"Combine follower"}}]\n' "$input_sink"
       fi
       exit 0
       ;;
@@ -187,7 +291,7 @@ if [[ -n ${AUDIO_CONTROL_ROUTE_LIST:-} && $* == "-f json list" ]]; then
   if [[ -n ${AUDIO_CONTROL_ROUTE_LIST_JSON:-} ]]; then
     printf '%s\n' "$AUDIO_CONTROL_ROUTE_LIST_JSON"
   else
-    echo '{"sink_inputs":[{"index":300,"sink":101,"properties":{"object.id":"900"}}],"source_outputs":[{"index":400,"source":201,"properties":{"object.id":"901"}}]}'
+    echo '{"sink_inputs":[{"index":300,"sink":101,"properties":{"object.id":"900"}},{"index":301,"sink":100,"owner_module":77,"properties":{"object.id":"902"}}],"source_outputs":[{"index":400,"source":201,"properties":{"object.id":"901"}},{"index":401,"source":200,"owner_module":78,"properties":{"object.id":"903"}}]}'
   fi
   exit 0
 fi
@@ -318,6 +422,9 @@ if [[ -n ${AUDIO_CONTROL_ROUTE_LOG:-} ]]; then
         sink_inputs='[{"index":300,"sink":100,"properties":{"object.id":"999"}},{"index":302,"sink":'"$route_sink"',"properties":{"object.id":"900"}}]'
       elif (( route_read_count > 1 )) && [[ ${AUDIO_CONTROL_ROUTE_DUPLICATE_STREAM_OBJECT:-0} == 1 ]]; then
         sink_inputs='[{"index":300,"sink":'"$route_sink"',"properties":{"object.id":"900"}},{"index":302,"sink":'"$route_sink"',"properties":{"object.id":"900"}}]'
+      fi
+      if [[ ${AUDIO_CONTROL_ROUTE_STREAM_OWNER_MODULE:-0} == 1 ]]; then
+        sink_inputs='[{"index":300,"sink":'"$route_sink"',"owner_module":77,"properties":{"object.id":"900"}}]'
       fi
       sinks='[{"index":'"$route_original_index"',"properties":{"object.id":"1000"}},{"index":'"$route_target_index"',"properties":{"object.id":"1001"}}]'
       if (( route_read_count > 1 )) && [[ ${AUDIO_CONTROL_ROUTE_TARGET_REINDEX:-0} == 1 ]]; then
