@@ -1,20 +1,23 @@
 #!/bin/bash
 
-# omarchy:summary=Manage offline application routing rules and device preferences
+# omarchy:summary=Manage offline application routes, output groups, and device preferences
 # omarchy:group=audio
-# omarchy:args=[set-app <app> <playback|recording> <target> | del-app <app> <playback|recording> | set-alias <node> <label> | set-flag <node> <favorite|hidden> <true|false>]
+# omarchy:args=[show | set-app <app> <playback|recording> <target> | del-app <app> <playback|recording> | set-output-group <id> <name> <members-json> | del-output-group <id> | set-alias <node> <label> | set-flag <node> <favorite|hidden> <true|false>]
 
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$script_dir/.audio-common"
 rules_file=${OMARCHY_AUDIO_RULES_FILE:-${XDG_CONFIG_HOME:-${HOME:?}/.config}/omarchy/audio-rules.json}
-action=${1:-}
+action=${1:-show}
 maximum_store_bytes=1048576
 
 usage() {
-  echo "Usage: audio-app-rules set-app <app> <playback|recording> <target>" >&2
+  echo "Usage: audio-app-rules [show]" >&2
+  echo "       audio-app-rules set-app <app> <playback|recording> <target>" >&2
   echo "       audio-app-rules del-app <app> <playback|recording>" >&2
+  echo "       audio-app-rules set-output-group <id> <name> <members-json>" >&2
+  echo "       audio-app-rules del-output-group <id>" >&2
   echo "       audio-app-rules set-alias <node> <label>" >&2
   echo "       audio-app-rules set-flag <node> <favorite|hidden> <true|false>" >&2
   exit 1
@@ -25,7 +28,7 @@ read_rules() {
     echo "Audio rules are not stored in a regular file" >&2
     return 1
   elif [[ ! -s $rules_file ]]; then
-    printf '%s\n' '{"version":1,"appRules":[],"devices":{"aliases":{},"favorites":[],"hidden":[]}}'
+    printf '%s\n' '{"version":1,"appRules":[],"outputGroups":[],"devices":{"aliases":{},"favorites":[],"hidden":[]}}'
   elif (( $(stat -c %s -- "$rules_file" 2>/dev/null || printf '%s' "$((maximum_store_bytes + 1))") > maximum_store_bytes )); then
     echo "Audio rules are too large; refusing to overwrite them" >&2
     return 1
@@ -74,10 +77,36 @@ read_rules() {
           | select($node != "" and $label != "")
           | {key: $node, value: $label})][]) as $entry
           ({}; if length >= 128 or has($entry.key) then . else .[$entry.key] = $entry.value end);
+      def normalized_groups:
+        reduce ([((if (.outputGroups | type) == "array" then .outputGroups else [] end)[:64][]?
+          | select(type == "object")
+          | ((.id // "") | select(type == "string" and test("^[0-9a-f]{16}$"))) as $id
+          | ((.name // "") | clean(48)) as $name
+          | ("omarchy_audio_group_" + $id) as $sink
+          | ([((if (.members | type) == "array" then .members else [] end)[:32][]?
+              | identifier(160)
+              | select(test("^[A-Za-z0-9_.:-]{1,160}$"))
+              | select(test("^omarchy_audio_group_[0-9a-f]{16}$") | not))]
+              | unique | sort) as $members
+          | select($name != "" and .sink == $sink
+              and ($members | length) >= 2 and ($members | length) <= 8)
+          | {id: $id, name: $name, sink: $sink, members: $members})][]) as $group
+          ({ids: {}, names: {}, members: {}, values: []};
+            ($group.name | ascii_downcase) as $nameKey
+            | ($group.members | join("\u001f")) as $memberKey
+            | if (.ids | has($group.id)) or (.names | has($nameKey))
+                or (.members | has($memberKey))
+                or (.values | length) >= 16 then .
+              else .ids[$group.id] = true
+                | .names[$nameKey] = true
+                | .members[$memberKey] = true
+                | .values += [$group] end)
+        | .values;
       .[0]
       | {
         version: 1,
         appRules: normalized_rules,
+        outputGroups: normalized_groups,
         devices: {
           aliases: normalized_aliases,
           favorites: ordered_strings(
@@ -149,6 +178,10 @@ validate_identifier() {
 }
 
 case "$action" in
+  show)
+    (( $# == 0 || $# == 1 )) || usage
+    read_rules
+    ;;
   set-app)
     (( $# == 4 )) || usage
     app=$(normalize_app "$2")
@@ -176,6 +209,60 @@ case "$action" in
       | .appRules |= map(select(.direction != $direction
         or .app != $app))' \
       --arg app "$app" --arg direction "$direction"
+    ;;
+  set-output-group)
+    (( $# == 4 )) || usage
+    group_id=${2:-}
+    group_name=$(normalize_string "${3:-}" 48)
+    group_members=$(jq -cer '
+      if type != "array" or length < 2 or length > 8
+          or (all(.[];
+            type == "string"
+            and length > 0 and length <= 160
+            and test("^[A-Za-z0-9_.:-]{1,160}$")
+            and (test("^omarchy_audio_group_[0-9a-f]{16}$") | not)) | not)
+        then error("invalid members")
+        else unique | sort
+        | if length < 2 or length > 8 then error("invalid members") else . end
+      end
+    ' <<<"${4:-}") || usage
+    [[ $group_id =~ ^[0-9a-f]{16}$ && -n $group_name ]] || usage
+    group_sink=omarchy_audio_group_$group_id
+    write_rules '
+      ($name | ascii_downcase) as $nameKey
+      | if any(.outputGroups[]?;
+          .id != $id and (((.name | ascii_downcase) == $nameKey)
+            or .members == $members))
+        then error("duplicate output group")
+        else . end
+      | if (([.outputGroups[]? | select(.id == $id)] | length) == 0
+          and (.outputGroups | length) >= 16)
+        then error("output group limit reached")
+        else . end
+      | .version = 1
+      | .outputGroups = (
+          (.outputGroups | map(select(.id != $id)))
+          + [{id: $id, name: $name, sink: $sink, members: $members}]
+          | .[-16:]
+        )
+    ' --arg id "$group_id" --arg name "$group_name" --arg sink "$group_sink" \
+      --argjson members "$group_members"
+    ;;
+  del-output-group)
+    (( $# == 2 )) || usage
+    group_id=${2:-}
+    [[ $group_id =~ ^[0-9a-f]{16}$ ]] || usage
+    group_sink=omarchy_audio_group_$group_id
+    write_rules '
+      if any(.appRules[]?; .target == $sink)
+        then error("output group is used by an application rule")
+        else . end
+      | .version = 1
+      | .outputGroups |= map(select(.id != $id))
+      | .devices.aliases |= del(.[$sink])
+      | .devices.favorites |= map(select(. != $sink))
+      | .devices.hidden |= map(select(. != $sink))
+    ' --arg id "$group_id" --arg sink "$group_sink"
     ;;
   set-alias)
     (( $# == 3 )) || usage

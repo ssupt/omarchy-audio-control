@@ -43,7 +43,9 @@ audio_capture_bounded state 16777216 timeout 2 pactl -f json list || exit 1
 stream_record=$(jq -cer --arg key "$streams_key" --arg stream "$stream" '
   if type != "object" or (.[$key] | type) != "array" or (.[$key] | length) > 1024
     then error("invalid stream list")
-  else [.[$key][] | select((.index | tostring) == $stream)] as $matches
+  else [.[$key][]
+      | select(.owner_module == null)
+      | select((.index | tostring) == $stream)] as $matches
     | if ($matches | length) == 1 then $matches[0]
       else error("ambiguous stream identity") end
   end

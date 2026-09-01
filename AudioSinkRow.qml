@@ -15,6 +15,7 @@ CursorSurface {
   required property string preferredName
   required property bool defaultSetBusy
   required property string label
+  required property bool outputGroup
 
   signal claimed(string section, int index)
   signal activated(var node)
@@ -52,6 +53,18 @@ CursorSurface {
       font.bold: root.isActive
       elide: Text.ElideRight
       width: parent.width - Style.space(22) - Style.space(8)
+        - (groupTag.visible ? groupTag.implicitWidth + Style.space(8) : 0)
+      anchors.verticalCenter: parent.verticalCenter
+    }
+
+    Text {
+      id: groupTag
+      visible: root.outputGroup
+      text: "GROUP"
+      color: Color.accent
+      font.family: root.bar.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: true
       anchors.verticalCenter: parent.verticalCenter
     }
   }

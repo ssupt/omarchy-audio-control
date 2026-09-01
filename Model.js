@@ -53,6 +53,8 @@ function isInternalAudioNode(name, properties) {
     return value === "quickshell"
       || value.indexOf("omarchy_audio_test") === 0
       || value.indexOf("omarchy_speaker_tuning") === 0
+      || value.indexOf("omarchy_audio_group_") === 0
+      || value.indexOf("output.omarchy_audio_group_") === 0
       || String(props["application.id"] || "") === "ssupt.audio-control"
   } catch (e) {
     return false
@@ -81,6 +83,19 @@ function classifyAudioNodes(nodes) {
     try {
       var node = values[i]
       if (!node) continue
+      // PipeWire's Pulse compatibility layer exposes module-combine-sink as
+      // both a sink and a live stream. Quickshell therefore reports isStream
+      // on some versions even though this is the user-selectable endpoint.
+      // Recognize only our fully marked endpoint before classifying streams.
+      if (isOutputGroupSink(node) && node.isSink === true) {
+        // An unbound endpoint has no properties yet. Track the exact reserved
+        // name once so PwObjectTracker can bind it, then require all ownership
+        // markers as soon as it becomes ready.
+        if (result.sinks.length < 512
+            && (node.ready !== true || isManagedOutputGroupSink(node)))
+          result.sinks.push(node)
+        continue
+      }
       if (node.isStream) {
         if (isInternalAudioNode(nodeName(node), nodeProps(node))) continue
         if (isPlaybackStream(node) && result.playbackStreams.length < 512)
@@ -89,7 +104,8 @@ function classifyAudioNodes(nodes) {
           result.recordingStreams.push(node)
         continue
       }
-      if (node.isSink === true && result.sinks.length < 512) result.sinks.push(node)
+      if (node.isSink === true && result.sinks.length < 512
+          && !isInternalAudioNode(nodeName(node), nodeProps(node))) result.sinks.push(node)
       else if (result.sources.length < 512 && isAudioSource(node)
           && !isInternalAudioNode(nodeName(node), nodeProps(node)) && !isMonitorSource(node))
         result.sources.push(node)
@@ -184,6 +200,7 @@ function isAudioRulesDocument(raw) {
   var parsed = storedObjectDocument(raw, 1048576)
   if (!parsed || !hasVersionOneOrNone(parsed)) return false
   if (hasOwn(parsed, "appRules") && !Array.isArray(parsed.appRules)) return false
+  if (hasOwn(parsed, "outputGroups") && !Array.isArray(parsed.outputGroups)) return false
   if (hasOwn(parsed, "devices") && (!parsed.devices
       || typeof parsed.devices !== "object" || Array.isArray(parsed.devices))) return false
   return true
@@ -288,6 +305,40 @@ function parseAudioControlSettings(raw) {
     version: 1,
     outputOverdrive: parsed.outputOverdrive === true,
     captureNotifications: parsed.captureNotifications !== false
+  }
+}
+
+// Bare shell summons are the same gesture Omarchy uses for its built-in audio
+// pullout. Advanced views must opt in so a cloned replacement does not turn
+// SUPER+CTRL+A into a settings-window shortcut. A recognized tab also counts
+// as an explicit advanced request for companion plugins and old deep links.
+function parseAudioOpenRequest(raw) {
+  var result = { advanced: false, tab: 0 }
+  var text = boundedSerializedInput(raw, 4096)
+  if (text === null) return result
+
+  var parsed
+  try {
+    parsed = JSON.parse(text || "{}")
+  } catch (e) {
+    return result
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return result
+  if (parsed.view === "quick") return result
+
+  var tabs = {
+    devices: 0,
+    bluetooth: 1,
+    policy: 2,
+    scenes: 3,
+    routing: 4,
+    diagnostics: 5
+  }
+  var tabName = typeof parsed.tab === "string" ? parsed.tab : ""
+  var tab = mapValue(tabs, tabName, -1)
+  return {
+    advanced: parsed.view === "advanced" || parsed.advanced === true || tab >= 0,
+    tab: tab >= 0 ? tab : 0
   }
 }
 
@@ -469,6 +520,45 @@ function parseAudioRules(raw) {
     appRules.push({ app: app, direction: direction, target: target })
   }
 
+  var outputGroups = []
+  var rawGroups = Array.isArray(parsed.outputGroups) ? parsed.outputGroups : []
+  var seenGroupIds = {}
+  var seenGroupNames = {}
+  var seenGroupMembers = {}
+  for (i = 0; i < rawGroups.length && i < 64 && outputGroups.length < 16; i++) {
+    var group = rawGroups[i]
+    if (!group || typeof group !== "object" || Array.isArray(group)) continue
+    var groupId = typeof group.id === "string" && /^[0-9a-f]{16}$/.test(group.id)
+      ? group.id : ""
+    var groupName = sanitizeSceneString(group.name, "", 48)
+    var groupNameKey = normalizeAppKey(groupName)
+    var expectedSink = groupId === "" ? "" : "omarchy_audio_group_" + groupId
+    if (groupId === "" || groupName === "" || group.sink !== expectedSink
+        || hasOwn(seenGroupIds, groupId) || hasOwn(seenGroupNames, groupNameKey)) continue
+
+    var members = []
+    var rawMembers = Array.isArray(group.members) ? group.members : []
+    for (var m = 0; m < rawMembers.length && m < 32 && members.length < 8; m++) {
+      var member = sanitizeIdentifier(rawMembers[m], 160)
+      if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(member)
+          || /^omarchy_audio_group_[0-9a-f]{16}$/.test(member)
+          || members.indexOf(member) !== -1) continue
+      members.push(member)
+    }
+    members.sort()
+    var memberKey = members.join("\u001f")
+    if (members.length < 2 || hasOwn(seenGroupMembers, memberKey)) continue
+    setMapValue(seenGroupIds, groupId, true)
+    setMapValue(seenGroupNames, groupNameKey, true)
+    setMapValue(seenGroupMembers, memberKey, true)
+    outputGroups.push({
+      id: groupId,
+      name: groupName,
+      sink: expectedSink,
+      members: members
+    })
+  }
+
   var devices = parsed.devices && typeof parsed.devices === "object" && !Array.isArray(parsed.devices)
     ? parsed.devices : {}
   var aliases = {}
@@ -496,11 +586,81 @@ function parseAudioRules(raw) {
   return {
     version: 1,
     appRules: appRules,
+    outputGroups: outputGroups,
     devices: {
       aliases: aliases,
       favorites: stringList(devices.favorites, 64),
       hidden: stringList(devices.hidden, 64)
     }
+  }
+}
+
+function outputGroupForSink(groups, sinkName) {
+  var values = Array.isArray(groups) ? groups : []
+  var name = sanitizeIdentifier(sinkName, 160)
+  if (name === "") return null
+  for (var i = 0; i < values.length && i < 64; i++) {
+    var group = values[i]
+    if (group && group.sink === name) return group
+  }
+  return null
+}
+
+// Pick a deterministic physical destination when a selected output group is
+// degraded. A duplicated live name is deliberately skipped: changing a
+// default by name in that state could address the wrong PipeWire object.
+function outputGroupFallbackMember(group, liveSinkNames) {
+  var members = group && Array.isArray(group.members) ? group.members : []
+  var live = Array.isArray(liveSinkNames) ? liveSinkNames : []
+  for (var i = 0; i < members.length && i < 8; i++) {
+    var member = sanitizeIdentifier(members[i], 160)
+    if (member === "" || isOutputGroupSink(member)) continue
+    var matches = 0
+    for (var j = 0; j < live.length && j < 512; j++) {
+      if (live[j] !== member) continue
+      matches++
+      if (matches > 1) break
+    }
+    if (matches === 1) return member
+  }
+  return ""
+}
+
+function isOutputGroupSink(value) {
+  var name = typeof value === "string" ? value : nodeName(value)
+  return /^omarchy_audio_group_[0-9a-f]{16}$/.test(String(name || ""))
+}
+
+function isManagedOutputGroupSink(node) {
+  try {
+    if (!node || node.isSink !== true || !isOutputGroupSink(node)) return false
+    var name = nodeName(node)
+    var groupId = name.substring("omarchy_audio_group_".length)
+    var properties = nodeProps(node)
+    var virtualValue = String(properties["node.virtual"] || "").toLowerCase()
+    return String(properties["application.id"] || "") === "ssupt.audio-control"
+      && String(properties["omarchy.audio.group.id"] || "") === groupId
+      && (virtualValue === "true" || virtualValue === "1")
+  } catch (e) {
+    return false
+  }
+}
+
+function isOutputGroupMemberSink(node) {
+  try {
+    if (!node || node.ready !== true || node.isSink !== true || node.isStream === true
+        || isOutputGroupSink(node)) return false
+    var properties = nodeProps(node)
+    var virtualValue = String(properties["node.virtual"] || "").toLowerCase()
+    var deviceClass = String(properties["device.class"] || "").toLowerCase()
+    var factoryName = String(properties["factory.name"] || "").toLowerCase()
+    return virtualValue !== "true" && virtualValue !== "1"
+      && deviceClass !== "filter" && deviceClass !== "monitor"
+      && factoryName.indexOf("null-audio-sink") === -1
+      && factoryName.indexOf("filter-chain") === -1
+      && String(properties["application.id"] || "") !== "ssupt.audio-control"
+  } catch (e) {
+    return false
   }
 }
 
@@ -1155,6 +1315,23 @@ function recordingInputOptions(inputs, defaultInput, labelFor) {
     "Follow default input", "Always use ", labelFor)
 }
 
+// "Follow default" and "Always use the current default" are different
+// policies, but they are not different destinations while only one endpoint
+// exists. Count target serials instead of menu rows so playback/recording rows
+// do not advertise a route picker that cannot move the stream anywhere.
+function streamRouteDestinationCount(options) {
+  var values = options && typeof options.length === "number" ? options : []
+  var seen = []
+  for (var i = 0; i < values.length && i < 513; i++) {
+    var option = values[i]
+    var raw = option && typeof option === "object" ? option.value : option
+    var parsed = parseStreamOutputOption(raw)
+    if (parsed.sink !== "" && seen.indexOf(parsed.sink) === -1)
+      seen.push(parsed.sink)
+  }
+  return seen.length
+}
+
 function parseStreamOutputOption(value) {
   var text = String(value || "")
   var separator = text.indexOf(":")
@@ -1567,12 +1744,18 @@ if (typeof module !== "undefined") {
     preferredAudioProfile: preferredAudioProfile,
     preferredAudioNodeName: preferredAudioNodeName,
     parseAudioControlSettings: parseAudioControlSettings,
+    parseAudioOpenRequest: parseAudioOpenRequest,
     parseAudioScenes: parseAudioScenes,
     sanitizeSceneEntry: sanitizeSceneEntry,
     sanitizeIdentifier: sanitizeIdentifier,
     normalizeAppKey: normalizeAppKey,
     sceneSummary: sceneSummary,
     parseAudioRules: parseAudioRules,
+    outputGroupForSink: outputGroupForSink,
+    outputGroupFallbackMember: outputGroupFallbackMember,
+    isOutputGroupSink: isOutputGroupSink,
+    isManagedOutputGroupSink: isManagedOutputGroupSink,
+    isOutputGroupMemberSink: isOutputGroupMemberSink,
     findAppRule: findAppRule,
     availableRuleApplicationLabels: availableRuleApplicationLabels,
     deviceSortComparator: deviceSortComparator,
@@ -1598,6 +1781,7 @@ if (typeof module !== "undefined") {
     uniqueNodeSerial: uniqueNodeSerial,
     streamOutputOptions: streamOutputOptions,
     recordingInputOptions: recordingInputOptions,
+    streamRouteDestinationCount: streamRouteDestinationCount,
     parseStreamOutputOption: parseStreamOutputOption,
     parseAudioStreamRoutes: parseAudioStreamRoutes,
     nodeLabel: nodeLabel,

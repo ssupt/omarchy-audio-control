@@ -50,7 +50,8 @@ CursorSurface {
   readonly property string routeOptionValue: routeMode !== "" && targetSerial !== ""
     ? routeMode + ":" + targetSerial : ""
   readonly property bool routeIsExplicit: routeMode === "override"
-  readonly property bool routeMenuAvailable: root.routeOptions.length > 1
+  readonly property bool routeMenuAvailable: Model.streamRouteDestinationCount(
+    root.routeOptions) > 1
     && root.targetSerial !== ""
 
   implicitHeight: streamColumn.implicitHeight + Style.spacing.xl

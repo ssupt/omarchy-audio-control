@@ -12,7 +12,7 @@ source "$script_dir/.audio-common"
 action=${1:-install}
 menu_file=${AUDIO_CONTROL_MENU_FILE:-$HOME/.config/omarchy/extensions/omarchy-menu.jsonc}
 marker="  // Added by ssupt.audio-control"
-entry='  "setup.audio": {"icon":"","label":"Audio","action":"omarchy-shell shell summon ssupt.audio-control"}'
+entry='  "setup.audio": {"icon":"","label":"Audio","action":"omarchy-shell shell summon ssupt.audio-control '\''{\"view\":\"advanced\"}'\''"}'
 maximum_menu_bytes=1048576
 
 command -v jq >/dev/null || {
