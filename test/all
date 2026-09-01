@@ -134,15 +134,15 @@ fi
 # delegates may resolve the panel snapshot by a stable integer index instead.
 for live_model in displayAudioSinks displayAudioSources \
     displayAudioStreams displayRecordingStreams; do
-  rg -q "model: root\\.${live_model}\\.length$" "$ROOT/Panel.qml" ||
+  grep -q "model: root\\.${live_model}\\.length$" "$ROOT/Panel.qml" ||
     fail "safe numeric Repeater model: $live_model"
-  if rg -q "model: root\\.${live_model}$" "$ROOT/Panel.qml"; then
+  if grep -q "model: root\\.${live_model}$" "$ROOT/Panel.qml"; then
     fail "native PipeWire objects used directly as Repeater rows: $live_model"
   fi
 done
-rg -q 'model: root\.memberLevels\.length$' "$ROOT/AudioOutputGroupRow.qml" ||
+grep -q 'model: root\.memberLevels\.length$' "$ROOT/AudioOutputGroupRow.qml" ||
   fail "safe numeric output-group member level model"
-if rg -q 'model: root\.memberLevels$' "$ROOT/AudioOutputGroupRow.qml"; then
+if grep -q 'model: root\.memberLevels$' "$ROOT/AudioOutputGroupRow.qml"; then
   fail "native PipeWire group members used directly as Repeater rows"
 fi
 echo "PASS: unplug-safe PipeWire delegate models"
