@@ -63,6 +63,29 @@ else
   [[ $? != 124 ]] || fail "hard-linked runtime lock blocked"
 fi
 
+# A symlinked config directory (e.g. a dotfiles-managed ~/.config/omarchy)
+# must still be usable as a lock directory once it resolves to a real,
+# safely-permissioned directory the user owns.
+symlinked_lock_target="$runtime_safety_dir/real-config"
+mkdir -m 755 -- "$symlinked_lock_target"
+symlinked_lock_dir="$runtime_safety_dir/linked-config"
+ln -s -- "$symlinked_lock_target" "$symlinked_lock_dir"
+bash -c 'source "$1"; audio_open_lock_path "$2/lock" 9' _ \
+  "$ROOT/scripts/.audio-common" "$symlinked_lock_dir" ||
+  fail "symlinked but safe lock directory rejected"
+[[ -f $symlinked_lock_target/lock ]] ||
+  fail "symlinked lock directory did not resolve to its real target"
+
+# A symlink to a non-sticky, world-writable directory must still be rejected.
+unsafe_lock_target="$runtime_safety_dir/unsafe-config"
+mkdir -m 777 -- "$unsafe_lock_target"
+unsafe_lock_dir="$runtime_safety_dir/linked-unsafe-config"
+ln -s -- "$unsafe_lock_target" "$unsafe_lock_dir"
+if bash -c 'source "$1"; audio_open_lock_path "$2/lock" 9' _ \
+  "$ROOT/scripts/.audio-common" "$unsafe_lock_dir" >/dev/null 2>&1; then
+  fail "symlink to a world-writable directory accepted"
+fi
+
 # Bounded capture must validate its producer even when the sourcing shell did
 # not enable pipefail itself.
 if AUDIO_CONTROL_PRIVATE_RUNTIME_DIR="$runtime_private" \
