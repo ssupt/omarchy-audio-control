@@ -64,7 +64,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Install runtime and build tools
-        run: pacman -Syu --noconfirm base-devel git rust clang pipewire wireplumber dbus quickshell weston nodejs jq python
+        run: pacman -Syu --noconfirm base-devel git rust clang pipewire pipewire-audio wireplumber dbus quickshell weston nodejs jq python
       - name: Check out plugin
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check out Omarchy UI contract

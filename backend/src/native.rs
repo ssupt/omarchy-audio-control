@@ -267,10 +267,10 @@ fn read_audio(audio: &mut Audio, pod: &spa::pod::Pod) {
                     audio.volumes = volumes.into_iter().map(|v| f64::from(v).cbrt()).collect();
                 }
             }
-            (spa::sys::SPA_PROP_channelMap, Value::ValueArray(ValueArray::Id(channels))) => {
-                if channels.len() <= 64 {
-                    audio.channels = channels.into_iter().map(|id| id.0).collect();
-                }
+            (spa::sys::SPA_PROP_channelMap, Value::ValueArray(ValueArray::Id(channels)))
+                if channels.len() <= 64 =>
+            {
+                audio.channels = channels.into_iter().map(|id| id.0).collect();
             }
             _ => (),
         }
