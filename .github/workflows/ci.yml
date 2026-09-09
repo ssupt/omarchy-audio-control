@@ -18,7 +18,10 @@ jobs:
   test:
     name: Test and validate plugin
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        rust: ["1.85.0", "stable"]
 
     steps:
       - name: Check out plugin
@@ -35,8 +38,91 @@ jobs:
           sparse-checkout: bin/omarchy-plugin-validate
           sparse-checkout-cone-mode: false
 
+      - name: Install native build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpipewire-0.3-dev libclang-dev pkg-config pipewire-bin jq nodejs python3
+          rustup toolchain install "${{ matrix.rust }}" --profile minimal --component rustfmt --component clippy
+          rustup default "${{ matrix.rust }}"
+
       - name: Run test suite
         run: ./plugin/test/all
 
+      - name: Check bundled release consistency when present
+        run: |
+          if test -e plugin/backend-release.json || test -e plugin/bin/omarchy-audio-service; then
+            python3 plugin/packaging/build-release.py --check plugin
+          fi
+
       - name: Validate Omarchy plugin
         run: ./omarchy/bin/omarchy-plugin-validate ./plugin
+
+  qml-runtime:
+    name: PipeWire and Quickshell runtime
+    runs-on: ubuntu-24.04
+    container: archlinux:base
+    timeout-minutes: 15
+    steps:
+      - name: Install runtime and build tools
+        run: pacman -Syu --noconfirm base-devel git rust clang pipewire wireplumber dbus quickshell weston nodejs jq python
+      - name: Check out plugin
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out Omarchy UI contract
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: basecamp/omarchy
+          ref: 7be59e1f4b7451d352d4673c560168290792590f
+          path: omarchy
+          sparse-checkout: shell
+      - name: Check out the original 0.8.0 plugin for upgrade coverage
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 8852440e240a16eba248feb5e11da036da40de5d
+          path: legacy-plugin
+      - name: Verify the native runtime and staged package
+        env:
+          AUDIO_REQUIRE_QML: "1"
+          AUDIO_TEST_OMARCHY_SHELL: "${{ github.workspace }}/omarchy/shell"
+        run: |
+          cargo build --locked --manifest-path backend/Cargo.toml
+          python test/integration/runtime.py backend/target/debug/omarchy-audio-service
+          python test/integration/deadlines.py
+          python test/integration/microphone.py backend/target/debug/omarchy-audio-service
+          python test/integration/diagnostics.py backend/target/debug/omarchy-audio-service
+          python test/integration/lifecycle.py backend/target/debug/omarchy-audio-service
+          python test/integration/release.py backend/target/debug/omarchy-audio-service
+          python test/integration/packaging.py backend/target/debug/omarchy-audio-service
+          python packaging/build-release.py --output "$RUNNER_TEMP/audio-upgrade-candidate" --binary backend/target/debug/omarchy-audio-service
+          python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/runtime.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
+          python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/microphone.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
+          python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/diagnostics.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
+          python test/integration/upgrade.py "$RUNNER_TEMP/audio-upgrade-candidate"
+          python test/integration/upgrade.py "$RUNNER_TEMP/audio-upgrade-candidate" legacy-plugin
+
+  release-candidate:
+    name: Build self-contained plugin candidate
+    needs: [test, qml-runtime]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out plugin
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpipewire-0.3-dev libclang-dev pkg-config jq
+          rustup toolchain install 1.85.0 --profile minimal
+          rustup default 1.85.0
+      - name: Assemble and check the candidate
+        run: |
+          python3 packaging/build-release.py --output "$RUNNER_TEMP/audio-plugin"
+          python3 packaging/build-release.py --check "$RUNNER_TEMP/audio-plugin"
+          python3 test/integration/lifecycle.py "$RUNNER_TEMP/audio-plugin/bin/omarchy-audio-service"
+          tar -C "$RUNNER_TEMP/audio-plugin" -czf "$RUNNER_TEMP/omarchy-audio-control-linux-x86_64.tar.gz" .
+      - name: Upload candidate for review
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: omarchy-audio-control-linux-x86_64
+          path: ${{ runner.temp }}/omarchy-audio-control-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 14

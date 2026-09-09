@@ -5,6 +5,15 @@ set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 TEST_DIR="$ROOT/test"
 
+if [[ ${AUDIO_TEST_ISOLATED:-} != 1 ]]; then
+  suite_runtime=$(mktemp -d /tmp/omarchy-audio-suite.XXXXXXXX)
+  trap 'rm -rf -- "$suite_runtime"' EXIT
+  mkdir -m 700 -- "$suite_runtime/runtime"
+  TMPDIR="$suite_runtime" AUDIO_CONTROL_PRIVATE_RUNTIME_DIR="$suite_runtime/runtime" \
+    AUDIO_TEST_ISOLATED=1 "$0" "$@"
+  exit $?
+fi
+
 fail() {
   echo "FAIL: $*" >&2
   exit 1
@@ -15,6 +24,15 @@ for script in "$ROOT"/scripts/*; do
 done
 bash -n "$ROOT/scripts/.audio-common" || fail "bash syntax: .audio-common"
 echo "PASS: helper syntax"
+
+cargo fmt --manifest-path "$ROOT/backend/Cargo.toml" --check ||
+  fail "Rust formatting"
+cargo test --manifest-path "$ROOT/backend/Cargo.toml" --locked ||
+  fail "Rust backend tests"
+cargo clippy --manifest-path "$ROOT/backend/Cargo.toml" --locked --all-targets \
+  -- -D warnings || fail "Rust backend lints"
+echo "PASS: Rust backend"
+node "$TEST_DIR/protocol.js" || fail "QML service protocol"
 
 runtime_safety_dir=$(mktemp -d)
 runtime_private="$runtime_safety_dir/private"
@@ -63,9 +81,8 @@ else
   [[ $? != 124 ]] || fail "hard-linked runtime lock blocked"
 fi
 
-# A symlinked config directory (e.g. a dotfiles-managed ~/.config/omarchy)
-# must still be usable as a lock directory once it resolves to a real,
-# safely-permissioned directory the user owns.
+# PR #14: dotfiles-managed configuration directories may be symlinks; validate
+# their resolved permissions without relaxing the checks on lock files.
 symlinked_lock_target="$runtime_safety_dir/real-config"
 mkdir -m 755 -- "$symlinked_lock_target"
 symlinked_lock_dir="$runtime_safety_dir/linked-config"
@@ -75,14 +92,9 @@ bash -c 'source "$1"; audio_open_lock_path "$2/lock" 9' _ \
   fail "symlinked but safe lock directory rejected"
 [[ -f $symlinked_lock_target/lock ]] ||
   fail "symlinked lock directory did not resolve to its real target"
-
-# A symlink to a non-sticky, world-writable directory must still be rejected.
-unsafe_lock_target="$runtime_safety_dir/unsafe-config"
-mkdir -m 777 -- "$unsafe_lock_target"
-unsafe_lock_dir="$runtime_safety_dir/linked-unsafe-config"
-ln -s -- "$unsafe_lock_target" "$unsafe_lock_dir"
+chmod 777 -- "$symlinked_lock_target"
 if bash -c 'source "$1"; audio_open_lock_path "$2/lock" 9' _ \
-  "$ROOT/scripts/.audio-common" "$unsafe_lock_dir" >/dev/null 2>&1; then
+  "$ROOT/scripts/.audio-common" "$symlinked_lock_dir" >/dev/null 2>&1; then
   fail "symlink to a world-writable directory accepted"
 fi
 
@@ -149,7 +161,7 @@ echo "PASS: private runtime and strict helper interfaces"
 
 if command -v qmllint >/dev/null 2>&1; then
   (
-    shopt -s globstar nullglob
+    shopt -s globstar
     qmllint "$ROOT"/qml/**/*.qml
   ) || fail "QML lint"
   echo "PASS: QML lint"
@@ -732,10 +744,20 @@ assert.equal(diagnostics.value.graph.quantum, 256)
 assert.deepEqual(diagnostics.value.routes[0].labels, ['Browser', 'Filter', 'Speakers'])
 assert.deepEqual(diagnostics.value.warnings, ['XRUN reported'])
 assert.equal(model.parseAudioDiagnostics('not json').valid, false)
+const diagnosticObject = JSON.parse(JSON.stringify(diagnostics.value))
+const diagnosticBefore = JSON.stringify(diagnosticObject)
+assert.deepEqual(model.normalizeAudioDiagnostics(diagnosticObject),
+  model.parseAudioDiagnostics(diagnosticBefore))
+assert.equal(JSON.stringify(diagnosticObject), diagnosticBefore,
+  'diagnostic normalization must not mutate a shared service snapshot')
+for (const invalid of [null, [], {}, { version: 2, graph: {} }])
+  assert.equal(model.normalizeAudioDiagnostics(invalid).valid, false)
 console.log('PASS: profile and routing model')
 JS
 
 diagnostics_fixture="$TEST_DIR/fixtures/diagnostics"
+plugin_version=$(jq -er '.version | strings | select(length > 0)' "$ROOT/manifest.json") ||
+  fail "manifest plugin version"
 diagnostics_snapshot=$(
   AUDIO_CONTROL_DIAGNOSTICS_FIXTURE_DIR="$diagnostics_fixture" \
   AUDIO_CONTROL_RECOVERY_COMMAND=omarchy-restart-audio \
@@ -744,9 +766,9 @@ diagnostics_snapshot=$(
   AUDIO_CONTROL_CLIPBOARD_COMMAND=wl-copy \
   PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-diagnostics" snapshot
 )
-jq -e '
+jq -e --arg plugin_version "$plugin_version" '
   .healthy == false
-  and .versions == {"plugin":"0.8.0","pipewire":"1.6.8","wireplumber":"0.5.15"}
+  and .versions == {"plugin":$plugin_version,"pipewire":"1.6.8","wireplumber":"0.5.15"}
   and .graph.rate == 48000
   and .graph.quantum == 256
   and .graph.latencyMs == 5.3
@@ -780,7 +802,7 @@ support_report=$(
 )
 grep -q '^  playback: Browser -> Output Filter -> Wireless Headphones$' <<<"$support_report" ||
   fail "support report active route"
-grep -q '^  Advanced Audio Control: 0.8.0$' <<<"$support_report" ||
+grep -Fqx "  Advanced Audio Control: $plugin_version" <<<"$support_report" ||
   fail "support report plugin version"
 grep -q '^  Peak DSP load: 5%$' <<<"$support_report" || fail "support report DSP load"
 ! grep -q 'bluez_output.test\|alsa_input.usb-microphone' <<<"$support_report" ||
@@ -2822,10 +2844,12 @@ echo "PASS: menu integration"
 jq -e '
   .schemaVersion == 1
   and .id == "ssupt.audio-control"
-  and .version == "0.8.0"
+  and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"))
   and .author == "ssupt"
   and (.kinds | index("bar-widget") != null)
   and (.kinds | index("panel") != null)
+  and (.kinds | index("service") != null)
+  and (.entryPoints.service | test("^(runtime/[a-f0-9]{64}/)?qml/core/Service\\.qml$"))
   and .omarchy.clonedFrom == "omarchy.audio"
 ' "$ROOT/manifest.json" >/dev/null || fail "manifest"
 echo "PASS: manifest"

@@ -1,0 +1,23 @@
+[Unit]
+Description=Advanced Audio Control backend
+Documentation=https://github.com/ssupt/omarchy-audio-control
+After=pipewire.service wireplumber.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/libexec/omarchy-audio-control/current/omarchy-audio-service
+TimeoutStopSec=130
+RuntimeDirectory=omarchy-audio-control
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+Restart=on-failure
+RestartSec=1s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%E/omarchy %t
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native

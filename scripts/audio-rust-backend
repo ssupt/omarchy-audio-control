@@ -1,0 +1,181 @@
+#!/bin/bash
+# Build and install one matching backend + guarded-adapter release atomically.
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+MANIFEST="$ROOT/backend/Cargo.toml"
+SERVICE=omarchy-audio-control.service
+SOCKET=omarchy-audio-control.socket
+ACTION=${1:-}
+[[ $# -gt 0 ]] && shift
+STAGE=""
+BINARY=""
+while (( $# )); do
+  case $1 in
+    --stage) [[ $# -ge 2 && -z $STAGE ]] || exit 2; STAGE=$2; shift 2 ;;
+    --binary) [[ $# -ge 2 && -z $BINARY ]] || exit 2; BINARY=$2; shift 2 ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+if [[ -n $STAGE ]]; then
+  [[ $STAGE == /* && $STAGE != / ]] || exit 2
+  INSTALL_BASE=$STAGE
+  CONFIG_BASE="$STAGE/.config"
+else
+  INSTALL_BASE=${HOME:?}
+  CONFIG_BASE=${XDG_CONFIG_HOME:-"$HOME/.config"}
+fi
+[[ $INSTALL_BASE == /* && $INSTALL_BASE != / && $CONFIG_BASE == /* && $CONFIG_BASE != / ]] || exit 2
+LIBEXEC_DIR="$INSTALL_BASE/.local/libexec/omarchy-audio-control"
+UNIT_DIR="$CONFIG_BASE/systemd/user"
+
+build() {
+  local artifacts
+  artifacts=$(mktemp)
+  if ! cargo build --locked --release --manifest-path "$MANIFEST" \
+      --message-format=json-render-diagnostics >"$artifacts"; then
+    rm -f -- "$artifacts"
+    return 1
+  fi
+  BINARY=$(python3 - "$artifacts" <<'PY'
+import json, sys
+paths = [v['executable'] for line in open(sys.argv[1])
+         if (v := json.loads(line)).get('reason') == 'compiler-artifact'
+         and v.get('executable') and v.get('target', {}).get('name') == 'omarchy-audio-service']
+if len(paths) != 1: raise SystemExit('Could not identify the built backend executable')
+print(paths[0])
+PY
+  )
+  rm -f -- "$artifacts"
+}
+manager() {
+  if [[ -z $STAGE ]]; then
+    systemctl --user "$@"
+  elif [[ -n ${AUDIO_BACKEND_STAGE_SYSTEMCTL:-} ]]; then
+    [[ $AUDIO_BACKEND_STAGE_SYSTEMCTL == /* ]] || return 2
+    "$AUDIO_BACKEND_STAGE_SYSTEMCTL" "$@"
+  fi
+}
+
+# Installed files and the selected release form one upgrade transaction. Run on
+# any failure after the first replacement, including filesystem errors/signals.
+rollback_install() {
+  local status=$1 restored=true unit
+  trap - EXIT HUP INT TERM
+  set +e
+  if [[ -z $previous ]]; then
+    manager disable --now "$SOCKET" || restored=false
+    manager stop "$SERVICE" || restored=false
+  fi
+  for unit in "$SERVICE" "$SOCKET"; do
+    if [[ -f $release/previous-units/$unit ]]; then
+      if cp -p -- "$release/previous-units/$unit" "$unit_stage/$unit"; then
+        mv -Tf -- "$unit_stage/$unit" "$UNIT_DIR/$unit" || restored=false
+      else
+        restored=false
+      fi
+    else
+      rm -f -- "$UNIT_DIR/$unit" || restored=false
+    fi
+  done
+  rm -f -- "$link" || restored=false
+  if [[ -n $previous ]]; then
+    if ln -s -- "$previous" "$link"; then
+      mv -Tf -- "$link" "$LIBEXEC_DIR/current" || restored=false
+    else
+      restored=false
+    fi
+  else
+    rm -f -- "$LIBEXEC_DIR/current" || restored=false
+  fi
+  manager daemon-reload || restored=false
+  if [[ -n $previous ]] && $was_active; then
+    manager restart "$SERVICE" || restored=false
+  fi
+  rm -rf -- "$unit_stage"
+  if $restored; then
+    echo "Backend installation failed; the previous installation was restored" >&2
+  else
+    echo "Backend installation failed; rollback was incomplete (backup: $release/previous-units)" >&2
+  fi
+  exit "$status"
+}
+
+case $ACTION in
+  build)
+    [[ -z $BINARY && -z $STAGE ]] || exit 2
+    build
+    echo "$BINARY"
+    ;;
+  install)
+    if [[ -z $BINARY ]]; then build; fi
+    [[ $BINARY == /* && -f $BINARY && -x $BINARY ]] || {
+      echo "--binary requires an absolute executable path" >&2; exit 2;
+    }
+    [[ ! -e $LIBEXEC_DIR/current || -L $LIBEXEC_DIR/current ]] || {
+      echo "Refusing to replace an unmanaged current release" >&2; exit 1;
+    }
+    install -d -m 755 -- "$LIBEXEC_DIR/releases" "$UNIT_DIR" "$CONFIG_BASE/omarchy"
+    release=$(mktemp -d "$LIBEXEC_DIR/releases/release.XXXXXXXX")
+    chmod 755 -- "$release"
+    install -m 755 -- "$BINARY" "$release/omarchy-audio-service"
+    install -d -m 755 -- "$release/helpers"
+    for helper in "$ROOT"/scripts/audio-* "$ROOT/scripts/.audio-common"; do
+      [[ ${helper##*/} == audio-rust-backend ]] && continue
+      install -m 755 -- "$helper" "$release/helpers/${helper##*/}"
+    done
+    touch "$release/.audio-control-release"
+    previous=$(readlink -- "$LIBEXEC_DIR/current" || true)
+    was_active=false
+    if { [[ -z $STAGE ]] || [[ -n ${AUDIO_BACKEND_STAGE_SYSTEMCTL:-} ]]; } &&
+        manager is-active --quiet "$SERVICE"; then was_active=true; fi
+    install -d -m 700 -- "$release/previous-units"
+    for unit in "$SERVICE" "$SOCKET"; do
+      if [[ -e $UNIT_DIR/$unit || -L $UNIT_DIR/$unit ]]; then
+        [[ -f $UNIT_DIR/$unit && ! -L $UNIT_DIR/$unit ]] || {
+          echo "Refusing to replace a non-regular user unit" >&2; exit 1;
+        }
+        cp -p -- "$UNIT_DIR/$unit" "$release/previous-units/$unit"
+      fi
+    done
+    unit_stage=$(mktemp -d "$UNIT_DIR/.audio-backend.XXXXXXXX")
+    trap 'rm -rf -- "$unit_stage"' EXIT
+    install -m 644 -- "$ROOT/packaging/systemd/$SERVICE" "$unit_stage/$SERVICE"
+    install -m 644 -- "$ROOT/packaging/systemd/$SOCKET" "$unit_stage/$SOCKET"
+    link="$LIBEXEC_DIR/.current.$$"
+    ln -s -- "releases/${release##*/}" "$link"
+    trap 'rollback_install "$?"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    mv -Tf -- "$unit_stage/$SERVICE" "$UNIT_DIR/$SERVICE"
+    mv -Tf -- "$unit_stage/$SOCKET" "$UNIT_DIR/$SOCKET"
+    mv -Tf -- "$link" "$LIBEXEC_DIR/current"
+    activated=false
+    if manager daemon-reload && manager enable --now "$SOCKET"; then
+      if ! $was_active || manager restart "$SERVICE"; then activated=true; fi
+    fi
+    if ! $activated; then
+      exit 1
+    fi
+    trap - EXIT HUP INT TERM
+    rm -rf -- "$unit_stage"
+    echo "Installed $LIBEXEC_DIR/current"
+    ;;
+  uninstall)
+    manager disable --now "$SOCKET"
+    manager stop "$SERVICE"
+    rm -f -- "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$SOCKET" "$LIBEXEC_DIR/current"
+    for release in "$LIBEXEC_DIR"/releases/release.*; do
+      [[ -d $release && ! -L $release && -f $release/.audio-control-release ]] || continue
+      rm -rf -- "$release"
+    done
+    rmdir -- "$LIBEXEC_DIR/releases" "$LIBEXEC_DIR" 2>/dev/null || true
+    manager daemon-reload
+    ;;
+  status)
+    [[ -z $STAGE && -z $BINARY ]] || exit 2
+    manager status "$SOCKET" "$SERVICE"
+    ;;
+  *) echo "Usage: ${0##*/} build|install|uninstall|status [--stage ABSOLUTE_DIR] [--binary ABSOLUTE_FILE]" >&2; exit 2 ;;
+esac
