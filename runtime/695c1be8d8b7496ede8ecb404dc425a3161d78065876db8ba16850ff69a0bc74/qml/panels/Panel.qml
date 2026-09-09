@@ -46,8 +46,6 @@ Panel {
     service: root.audioService
     id: rulesStore
     nodes: root.nodes
-    rulesPath: runtime.rulesPath
-    scriptPath: runtime.script("audio-app-rules")
     onWriteFinished: function(success) {
       if (success) return
       root.streamRouteSetError = "Application route changed, but its saved rule could not be updated"

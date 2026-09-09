@@ -21,19 +21,6 @@ Item {
     }
     var path = String(command[1] || "")
     var helper = path.substring(path.lastIndexOf("/") + 1)
-    if (helper === "audio-scenes") {
-      var args = command.slice(2)
-      var method = args[0] === "save" ? "scenes.save" : "scenes.delete"
-      var params = { name: args[1] }
-      if (args[0] === "save") {
-        try { params.scene = JSON.parse(args[2]) }
-        catch (_error) { finish(null, { outcome: "rejected" }); return }
-      }
-      service.request(method, params, function(_result, error) {
-        root.finish({ exitCode: 0, stdout: "" }, error)
-      })
-      return
-    }
     service.request("adapter.run", { helper: helper, args: command.slice(2), generation: String(service.state.generation || "") },
       function(result, error) { root.finish(result, error) })
   }

@@ -1,5 +1,4 @@
 import QtQuick
-import Quickshell.Io
 import Quickshell.Services.Pipewire
 import "../core/Model.js" as Model
 
@@ -10,8 +9,6 @@ Item {
   id: root
   property var service: null
 
-  required property string rulesPath
-  required property string scriptPath
   required property var nodes
 
   readonly property var rules: service && service.stores ? service.stores.rules || Model.parseAudioRules("") : Model.parseAudioRules("")

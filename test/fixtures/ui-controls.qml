@@ -11,6 +11,8 @@ Item {
   property var streamRow: null
   property var slider: null
   property var deviceRows: []
+  property string sceneName: ""
+  property int sceneCount: 0
 
   function check(condition, message) {
     if (condition) return true
@@ -41,7 +43,7 @@ Item {
   Timer {
     interval: 50; repeat: true; running: !root.done
     onTriggered: {
-      if (!root.check(++root.ticks < 300, "volume/tab controls timed out at phase " + root.phase)) return
+      if (!root.check(++root.ticks < 300, "UI controls timed out at phase " + root.phase)) return
       if (root.panel.directDeviceMutationBusy || root.advanced.audioControlWritePending) return
       switch (root.phase) {
       case 0:
@@ -107,10 +109,34 @@ Item {
       case 7:
         if (root.panel.outputOverdrive || !root.level(1)) return
         if (!root.check(root.slider.maximum === 1, "disabled boost left the slider extended")) return
+        if (root.advanced.sceneMutationBusy) return
+        root.sceneName = root.advanced.nextSceneName()
+        root.sceneCount = root.advanced.audioScenes.length
+        root.advanced.saveCurrentScene()
+        root.advanced.saveCurrentScene()
+        if (!root.check(root.advanced.sceneMutationBusy, "scene capture did not block a duplicate save")) return
+        root.phase++
+        break
+      case 8:
+        if (root.advanced.sceneMutationBusy || root.advanced.audioScenes.length === root.sceneCount) return
+        var scenes = root.advanced.audioScenes
+        var savedIndex = scenes.findIndex(function(scene) { return scene.name === root.sceneName })
+        if (!root.check(scenes.length === root.sceneCount + 1 && savedIndex >= 0
+            && !root.advanced.sceneStatusIsError, "scene was not saved exactly once")) return
+        if (!root.panel.audioScenes.some(function(scene) { return scene.name === root.sceneName })) return
+        root.advanced.deleteSceneAt(savedIndex)
+        root.advanced.deleteSceneAt(savedIndex)
+        if (!root.check(root.advanced.sceneWritePending, "scene deletion did not guard its pending request")) return
+        root.phase++
+        break
+      case 9:
+        if (root.advanced.sceneMutationBusy || root.panel.audioScenes.length !== root.sceneCount) return
+        if (!root.check(root.advanced.audioScenes.length === root.sceneCount
+            && !root.advanced.sceneStatusIsError, "scene was not deleted from both panels")) return
         root.panel.close()
         root.advanced.selectTab(0)
         root.done = true
-        console.log("RUNTIME_UI_SUCCESS slider, keyboard, boost reset, deferred tabs and retained controls")
+        console.log("RUNTIME_UI_SUCCESS volume, tabs, shared scene save/delete and duplicate guards")
       }
     }
   }

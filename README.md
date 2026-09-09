@@ -94,7 +94,7 @@ and exits after its clients leave and accepted work finishes.
 application routing, output groups, WirePlumber settings and diagnostic
 collection still use helper adapters. Rust coordinates those operations. Desktop
 actions such as speaker tests, support-report copying and recovery also use
-helpers. Some older standalone helpers still await removal.
+helpers.
 
 Graph and settings updates use events. Visible diagnostic views share cached
 samples. The [benchmark harness](test/integration/benchmark.py) measures CPU,

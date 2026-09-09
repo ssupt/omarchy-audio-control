@@ -32,8 +32,6 @@ Item {
     service: root.service
     id: rulesStore
     nodes: root.pipewireNodes
-    rulesPath: runtime.rulesPath
-    scriptPath: runtime.script("audio-app-rules")
     onRulesChanged: root.clampCursor()
     onWriteFinished: function(success) {
       if (!success) root.showRoutingStatus(rulesStore.error, true)
@@ -122,9 +120,9 @@ Item {
   readonly property bool graphMutationBusy: !service || !service.ready || service.transactionBusy || sceneController.busy
     || profileSetProc.running || portSetProc.running || microphoneTest.busy || policy.busy
   readonly property bool sceneMutationBusy: graphMutationBusy
-    || sceneStoreProc.running
+    || sceneWritePending
     || diagnosticsMutationBusy
-  property var pendingSceneSave: null
+  property bool sceneWritePending: false
   property string sceneStatus: ""
   property bool sceneStatusIsError: false
   property string outputGroupStatus: ""
@@ -810,10 +808,11 @@ Item {
     service: root.service
     onCaptureFailed: function(error) { root.showSceneStatus(error, true) }
     onCaptureFinished: function(scene) {
-      root.pendingSceneSave = scene
-      sceneStoreProc.command = runtime.scriptCommand(
-        "audio-scenes", ["save", scene.name, JSON.stringify(scene)])
-      sceneStoreProc.running = true
+      root.sceneWritePending = true
+      root.service.request("scenes.save", { name: scene.name, scene: scene }, function(_result, error) {
+        root.sceneWritePending = false
+        root.showSceneStatus((error ? "Could not save" : "Saved") + " scene '" + scene.name + "'", !!error)
+      })
     }
     onApplyFinished: function(result) {
       var text = "Applied scene '" + result.name + "'"
@@ -823,22 +822,6 @@ Item {
         root.showSceneStatus(text + " · skipped: " + result.skipped.join(", "), false)
       else
         root.showSceneStatus(text, false)
-    }
-  }
-
-  AudioCommand {
-    service: root.service
-    id: sceneStoreProc
-    onExited: function(exitCode) {
-      var saving = root.pendingSceneSave !== null
-      var name = saving ? root.pendingSceneSave.name : ""
-      root.pendingSceneSave = null
-      if (exitCode !== 0) {
-        root.showSceneStatus(saving ? "Could not save scene '" + name + "'"
-          : "Could not delete the scene", true)
-        return
-      }
-      if (saving) root.showSceneStatus("Saved scene '" + name + "'", false)
     }
   }
 
@@ -903,8 +886,12 @@ Item {
   function deleteSceneAt(index) {
     var scene = index >= 0 ? audioScenes[index] : null
     if (!scene || sceneMutationBusy) return
-    sceneStoreProc.command = runtime.scriptCommand("audio-scenes", ["delete", scene.name])
-    sceneStoreProc.running = true
+    sceneStatus = ""
+    sceneWritePending = true
+    service.request("scenes.delete", { name: scene.name }, function(_result, error) {
+      root.sceneWritePending = false
+      if (error) root.showSceneStatus("Could not delete the scene", true)
+    })
   }
 
   // ---- Routing tab helpers ----

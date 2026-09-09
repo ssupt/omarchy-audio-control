@@ -1695,83 +1695,10 @@ jq -e 'has("monitor.alsa.autodetect-hdmi-channels") | not' <<<"$policy" >/dev/nu
 echo "PASS: capability-aware audio safety policies"
 rm -f -- "$policy_log" "$policy_state"
 
-scenes_dir=$(mktemp -d)
-scenes_file="$scenes_dir/audio-scenes.json"
-trap 'rm -f "$route_log" "$input_default_log" "$port_log"; rm -rf "$microphone_test_dir" "$scenes_dir"' EXIT
+rules_dir=$(mktemp -d)
+trap 'rm -f "$route_log" "$input_default_log" "$port_log"; rm -rf "$rules_dir"' EXIT
 
-scene_one='{"name":"Desk","defaults":{"output":"speakers","input":"mic"},"devices":[{"name":"speakers","direction":"output","volume":0.5,"muted":false,"balance":0}],"ports":[],"profiles":[]}'
-scene_two='{"name":"Headset","defaults":{"output":"headphones","input":"headset-mic"},"devices":[],"ports":[],"profiles":[]}'
-if OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" save Desk <<<'' >/dev/null 2>&1; then
-  fail "empty audio scene accepted"
-fi
-if printf '%s\n' '[1,2]' | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" save Desk >/dev/null 2>&1; then
-  fail "non-object audio scene accepted"
-fi
-if printf '{}\n{}\n' | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" save Desk >/dev/null 2>&1; then
-  fail "multiple stdin scene documents accepted"
-fi
-if OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" save Desk '{} {}' >/dev/null 2>&1; then
-  fail "multiple argument scene documents accepted"
-fi
-printf '%s\n' "$scene_one" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" save Desk >/dev/null
-[[ -s $scenes_file ]] || fail "audio scene not saved"
-[[ $(stat -c '%a' "$scenes_file") == 600 ]] || fail "audio scene store permissions"
-jq -e '.scenes[0].name == "Desk" and .scenes[0].defaults.output == "speakers"' "$scenes_file" >/dev/null ||
-  fail "audio scene content"
-unsafe_scene='{"name":"Wrong name","devices":[{"name":"speakers","direction":"output","muted":true},{"name":"mic","direction":"input","muted":true}],"profiles":[{"card":"card.live","profile":"stereo"},{"card":"card.off","profile":"off"}]}'
-OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" save SafeName "$unsafe_scene" >/dev/null
-jq -e '
-  ([.scenes[] | select(.name == "SafeName")][0]) as $scene
-  | $scene.devices[0].muted == false
-    and $scene.devices[1].muted == true
-    and $scene.profiles == [{"card":"card.live","profile":"stereo"}]
-    and ([.scenes[].name] | index("Wrong name") | not)
-' "$scenes_file" >/dev/null || fail "audio scene storage safety normalization"
-OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" delete SafeName >/dev/null
-scene_replacement='{"name":"Desk","defaults":{"output":"line-out","input":"mic"},"devices":[],"ports":[],"profiles":[]}'
-printf '%s\n' "$scene_two" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" save Headset >/dev/null
-printf '%s\n' "$scene_replacement" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" save Desk >/dev/null
-jq -e '(.scenes | length) == 2 and .scenes[1].defaults.output == "line-out"' "$scenes_file" >/dev/null ||
-  fail "audio scene replacement"
-for _index in $(seq 1 30); do
-  printf '%s\n' "{\"name\":\"Scene $_index\"}" |
-    OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-    "$ROOT/scripts/audio-scenes" save "Scene $_index" >/dev/null
-done
-jq -e '(.scenes | length) <= 24' "$scenes_file" >/dev/null || fail "audio scene cap"
-OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" delete Headset >/dev/null
-jq -e '[.scenes[].name] | index("Headset") | not' "$scenes_file" >/dev/null ||
-  fail "audio scene deletion"
-printf '{}\n{}\n' >"$scenes_file"
-if OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" delete Desk >/dev/null 2>&1; then
-  fail "multiple-document scene store accepted"
-fi
-if printf '%s\n' "$scene_one" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-scenes" save Desk >/dev/null 2>&1; then
-  fail "multiple-document scene store was overwritten"
-fi
-printf '%s\n' '{"version":2,"scenes":[],"future":{"keep":true}}' >"$scenes_file"
-future_scenes_before=$(<"$scenes_file")
-if OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" delete Desk >/dev/null 2>&1; then
-  fail "future-version scene store accepted"
-fi
-[[ $(<"$scenes_file") == "$future_scenes_before" ]] ||
-  fail "future-version scene store overwritten"
-echo "PASS: named audio scene storage"
-
-rules_file="$scenes_dir/audio-rules.json"
+rules_file="$rules_dir/audio-rules.json"
 export OMARCHY_AUDIO_RULES_FILE="$rules_file"
 printf '%s\n' \
   '{"version":1,"appRules":[{"app":"Firefox","direction":"playback","target":"old-speakers"}],"devices":{"aliases":{},"favorites":[],"hidden":[]}}' \
@@ -1882,7 +1809,7 @@ fi
   fail "future-version audio rules overwritten"
 unset OMARCHY_AUDIO_RULES_FILE
 echo "PASS: application rules and device preference store"
-rm -rf -- "$scenes_dir"
+rm -rf -- "$rules_dir"
 
 output_group_dir=$(mktemp -d)
 output_group_rules="$output_group_dir/audio-rules.json"
@@ -2095,212 +2022,6 @@ jq -e --arg sink "$foreign_group_sink" '
 rm -rf -- "$output_group_dir"
 unset -f run_output_group
 echo "PASS: named multi-output groups"
-
-microphone_test_dir=$(mktemp -d)
-microphone_test_log="$microphone_test_dir/commands.log"
-microphone_test_file="$microphone_test_dir/microphone-test.raw"
-trap 'rm -f "$route_log" "$input_default_log" "$port_log"; rm -rf "$microphone_test_dir"' EXIT
-
-microphone_pid_path="$microphone_test_file.pid"
-microphone_stop_path="$microphone_test_file.stop"
-microphone_lock_path="$microphone_test_file.lock"
-for unsafe_microphone_path in "$microphone_test_file" "$microphone_pid_path" \
-  "$microphone_stop_path" "$microphone_lock_path"; do
-  hardlink_target="$microphone_test_dir/hardlink-target"
-  touch "$hardlink_target"
-  ln -- "$hardlink_target" "$unsafe_microphone_path"
-  if AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-    AUDIO_CONTROL_MICROPHONE_TEST_PID_FILE="$microphone_pid_path" \
-    AUDIO_CONTROL_MICROPHONE_TEST_STOP_FILE="$microphone_stop_path" \
-    AUDIO_CONTROL_MICROPHONE_TEST_LOCK_FILE="$microphone_lock_path" \
-    "$ROOT/scripts/audio-microphone-test" status >/dev/null 2>&1; then
-    fail "hard-linked microphone control path accepted"
-  fi
-  rm -f -- "$unsafe_microphone_path" "$hardlink_target"
-done
-
-if AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_PID_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" status >/dev/null 2>&1; then
-  fail "overlapping microphone control paths accepted"
-fi
-
-microphone_test_status=$(AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" status)
-[[ $microphone_test_status == empty ]] || fail "empty microphone test status"
-
-microphone_test_status=$(AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
-  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_STATUS=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" record test-source)
-[[ $microphone_test_status == ready && -s $microphone_test_file ]] ||
-  fail "microphone test recording"
-[[ $(stat -c '%a' "$microphone_test_file") == 600 ]] ||
-  fail "microphone test recording permissions"
-grep -q -- '--target test-source' "$microphone_test_log" ||
-  fail "microphone test selected source"
-grep -q -- 'node.name.*omarchy_audio_test_record' "$microphone_test_log" ||
-  fail "microphone test private stream identity"
-
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" play
-grep -q '^pw-play .*--volume 0.8 ' "$microphone_test_log" ||
-  fail "microphone test playback"
-grep -q '^pw-play .*--raw ' "$microphone_test_log" ||
-  fail "microphone test raw playback format"
-
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" clear
-[[ ! -e $microphone_test_file ]] || fail "microphone test cleanup"
-
-truncate -s 3 "$microphone_test_file"
-[[ $(AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" status) == empty ]] ||
-  fail "odd-sized microphone clip accepted"
-if AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" play >/dev/null 2>&1; then
-  fail "odd-sized microphone clip played"
-fi
-truncate -s 480002 "$microphone_test_file"
-[[ $(AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" status) == empty ]] ||
-  fail "oversized microphone clip accepted"
-rm -f -- "$microphone_test_file"
-
-if AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" record $'bad\nsource' >/dev/null 2>&1; then
-  fail "control-bearing microphone identifier accepted"
-fi
-
-if AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
-  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_FAIL=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" record test-source >/dev/null 2>&1; then
-  fail "failed microphone test recording reported success"
-fi
-[[ ! -e $microphone_test_file ]] || fail "failed microphone test left a recording"
-
-if timeout 3 env AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
-  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_WAIT=1 \
-  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_TIMEOUT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" record test-source >/dev/null 2>&1; then
-  fail "hung microphone recorder reported success"
-else
-  [[ $? != 124 ]] || fail "hung microphone recorder was not bounded"
-fi
-[[ ! -e $microphone_test_file && ! -e $microphone_test_file.pid ]] ||
-  fail "timed-out microphone recorder left private state"
-
-: >"$microphone_test_log"
-microphone_test_output="$microphone_test_dir/record-output"
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
-  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_WAIT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" record test-source >"$microphone_test_output" &
-microphone_test_pid=$!
-for _attempt in {1..100}; do
-  [[ -s $microphone_test_file.pid ]] && break
-  kill -0 "$microphone_test_pid" 2>/dev/null || fail "microphone test stopped before early stop"
-  sleep 0.01
-done
-[[ -s $microphone_test_file.pid ]] || fail "microphone test early-stop setup"
-if AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
-  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_WAIT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" record test-source >/dev/null 2>&1; then
-  fail "concurrent microphone recording accepted"
-fi
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" stop
-microphone_test_exit=0
-wait "$microphone_test_pid" || microphone_test_exit=$?
-[[ $microphone_test_exit == 0 && $(<"$microphone_test_output") == ready ]] ||
-  fail "microphone test early-stop completion"
-[[ $(stat -c '%s' "$microphone_test_file") == 96000 ]] ||
-  fail "microphone test early-stop partial clip"
-[[ ! -e $microphone_test_file.pid && ! -e $microphone_test_file.stop ]] ||
-  fail "microphone test early-stop control cleanup"
-
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" play
-grep -q '^pw-play .*--raw ' "$microphone_test_log" ||
-  fail "partial microphone test playback"
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" clear
-
-: >"$microphone_test_log"
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
-  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_WAIT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" record test-source >/dev/null &
-microphone_test_pid=$!
-for _attempt in {1..100}; do
-  [[ -s $microphone_test_file.pid ]] && break
-  kill -0 "$microphone_test_pid" 2>/dev/null || fail "microphone test stopped before cancellation"
-  sleep 0.01
-done
-[[ -s $microphone_test_file.pid ]] || fail "microphone test cancellation setup"
-kill -TERM "$microphone_test_pid"
-microphone_test_exit=0
-wait "$microphone_test_pid" || microphone_test_exit=$?
-[[ $microphone_test_exit == 143 ]] || fail "microphone test cancellation status"
-[[ ! -e $microphone_test_file ]] || fail "cancelled microphone test left a recording"
-[[ ! -e $microphone_test_file.pid && ! -e $microphone_test_file.stop ]] ||
-  fail "cancelled microphone test left a control file"
-[[ -z $(find "$microphone_test_dir" -type f -name '.microphone-test.*.raw' -print -quit) ]] ||
-  fail "cancelled microphone test left a temporary file"
-
-# A hard kill skips the cleanup trap, so clear must reap the orphaned
-# recorder and remove its temporary file itself.
-: >"$microphone_test_log"
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
-  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_WAIT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" record test-source >/dev/null &
-microphone_test_pid=$!
-for _attempt in {1..100}; do
-  [[ -s $microphone_test_file.pid ]] && break
-  kill -0 "$microphone_test_pid" 2>/dev/null || fail "microphone test stopped before hard kill"
-  sleep 0.01
-done
-[[ -s $microphone_test_file.pid ]] || fail "microphone test hard-kill setup"
-read -r microphone_test_orphan _ <"$microphone_test_file.pid"
-kill -KILL "$microphone_test_pid"
-wait "$microphone_test_pid" 2>/dev/null || true
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" clear
-for _attempt in {1..50}; do
-  kill -0 "$microphone_test_orphan" 2>/dev/null || break
-  sleep 0.01
-done
-if kill -0 "$microphone_test_orphan" 2>/dev/null; then
-  fail "microphone test clear left the recorder running"
-fi
-[[ ! -e $microphone_test_file.pid && ! -e $microphone_test_file.stop ]] ||
-  fail "hard-killed microphone test left a control file"
-[[ -z $(find "$microphone_test_dir" -type f -name '.microphone-test.*.raw' -print -quit) ]] ||
-  fail "hard-killed microphone test left a temporary file"
-
-# A stale identity file must never terminate an unrelated process whose PID
-# was recycled after a crashed recorder.
-sleep 30 &
-microphone_test_innocent=$!
-printf '%s 0\n' "$microphone_test_innocent" >"$microphone_test_file.pid"
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" clear
-microphone_test_innocent_survived=false
-kill -0 "$microphone_test_innocent" 2>/dev/null && microphone_test_innocent_survived=true
-kill "$microphone_test_innocent" 2>/dev/null || true
-wait "$microphone_test_innocent" 2>/dev/null || true
-$microphone_test_innocent_survived || fail "stale microphone PID killed an unrelated process"
-[[ ! -e $microphone_test_file.pid ]] || fail "stale microphone identity not removed"
-echo "PASS: private microphone record and playback test"
-rm -rf -- "$microphone_test_dir"
 
 bluetooth_preference_log=$(mktemp)
 bluetooth_preference_state=$(mktemp)
@@ -2760,7 +2481,7 @@ echo "PASS: profile endpoint replacement safety"
 
 menu_tmp=$(mktemp -d)
 menu_file="$menu_tmp/omarchy-menu.jsonc"
-trap 'rm -f "$route_log" "$route_read_state" "$output_default_log" "$input_default_log" "$shared_preferences" "$shared_preferences_lock" "$shared_preferences_output_lock" "$shared_preferences_input_lock" "$port_log" "$policy_log" "$policy_state" "$bluetooth_preference_log" "$bluetooth_preference_state" "$bluetooth_autoswitch_log" "$bluetooth_autoswitch_state" "$profile_log" "$profile_state" "$profile_identity_fixture" "$profile_endpoint_read_state"; rm -rf "$microphone_test_dir" "$menu_tmp"' EXIT
+trap 'rm -f "$route_log" "$route_read_state" "$output_default_log" "$input_default_log" "$shared_preferences" "$shared_preferences_lock" "$shared_preferences_output_lock" "$shared_preferences_input_lock" "$port_log" "$policy_log" "$policy_state" "$bluetooth_preference_log" "$bluetooth_preference_state" "$bluetooth_autoswitch_log" "$bluetooth_autoswitch_state" "$profile_log" "$profile_state" "$profile_identity_fixture" "$profile_endpoint_read_state"; rm -rf "$menu_tmp"' EXIT
 cat >"$menu_file" <<'EOF'
 {
   // Existing customization

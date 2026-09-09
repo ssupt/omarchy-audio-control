@@ -579,6 +579,69 @@ pub fn normalize_scene(raw: &Value) -> Option<Value> {
 mod tests {
     use super::*;
     #[test]
+    fn scene_storage_replaces_deletes_and_bounds_saved_setups() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage {
+            directory: directory.path().into(),
+        };
+        let request = |method: &str, params: Value| {
+            storage.handle(&Request {
+                version: 1,
+                id: "scene-test".into(),
+                method: method.into(),
+                params,
+            })
+        };
+        for scene in [Value::Null, json!([]), json!("{}")] {
+            assert!(request("scenes.save", json!({"name":"Desk", "scene":scene})).is_err());
+        }
+        assert!(request("scenes.save", json!({"name":"", "scene":{}})).is_err());
+        assert!(request("scenes.delete", json!({"name":""})).is_err());
+        request(
+            "scenes.save",
+            json!({"name":"Desk", "scene":{"name":"Wrong", "defaults":{"output":"speakers"}}}),
+        )
+        .unwrap();
+        request("scenes.save", json!({"name":"Headset", "scene":{}})).unwrap();
+        request(
+            "scenes.save",
+            json!({"name":"Desk", "scene":{"defaults":{"output":"headphones"}}}),
+        )
+        .unwrap();
+        let stored = storage.read(Kind::Scenes).unwrap();
+        assert_eq!(stored["scenes"].as_array().unwrap().len(), 2);
+        assert_eq!(stored["scenes"][1]["name"], "Desk");
+        assert_eq!(stored["scenes"][1]["defaults"]["output"], "headphones");
+        let path = storage.path(Kind::Scenes).unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        request("scenes.delete", json!({"name":"Headset"})).unwrap();
+        assert_eq!(
+            storage.read(Kind::Scenes).unwrap()["scenes"],
+            json!([stored["scenes"][1]])
+        );
+        for index in 0..25 {
+            request(
+                "scenes.save",
+                json!({"name":format!("Scene {index}"), "scene":{}}),
+            )
+            .unwrap();
+        }
+        let stored = storage.read(Kind::Scenes).unwrap();
+        let names: Vec<_> = stored["scenes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        let expected: Vec<_> = (1..25).map(|i| format!("Scene {i}")).collect();
+        assert_eq!(names, expected);
+    }
+
+    #[test]
     fn scenes_preserve_microphone_privacy_and_cannot_power_off_outputs() {
         let value = normalize_scene(&json!({"name":"Desk", "devices":[
             {"name":"speaker","direction":"output","muted":true,"volume":9},
@@ -602,11 +665,13 @@ mod tests {
         let storage = Storage {
             directory: directory.path().into(),
         };
-        let path = directory.path().join(Kind::Rules.filename());
-        for original in ["{broken", "{\"version\":2}", "{} {}"] {
-            std::fs::write(&path, original).unwrap();
-            assert!(storage.update(Kind::Rules, |_| Ok(())).is_err());
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        for kind in Kind::ALL {
+            let path = directory.path().join(kind.filename());
+            for original in ["{broken", "{\"version\":2}", "{} {}"] {
+                std::fs::write(&path, original).unwrap();
+                assert!(storage.update(kind, |_| Ok(())).is_err());
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+            }
         }
     }
     #[test]
