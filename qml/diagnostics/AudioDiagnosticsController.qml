@@ -1,6 +1,6 @@
 import QtQuick
 import Quickshell.Io
-import "Model.js" as Model
+import "../core/Model.js" as Model
 
 // Owns read-only health refreshes and the three explicit diagnostics actions.
 // Recovery is invoked only after the view's confirmation dialog; its helper

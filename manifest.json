@@ -10,8 +10,8 @@
     "panel"
   ],
   "entryPoints": {
-    "barWidget": "Panel.qml",
-    "panel": "AdvancedAudio.qml"
+    "barWidget": "qml/panels/Panel.qml",
+    "panel": "qml/panels/AdvancedAudio.qml"
   },
   "barWidget": {
     "displayName": "Advanced Audio Control",

@@ -2,7 +2,7 @@ import QtQuick
 import Quickshell.Services.Pipewire
 import qs.Ui
 import qs.Commons
-import "Model.js" as Model
+import "../core/Model.js" as Model
 
 // Playback and recording applications share interaction and volume controls;
 // only their endpoint list, route map, label, and icon differ.

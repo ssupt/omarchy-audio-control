@@ -1,9 +1,11 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
-import "Model.js" as Model
+import "../core/Model.js" as Model
 
-// Input device row — sibling of AudioSinkRow for the "input" section.
+// Output device row — cursor target inside the "output" section. Mouse
+// hover claims the panel cursor via the claimed() signal; visuals come
+// entirely from hasCursor/current via CursorSurface, never from containsMouse.
 CursorSurface {
   id: root
 
@@ -13,6 +15,7 @@ CursorSurface {
   required property string preferredName
   required property bool defaultSetBusy
   required property string label
+  required property bool outputGroup
 
   signal claimed(string section, int index)
   signal activated(var node)
@@ -33,7 +36,7 @@ CursorSurface {
     spacing: Style.space(8)
 
     Text {
-      text: Model.sourceGlyph(root.node)
+      text: Model.sinkGlyph(root.node)
       color: root.bar.foreground
       font.family: root.bar.fontFamily
       font.pixelSize: Style.font.title
@@ -50,6 +53,18 @@ CursorSurface {
       font.bold: root.isActive
       elide: Text.ElideRight
       width: parent.width - Style.space(22) - Style.space(8)
+        - (groupTag.visible ? groupTag.implicitWidth + Style.space(8) : 0)
+      anchors.verticalCenter: parent.verticalCenter
+    }
+
+    Text {
+      id: groupTag
+      visible: root.outputGroup
+      text: "GROUP"
+      color: Color.accent
+      font.family: root.bar.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: true
       anchors.verticalCenter: parent.verticalCenter
     }
   }
@@ -59,7 +74,7 @@ CursorSurface {
     enabled: !root.defaultSetBusy
     hoverEnabled: true
     cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-    onContainsMouseChanged: if (containsMouse) root.claimed("input", root.rowIndex)
+    onContainsMouseChanged: if (containsMouse) root.claimed("output", root.rowIndex)
     onClicked: root.activated(root.node)
   }
 }

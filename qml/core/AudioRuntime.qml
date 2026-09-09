@@ -16,7 +16,7 @@ QtObject {
   readonly property string preferencesPath: configPath("audio-preferences.json")
   readonly property string scenesPath: configPath("audio-scenes.json")
   readonly property string rulesPath: configPath("audio-rules.json")
-  readonly property string scriptsDir: localPath(Qt.resolvedUrl("scripts/")).replace(/\/$/, "")
+  readonly property string scriptsDir: localPath(Qt.resolvedUrl("../../scripts/")).replace(/\/$/, "")
 
   function localPath(url) {
     return decodeURIComponent(String(url).replace(/^file:\/\//, ""))

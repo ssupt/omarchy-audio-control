@@ -1,6 +1,6 @@
 import QtQuick
 import Quickshell.Io
-import "Model.js" as Model
+import "../core/Model.js" as Model
 
 // Capability discovery and optimistic WirePlumber policy mutation. The view
 // consumes only the supported definitions and does not need to coordinate

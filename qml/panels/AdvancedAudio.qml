@@ -5,7 +5,16 @@ import Quickshell.Io
 import Quickshell.Services.Pipewire
 import qs.Ui
 import qs.Commons
-import "Model.js" as Model
+import "../core/Model.js" as Model
+
+import "../components"
+import "../core"
+import "../devices"
+import "../diagnostics"
+import "../microphone"
+import "../policy"
+import "../routing"
+import "../scenes"
 
 // Audio configuration belongs in a regular centered window rather than the
 // compact bar popout. The quick panel and Setup > Audio both summon this same

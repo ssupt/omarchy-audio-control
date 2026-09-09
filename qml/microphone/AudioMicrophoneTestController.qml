@@ -2,7 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import Quickshell.Services.Pipewire
-import "Model.js" as Model
+import "../core/Model.js" as Model
 
 // Owns the complete lifecycle of the private record/playback probe. The
 // advanced window only renders this state, which keeps process cancellation

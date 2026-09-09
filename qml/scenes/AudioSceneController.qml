@@ -2,7 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import Quickshell.Services.Pipewire
-import "Model.js" as Model
+import "../core/Model.js" as Model
 
 // Captures live audio state into scene documents and applies them back.
 //

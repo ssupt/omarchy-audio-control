@@ -2,34 +2,32 @@ import QtQuick
 import qs.Ui
 import qs.Commons
 
+import "../components"
+
 CursorSurface {
   id: root
 
-  required property var card
-  required property int rowIndex
-  required property string currentProfile
-  required property var options
+  required property string preference
   required property bool menuEnabled
   property string fontFamily: Style.font.family
   property bool menuReportedOpen: false
 
   signal cursorRequested()
-  signal profileSelected(string profile)
+  signal preferenceSelected(string value)
   signal menuToggled(bool open)
 
   width: parent ? parent.width : 0
-  implicitHeight: Math.max(profileLabels.implicitHeight, profileDropdown.implicitHeight) + Style.space(18)
+  implicitHeight: Math.max(preferenceLabels.implicitHeight, preferenceDropdown.implicitHeight) + Style.space(18)
   bordered: true
 
-  function toggleProfileMenu() { if (profileDropdown.enabled) profileDropdown.toggle() }
-  function closeProfileMenu() { profileDropdown.close() }
+  function togglePreferenceMenu() { if (preferenceDropdown.enabled) preferenceDropdown.toggle() }
+  function closePreferenceMenu() { preferenceDropdown.close() }
   function reportMenu(open) {
     var next = open === true
     if (menuReportedOpen === next) return
     menuReportedOpen = next
     menuToggled(next)
   }
-
   Component.onDestruction: root.reportMenu(false)
 
   Row {
@@ -41,14 +39,14 @@ CursorSurface {
     spacing: Style.space(16)
 
     Column {
-      id: profileLabels
+      id: preferenceLabels
       width: Math.max(Style.space(180), parent.width * 0.4)
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.space(3)
 
       Text {
         width: parent.width
-        text: root.card.label
+        text: "Profile preference"
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
@@ -57,9 +55,8 @@ CursorSurface {
       }
 
       Text {
-        visible: root.card.bluetooth === true
         width: parent.width
-        text: "Bluetooth audio"
+        text: "Automatic profile selection"
         color: Qt.darker(root.foreground, 1.35)
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
@@ -68,12 +65,15 @@ CursorSurface {
     }
 
     AudioDropdown {
-      id: profileDropdown
-      width: parent.width - profileLabels.width - parent.spacing
+      id: preferenceDropdown
+      width: parent.width - preferenceLabels.width - parent.spacing
       showLabel: false
       popupDirection: "down"
-      value: root.currentProfile
-      options: root.options
+      value: root.preference
+      options: [
+        { value: "quality", label: "Prefer quality" },
+        { value: "latency", label: "Prefer lower latency" }
+      ]
       hasCursor: root.hasCursor
       enabled: root.menuEnabled
       opacity: enabled ? 1 : 0.6
@@ -82,8 +82,15 @@ CursorSurface {
       anchors.verticalCenter: parent.verticalCenter
 
       onHovered: function(on) { if (on) root.cursorRequested() }
-      onChanged: function(profile) { root.profileSelected(profile) }
+      onChanged: function(value) { root.preferenceSelected(value) }
       onPopupOpenChanged: root.reportMenu(popupOpen)
     }
+  }
+
+  MouseArea {
+    anchors.fill: parent
+    acceptedButtons: Qt.NoButton
+    hoverEnabled: true
+    onContainsMouseChanged: if (containsMouse) root.cursorRequested()
   }
 }

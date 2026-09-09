@@ -1,7 +1,7 @@
 import QtQuick
 import Quickshell.Io
 import Quickshell.Services.Pipewire
-import "Model.js" as Model
+import "../core/Model.js" as Model
 
 // Shared saved-rule registry and live routing catalog. Both plugin surfaces
 // observe the same store through this component, so filtering, aliases, and

@@ -148,7 +148,10 @@ done
 echo "PASS: private runtime and strict helper interfaces"
 
 if command -v qmllint >/dev/null 2>&1; then
-  qmllint "$ROOT"/*.qml || fail "QML lint"
+  (
+    shopt -s globstar nullglob
+    qmllint "$ROOT"/qml/**/*.qml
+  ) || fail "QML lint"
   echo "PASS: QML lint"
 fi
 
@@ -157,20 +160,20 @@ fi
 # delegates may resolve the panel snapshot by a stable integer index instead.
 for live_model in displayAudioSinks displayAudioSources \
     displayAudioStreams displayRecordingStreams; do
-  grep -q "model: root\\.${live_model}\\.length$" "$ROOT/Panel.qml" ||
+  grep -q "model: root\\.${live_model}\\.length$" "$ROOT/qml/panels/Panel.qml" ||
     fail "safe numeric Repeater model: $live_model"
-  if grep -q "model: root\\.${live_model}$" "$ROOT/Panel.qml"; then
+  if grep -q "model: root\\.${live_model}$" "$ROOT/qml/panels/Panel.qml"; then
     fail "native PipeWire objects used directly as Repeater rows: $live_model"
   fi
 done
-grep -q 'model: root\.memberLevels\.length$' "$ROOT/AudioOutputGroupRow.qml" ||
+grep -q 'model: root\.memberLevels\.length$' "$ROOT/qml/routing/AudioOutputGroupRow.qml" ||
   fail "safe numeric output-group member level model"
-if grep -q 'model: root\.memberLevels$' "$ROOT/AudioOutputGroupRow.qml"; then
+if grep -q 'model: root\.memberLevels$' "$ROOT/qml/routing/AudioOutputGroupRow.qml"; then
   fail "native PipeWire group members used directly as Repeater rows"
 fi
 echo "PASS: unplug-safe PipeWire delegate models"
 
-node - "$ROOT/Model.js" <<'JS'
+node - "$ROOT/qml/core/Model.js" <<'JS'
 const assert = require('node:assert/strict')
 const model = require(process.argv[2])
 
