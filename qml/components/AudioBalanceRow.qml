@@ -74,7 +74,7 @@ CursorSurface {
         anchors.verticalCenter: parent.verticalCenter
       }
 
-      PanelSlider {
+      AudioSlider {
         width: parent.width - Style.space(40)
         minimum: -1
         maximum: 1

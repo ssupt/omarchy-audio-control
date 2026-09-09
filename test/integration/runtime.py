@@ -383,7 +383,7 @@ ShellRoot {
             assert (work/'operations.diagnostics').read_text().splitlines() == ['sample', 'sample'], output
             if full_ui:
                 assert 'RUNTIME_UI_SUCCESS' in output, output
-                print('PASS: volume limits, boost reset, deferred tabs and shared scene save/delete')
+                print('PASS: volume limits, boost reset, deferred tabs, shared scenes and pointer cancellation')
                 print('PASS: actual Service.qml and both QML entry points on a private headless compositor')
             # Disabling/removing the QML service closes its relay. The private
             # daemon must retire without an installed systemd service.

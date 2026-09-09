@@ -260,7 +260,7 @@ CursorSurface {
       }
     }
 
-    PanelSlider {
+    AudioSlider {
       bar: root.bar
       width: parent.width
       minimum: 0

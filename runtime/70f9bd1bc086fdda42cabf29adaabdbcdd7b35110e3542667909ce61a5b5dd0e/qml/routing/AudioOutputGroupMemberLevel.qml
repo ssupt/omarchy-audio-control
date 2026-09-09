@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import "../components"
 
 Item {
   id: root
@@ -65,7 +66,7 @@ Item {
       }
     }
 
-    PanelSlider {
+    AudioSlider {
       id: memberSlider
       width: parent.width
       minimum: 0

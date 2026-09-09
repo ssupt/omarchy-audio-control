@@ -174,6 +174,21 @@ with tempfile.TemporaryDirectory(prefix='audio-microphone-') as temporary:
         discarded()
         print('PASS: real pw-record samples and explicit pw-play on dummy audio', flush=True)
 
+        started_at = time.monotonic()
+        recorder = start_recording(source)
+        state = observer.wait_state(lambda s: s.get('microphone', {}).get('state') != 'recording')
+        assert state['microphone']['state'] == 'ready' and not state['microphone']['error'], state['microphone']
+        assert 4 <= time.monotonic() - started_at < 8, 'Five-second capture did not finish on time'
+        stopped(recorder)
+        assert not test_stream('Output'), 'Finishing capture started playback automatically'
+        control.request('microphone.start', dict(owner='private-test', record=False))
+        until(lambda: test_stream('Output'))
+        observer.wait_state(lambda s: s.get('microphone', {}).get('state') == 'playing')
+        observer.wait_state(lambda s: s.get('microphone', {}).get('state') == 'ready')
+        control.request('microphone.stop', dict(owner='private-test', discard=True))
+        discarded()
+        print('PASS: five-second capture finishes automatically and keeps a replayable clip', flush=True)
+
         recorder = start_recording(source)
         changed_at = time.monotonic()
         control.request('microphone.stop', dict(owner='private-test', discard=True))

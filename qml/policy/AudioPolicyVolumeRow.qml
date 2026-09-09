@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import "../components"
 
 CursorSurface {
   id: root
@@ -65,7 +66,7 @@ CursorSurface {
       }
     }
 
-    PanelSlider {
+    AudioSlider {
       id: slider
       width: parent.width
       minimum: 0

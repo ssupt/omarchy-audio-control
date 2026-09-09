@@ -64,7 +64,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Install runtime and build tools
-        run: pacman -Syu --noconfirm base-devel git rust clang pipewire pipewire-audio wireplumber dbus quickshell weston nodejs jq python
+        run: pacman -Syu --noconfirm base-devel git rust clang pipewire pipewire-audio pipewire-pulse wireplumber dbus quickshell weston nodejs jq python
       - name: Check out plugin
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check out Omarchy UI contract
@@ -89,6 +89,7 @@ jobs:
           python test/integration/routed_audio.py backend/target/debug/omarchy-audio-service
           python test/integration/deadlines.py
           python test/integration/microphone.py backend/target/debug/omarchy-audio-service
+          python test/integration/output_groups.py backend/target/debug/omarchy-audio-service
           python test/integration/diagnostics.py backend/target/debug/omarchy-audio-service
           python test/integration/lifecycle.py backend/target/debug/omarchy-audio-service
           python test/integration/release.py backend/target/debug/omarchy-audio-service
@@ -96,6 +97,7 @@ jobs:
           python packaging/build-release.py --output "$RUNNER_TEMP/audio-upgrade-candidate" --binary backend/target/debug/omarchy-audio-service
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/runtime.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/microphone.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
+          python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/output_groups.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/diagnostics.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
           python test/integration/upgrade.py "$RUNNER_TEMP/audio-upgrade-candidate"
           python test/integration/upgrade.py "$RUNNER_TEMP/audio-upgrade-candidate" legacy-plugin

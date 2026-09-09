@@ -138,9 +138,9 @@ Editing source QML alone does not update a packaged UI.
 tests and package lifecycle tests. QML tests require Quickshell, Weston and the
 Omarchy shell. Automated recording tests use synthetic audio.
 
-USB microphone testing and basic unplug/replug have been checked locally.
-Bluetooth transitions, group-member loss and recording interruption still need
-physical validation before public rollout. PR #15 tracks the remaining checks.
+Local hardware checks confirm USB microphone feedback and basic hotplug, codec
+switching, and selecting output groups during playback. [PR #15](https://github.com/ssupt/omarchy-audio-control/pull/15)
+tracks the remaining physical checks before public rollout.
 Detailed development notes stay outside this repository.
 
 [MIT license](LICENSE), matching Omarchy's original audio widget.

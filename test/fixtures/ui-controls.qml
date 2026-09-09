@@ -1,4 +1,6 @@
 import QtQuick
+import QtQuick.Window
+import QtTest as Test
 
 // Runs against the real entry points and a private PipeWire graph.
 Item {
@@ -13,6 +15,17 @@ Item {
   property var deviceRows: []
   property string sceneName: ""
   property int sceneCount: 0
+  property int sliderMoves: 0
+  property real lastMoved: -1
+  property real lastReleased: -1
+
+  Test.TestCase { id: pointer; name: "AudioPointer"; when: false; optional: true }
+  Window { id: pointerWindow; width: 320; height: 100; visible: false }
+  Connections {
+    target: root.slider
+    function onMoved(value) { root.sliderMoves++; root.lastMoved = value }
+    function onReleased(value) { root.lastReleased = value }
+  }
 
   function check(condition, message) {
     if (condition) return true
@@ -133,10 +146,43 @@ Item {
         if (root.advanced.sceneMutationBusy || root.panel.audioScenes.length !== root.sceneCount) return
         if (!root.check(root.advanced.audioScenes.length === root.sceneCount
             && !root.advanced.sceneStatusIsError, "scene was not deleted from both panels")) return
+        // Move the real control into a normal window: the headless compositor
+        // does not support the quick panel's layer-shell pointer surface.
+        root.slider.parent = pointerWindow.contentItem
+        root.slider.x = 20
+        root.slider.y = 30
+        root.slider.width = 280
+        pointerWindow.show()
+        root.phase++
+        break
+      case 10:
+        pointer.mousePress(root.slider, root.slider.width * .3, root.slider.height / 2)
+        if (!root.check(root.slider.dragging, "pointer press did not start dragging")) return
+        root.slider.enabled = false
+        pointer.mouseRelease(root.slider, root.slider.width * .4, root.slider.height / 2)
+        root.slider.enabled = true
+        var moves = root.sliderMoves
+        pointer.mouseMove(root.slider, root.slider.width * .7, root.slider.height / 2)
+        if (!root.check(!root.slider.dragging && root.sliderMoves === moves,
+            "canceled slider follows the mouse after release")) return
+        pointer.mousePress(root.slider, root.slider.width * .2, root.slider.height / 2)
+        pointer.mouseMove(root.slider, root.slider.width * .6, root.slider.height / 2)
+        pointer.mouseRelease(root.slider, root.slider.width * .6, root.slider.height / 2)
+        if (!root.check(!root.slider.dragging && Math.abs(root.lastReleased - root.lastMoved) < .001,
+            "normal release lost the final slider value")) return
+        pointer.mousePress(root.slider, root.slider.width * .3, root.slider.height / 2)
+        root.slider.visible = false
+        pointer.mouseRelease(pointerWindow.contentItem, 300, 80)
+        root.slider.visible = true
+        moves = root.sliderMoves
+        pointer.mouseMove(root.slider, root.slider.width * .8, root.slider.height / 2)
+        if (!root.check(!root.slider.dragging && root.sliderMoves === moves,
+            "hidden slider retained its drag after release outside the control")) return
+        pointerWindow.hide()
         root.panel.close()
         root.advanced.selectTab(0)
         root.done = true
-        console.log("RUNTIME_UI_SUCCESS volume, tabs, shared scene save/delete and duplicate guards")
+        console.log("RUNTIME_UI_SUCCESS volume, tabs, shared scenes and canceled pointer drag")
       }
     }
   }

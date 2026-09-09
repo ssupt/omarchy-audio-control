@@ -8,6 +8,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::watch;
 
+const CLIP_BYTES: usize = 48000 * 5 * 2; // Five seconds of mono s16 audio.
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Control {
     Continue,
@@ -74,7 +76,7 @@ pub async fn run(
             .arg("--sample-count=240000");
         command.stdin(Stdio::null()).stdout(Stdio::piped());
     } else {
-        if clip.len() < 2 || clip.len() > 480000 || clip.len() % 2 != 0 {
+        if clip.len() < 2 || clip.len() > CLIP_BYTES || clip.len() % 2 != 0 {
             return Err(Failure::new(
                 "no_clip",
                 "Record a microphone test before playing it",
@@ -90,7 +92,10 @@ pub async fn run(
     let mut data = Vec::new();
     let transfer = async {
         if let Some(stdout) = stdout.as_mut() {
-            stdout.take(480001).read_to_end(&mut data).await?;
+            stdout
+                .take(CLIP_BYTES as u64)
+                .read_to_end(&mut data)
+                .await?;
         }
         if let Some(stdin) = stdin.as_mut() {
             stdin.write_all(&clip).await?;
@@ -130,7 +135,9 @@ pub async fn run(
     // ChildStdin::shutdown flushes but does not necessarily close the pipe.
     // Drop our writer so a player reading to EOF can finish.
     drop(stdin);
-    if !completed || data.len() > 480000 {
+    // Own the sample limit: pw-record can exit unsuccessfully after reaching
+    // --sample-count even though it produced the complete recording.
+    if !completed || (record && data.len() == CLIP_BYTES) {
         finish_cancel(&mut child, pid).await?;
     } else {
         tokio::select! {
@@ -144,7 +151,7 @@ pub async fn run(
         return Ok(Vec::new());
     }
     if record {
-        data.truncate(data.len().min(480000) / 2 * 2);
+        data.truncate(data.len() / 2 * 2);
         if data.len() < 2 {
             return Err(Failure::new(
                 "empty_clip",
