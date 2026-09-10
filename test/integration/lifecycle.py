@@ -138,7 +138,8 @@ with tempfile.TemporaryDirectory(prefix='audio-lifecycle-') as temporary:
             second = pool.submit(Relay, executable, env)
             a, b = first.result(), second.result()
         relays.extend((a, b))
-        daemons[a.info['pid']] = os.pidfd_open(a.info['pid'])
+        if a.info['pid'] not in daemons:
+            daemons[a.info['pid']] = os.pidfd_open(a.info['pid'])
         if previous:
             assert previous.info['buildId'] != a.info['buildId'], 'Upgrade test requires two different builds'
             assert previous.info['pid'] != a.info['pid'], 'New release attached to the old executable'
