@@ -97,6 +97,7 @@ jobs:
           python test/integration/packaging.py backend/target/debug/omarchy-audio-service
           python packaging/build-release.py --output "$RUNNER_TEMP/audio-upgrade-candidate" --binary backend/target/debug/omarchy-audio-service
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/runtime.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
+          python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/routed_audio.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/microphone.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/output_groups.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/policy.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"

@@ -24,6 +24,8 @@ Item {
   property var stores: ({})
   property var storeErrors: ({})
   property var policies: ({})
+  property var profiles: []
+  property var ports: []
   readonly property bool busy: state.busy === true
   readonly property bool transactionBusy: busy && state.operation !== "node.audio"
   property var client: null
@@ -83,6 +85,8 @@ Item {
         if (JSON.stringify(root.stores) !== JSON.stringify(value.stores || {})) root.stores = value.stores || {}
         if (JSON.stringify(root.storeErrors) !== JSON.stringify(value.storeErrors || {})) root.storeErrors = value.storeErrors || {}
         if (JSON.stringify(root.policies) !== JSON.stringify(value.policies || {})) root.policies = value.policies || {}
+        if (JSON.stringify(root.profiles) !== JSON.stringify(value.profiles || [])) root.profiles = value.profiles || []
+        if (JSON.stringify(root.ports) !== JSON.stringify(value.ports || [])) root.ports = value.ports || []
         root.state = value
       },
       fault: function(message) {

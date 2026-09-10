@@ -23,16 +23,13 @@ pub(super) fn route_for<'a>(graph: &'a Graph, node: &Node) -> Option<(u32, &'a R
         .map(|route| (device_id, route))
 }
 
-pub(super) fn read_route(pod: &spa::pod::Pod) -> Option<Route> {
-    if pod.as_bytes().len() > 65536 {
+pub(super) fn read_route(object: spa::pod::Object) -> Option<Route> {
+    use spa::pod::Value;
+    if object.type_ != spa::sys::SPA_TYPE_OBJECT_ParamRoute
+        || object.id != spa::sys::SPA_PARAM_Route
+    {
         return None;
     }
-    use spa::pod::Value;
-    let (_, Value::Object(object)) =
-        spa::pod::deserialize::PodDeserializer::deserialize_any_from(pod.as_bytes()).ok()?
-    else {
-        return None;
-    };
     let (mut index, mut device, mut audio) = (None, None, None);
     for property in object.properties {
         match (property.key, property.value) {

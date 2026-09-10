@@ -36,11 +36,9 @@ impl Call {
     }
     pub fn validate(&self) -> Result<()> {
         let (min, max) = match self.helper.as_str() {
-            "audio-profiles"
-            | "audio-ports"
-            | "audio-stream-routes"
-            | "audio-resolve-output-sink"
-            | "audio-sink-availability" => (0, 0),
+            "audio-stream-routes" | "audio-resolve-output-sink" | "audio-sink-availability" => {
+                (0, 0)
+            }
             "audio-profile-set" => (2, 2),
             "audio-port-set" => (3, 3),
             "audio-output-set-default" | "audio-input-set-default" => (2, 4),
@@ -63,9 +61,7 @@ impl Call {
     pub fn mutating(&self) -> bool {
         !matches!(
             self.helper.as_str(),
-            "audio-profiles"
-                | "audio-ports"
-                | "audio-stream-routes"
+            "audio-stream-routes"
                 | "audio-resolve-output-sink"
                 | "audio-sink-availability"
                 | "audio-diagnostics"
@@ -217,9 +213,9 @@ mod tests {
         ] {
             assert!(Call::new(helper, vec![]).validate().is_err());
         }
-        assert!(Call::new("audio-profiles", vec![]).validate().is_ok());
+        assert!(Call::new("audio-stream-routes", vec![]).validate().is_ok());
         assert!(
-            Call::new("audio-profiles", vec!["extra".into()])
+            Call::new("audio-stream-routes", vec!["extra".into()])
                 .validate()
                 .is_err()
         );

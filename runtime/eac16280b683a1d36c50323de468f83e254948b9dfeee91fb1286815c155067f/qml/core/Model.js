@@ -1003,116 +1003,6 @@ function parseSinkAvailability(raw) {
   return next
 }
 
-function parseAudioProfiles(raw) {
-  var cards
-  var text = boundedSerializedInput(raw, 8388608)
-  try {
-    if (text === null) return []
-    cards = JSON.parse(text || "[]")
-  } catch (e) {
-    return []
-  }
-  if (!Array.isArray(cards)) return []
-
-  var normalized = []
-  var seenCards = {}
-  for (var i = 0; i < cards.length && i < 256 && normalized.length < 64; i++) {
-    var card = cards[i]
-    if (!card || typeof card !== "object" || Array.isArray(card)
-        || !Array.isArray(card.profiles) || card.profiles.length === 0) continue
-    var cardName = sanitizeIdentifier(card.name, 160)
-    if (cardName === "" || hasOwn(seenCards, cardName)) continue
-
-    var profiles = []
-    var seenProfiles = {}
-    for (var j = 0; j < card.profiles.length && j < 256 && profiles.length < 64; j++) {
-      var profile = card.profiles[j]
-      if (!profile || typeof profile !== "object" || Array.isArray(profile)) continue
-      var profileValue = sanitizeIdentifier(profile.value, 160)
-      if (profileValue === "" || hasOwn(seenProfiles, profileValue)) continue
-      var sinks = Math.floor(clampNumber(profile.sinks, 0, 0, 64))
-      var sources = Math.floor(clampNumber(profile.sources, 0, 0, 64))
-      setMapValue(seenProfiles, profileValue, true)
-      profiles.push({
-        value: profileValue,
-        label: sanitizeSceneString(profile.label, profileValue, 160),
-        sinks: sinks,
-        sources: sources
-      })
-    }
-    if (profiles.length === 0) continue
-
-    setMapValue(seenCards, cardName, true)
-    var activeProfile = sanitizeIdentifier(card.activeProfile, 160) || "off"
-    if (!hasOwn(seenProfiles, activeProfile)) activeProfile = "off"
-    normalized.push({
-      name: cardName,
-      label: sanitizeSceneString(card.label, cardName, 160),
-      bluetooth: card.bluetooth === true,
-      address: sanitizeIdentifier(card.address, 80),
-      activeProfile: activeProfile,
-      profiles: profiles
-    })
-  }
-
-  normalized.sort(function(a, b) {
-    var aActive = a.activeProfile !== "off" ? 0 : 1
-    var bActive = b.activeProfile !== "off" ? 0 : 1
-    if (aActive !== bActive) return aActive - bActive
-    return a.label.localeCompare(b.label)
-  })
-  return normalized
-}
-
-function parseAudioPorts(raw) {
-  var values
-  var text = boundedSerializedInput(raw, 8388608)
-  try {
-    if (text === null) return []
-    values = JSON.parse(text || "[]")
-  } catch (e) {
-    return []
-  }
-  if (!Array.isArray(values)) return []
-
-  var ports = []
-  var seenEndpoints = {}
-  for (var i = 0; i < values.length && i < 512 && ports.length < 128; i++) {
-    var item = values[i]
-    if (!item || typeof item !== "object" || Array.isArray(item)
-        || (item.direction !== "output" && item.direction !== "input")
-        || !Array.isArray(item.ports) || item.ports.length < 2) continue
-    var endpoint = sanitizeIdentifier(item.endpoint, 160)
-    var endpointKey = item.direction + ":" + endpoint
-    if (endpoint === "" || hasOwn(seenEndpoints, endpointKey)) continue
-    var options = []
-    var seenOptions = {}
-    for (var j = 0; j < item.ports.length && j < 256 && options.length < 64; j++) {
-      var port = item.ports[j]
-      if (!port || typeof port !== "object" || Array.isArray(port)) continue
-      var portValue = sanitizeIdentifier(port.value, 160)
-      if (portValue === "" || hasOwn(seenOptions, portValue)) continue
-      setMapValue(seenOptions, portValue, true)
-      options.push({
-        value: portValue,
-        label: sanitizeSceneString(port.label, portValue, 160)
-      })
-    }
-    if (options.length < 2) continue
-    setMapValue(seenEndpoints, endpointKey, true)
-    var activePort = sanitizeIdentifier(item.activePort, 160)
-    if (!hasOwn(seenOptions, activePort)) activePort = ""
-    ports.push({
-      direction: item.direction,
-      endpoint: endpoint,
-      label: sanitizeSceneString(item.label, endpoint, 160),
-      activePort: activePort,
-      ports: options
-    })
-  }
-  return ports
-}
-
 function audioProfileLabel(profile, bluetooth) {
   if (!profile) return "Unknown"
   if (profile.value === "off") return "Off"
@@ -1733,8 +1623,6 @@ if (typeof module !== "undefined") {
     audioMeterLevel: audioMeterLevel,
     outputVolumeName: outputVolumeName,
     parseSinkAvailability: parseSinkAvailability,
-    parseAudioProfiles: parseAudioProfiles,
-    parseAudioPorts: parseAudioPorts,
     audioProfileLabel: audioProfileLabel,
     audioProfileOptions: audioProfileOptions,
     audioCardsByBluetooth: audioCardsByBluetooth,

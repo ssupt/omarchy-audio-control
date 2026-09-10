@@ -81,8 +81,6 @@ Item {
     onTriggered: {
       if (!window.visible) return
       if (root.profileMenuOpen) { restart(); return }
-      if (!profilesProc.running) profilesProc.running = true
-      if (!portsProc.running) portsProc.running = true
       root.resolveVolumeSink()
     }
   }
@@ -95,7 +93,7 @@ Item {
 
   property var audioCards: []
   property var audioPorts: []
-  property bool profilesLoaded: false
+  readonly property bool profilesLoaded: !!service && service.ready && service.state.catalogReady === true
   readonly property bool bluetoothAutoSwitch: policy.settings["bluetooth.autoswitch-to-headset-profile"] === true
   readonly property bool bluetoothAutoSwitchLoaded: policy.loaded && Model.hasOwn(policy.settings, "bluetooth.autoswitch-to-headset-profile")
   readonly property string bluetoothProfilePreference: policy.settings["bluetooth.profile-preference"] || "quality"
@@ -124,8 +122,6 @@ Item {
   property bool outputGroupStatusIsError: false
   property string routingStatus: ""
   property bool routingStatusIsError: false
-  property string profileLoadError: ""
-  property string portLoadError: ""
   property string profileSetError: ""
   property string portSetError: ""
   property string settingsSaveError: ""
@@ -138,11 +134,9 @@ Item {
   readonly property string policyError: policy.error
   readonly property string error: {
     var errors = activeTab === 0
-      ? [profileSetError, portSetError, settingsSaveError, settingsFormatError,
-        profileLoadError, portLoadError]
+      ? [profileSetError, portSetError, settingsSaveError, settingsFormatError]
       : (activeTab === 1
-        ? [profileSetError, policyError,
-          profileLoadError]
+        ? [profileSetError, policyError]
         : (activeTab === 2
           ? [settingsSaveError, settingsFormatError, policyError] : []))
     for (var i = 0; i < errors.length; i++) if (errors[i] !== "") return errors[i]
@@ -278,7 +272,6 @@ Item {
     cursorActive = false
     selectedIndex = 0
     clearErrors()
-    profilesLoaded = false
     recoveryConfirmOpen = false
     microphoneTest.discard()
     cancelAliasEdit()
@@ -287,8 +280,6 @@ Item {
   }
 
   function clearErrors() {
-    profileLoadError = ""
-    portLoadError = ""
     profileSetError = ""
     portSetError = ""
     settingsSaveError = ""
@@ -338,8 +329,6 @@ Item {
 
   function refresh() {
     if (!window.visible) return
-    if (!profilesProc.running && !profileSetProc.running) profilesProc.running = true
-    if (!portsProc.running && !portSetProc.running) portsProc.running = true
     resolveVolumeSink()
   }
 
@@ -411,18 +400,19 @@ Item {
     } catch (_error) { }
   }
 
-  function parseAudioProfiles(raw) {
-    audioCards = Model.parseAudioProfiles(raw)
-    profilesLoaded = true
+  function refreshDeviceCatalog() {
+    if (profileMenuOpen) return
+    audioCards = service ? service.profiles : []
+    audioPorts = service ? service.ports : []
     clampCursor()
   }
-
-  function parseAudioPorts(raw) {
-    audioPorts = Model.parseAudioPorts(raw)
-    clampCursor()
+  onServiceChanged: refreshDeviceCatalog()
+  onProfileMenuOpenChanged: if (!profileMenuOpen) Qt.callLater(refreshDeviceCatalog)
+  Connections {
+    target: root.service
+    function onProfilesChanged() { root.refreshDeviceCatalog() }
+    function onPortsChanged() { root.refreshDeviceCatalog() }
   }
-
-
 
   function policyToggleAtCursor() {
     if (activeTab !== 2) return null
@@ -956,24 +946,6 @@ Item {
 
   AudioCommand {
     service: root.service
-    id: profilesProc
-    property string response: ""
-    command: runtime.scriptCommand("audio-profiles")
-    stdout: AudioReply {
-      waitForEnd: true
-      onStreamFinished: profilesProc.response = String(text || "")
-    }
-    onExited: function(exitCode) {
-      if (exitCode === 0) root.parseAudioProfiles(response)
-      else root.profilesLoaded = true
-      root.profileLoadError = exitCode !== 0 && window.visible
-        ? "Could not load audio profiles" : ""
-      response = ""
-    }
-  }
-
-  AudioCommand {
-    service: root.service
     id: volumeSinkProc
     property string response: ""
     property string requestedDefaultName: ""
@@ -1002,23 +974,6 @@ Item {
 
   AudioCommand {
     service: root.service
-    id: portsProc
-    property string response: ""
-    command: runtime.scriptCommand("audio-ports")
-    stdout: AudioReply {
-      waitForEnd: true
-      onStreamFinished: portsProc.response = String(text || "")
-    }
-    onExited: function(exitCode) {
-      if (exitCode === 0) root.parseAudioPorts(response)
-      root.portLoadError = exitCode !== 0 && window.visible
-        ? "Could not load audio ports" : ""
-      response = ""
-    }
-  }
-
-  AudioCommand {
-    service: root.service
     id: profileSetProc
     onExited: function(exitCode) {
       root.profileSetError = exitCode === 0 ? ""
@@ -1028,7 +983,6 @@ Item {
             ? "Audio profile changed, but endpoint volume or mute state was only partially restored"
             : (exitCode === 3 ? "That audio profile is no longer available"
               : "Could not change the audio profile")))
-      profileRefreshTimer.restart()
     }
   }
 
@@ -1040,24 +994,8 @@ Item {
         : (exitCode === 4 ? "Audio port changed, but the active port could not be verified"
           : (exitCode === 3 ? "That audio port is no longer available"
             : "Could not change the audio port"))
-      portRefreshTimer.restart()
     }
   }
-
-  Timer {
-    id: profileRefreshTimer
-    interval: 200
-    repeat: false
-    onTriggered: if (window.visible && !profilesProc.running) profilesProc.running = true
-  }
-
-  Timer {
-    id: portRefreshTimer
-    interval: 200
-    repeat: false
-    onTriggered: if (window.visible && !portsProc.running) portsProc.running = true
-  }
-
 
   FloatingWindow {
     id: window

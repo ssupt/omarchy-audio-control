@@ -6,6 +6,7 @@
 #include <spa/param/audio/raw.h>
 #include <spa/param/props.h>
 #include <spa/param/route.h>
+#include <spa/param/profile.h>
 #include <spa/pod/builder.h>
 #include <spa/pod/parser.h>
 #include <spa/pod/iter.h>
@@ -14,7 +15,7 @@
 struct fixture {
     struct spa_device device;
     struct spa_hook_list listeners;
-    struct spa_param_info param;
+    struct spa_param_info params[4];
     struct pw_main_loop *loop;
     struct pw_core *core;
     struct spa_source *timer;
@@ -22,6 +23,7 @@ struct fixture {
     bool muted[2];
     int pending;
     bool routes_hidden;
+    bool catalog_changed;
     float pending_volumes[2];
     bool pending_mute;
     struct pw_proxy *nodes[2];
@@ -30,8 +32,8 @@ struct fixture {
 static void info(struct fixture *f) {
     struct spa_device_info value = SPA_DEVICE_INFO_INIT();
     value.change_mask = SPA_DEVICE_CHANGE_MASK_PARAMS;
-    value.params = &f->param;
-    value.n_params = 1;
+    value.params = f->params;
+    value.n_params = 4;
     spa_hook_list_call(&f->listeners, struct spa_device_events, info, 0, &value);
 }
 
@@ -45,10 +47,64 @@ static int add_listener(void *object, struct spa_hook *listener,
     return 0;
 }
 
+static int enum_catalog(struct fixture *f, int seq, uint32_t id, uint32_t start, uint32_t count) {
+    if (id != SPA_PARAM_EnumProfile && id != SPA_PARAM_Profile && id != SPA_PARAM_EnumRoute) return -ENOENT;
+    uint32_t total = id == SPA_PARAM_Profile ? 1 : 4;
+    for (uint32_t i = start; i < total && count--; i++) {
+        uint8_t buffer[2048];
+        struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+        struct spa_pod_frame object;
+        if (id == SPA_PARAM_EnumRoute) {
+            const char *names[] = {"[Out] Speaker", "[Out] Headphones", "[In] Mic", "[In] Line"};
+            int32_t profiles[] = {1, 3}, devices[] = {i < 2 ? 4 : 0};
+            spa_pod_builder_push_object(&b, &object, SPA_TYPE_OBJECT_ParamRoute, id);
+            spa_pod_builder_add(&b,
+                SPA_PARAM_ROUTE_index, SPA_POD_Int(i < 2 ? 2+i : 5+i),
+                SPA_PARAM_ROUTE_name, SPA_POD_String(names[i]),
+                SPA_PARAM_ROUTE_description, SPA_POD_String(names[i]),
+                SPA_PARAM_ROUTE_priority, SPA_POD_Int(100-(int)i),
+                SPA_PARAM_ROUTE_direction, SPA_POD_Id(i < 2 ? SPA_DIRECTION_OUTPUT : SPA_DIRECTION_INPUT),
+                SPA_PARAM_ROUTE_available, SPA_POD_Id(f->catalog_changed && i % 2 ? SPA_PARAM_AVAILABILITY_no : SPA_PARAM_AVAILABILITY_yes),
+                SPA_PARAM_ROUTE_profiles, SPA_POD_Array(sizeof(int32_t), SPA_TYPE_Int, 2, profiles),
+                SPA_PARAM_ROUTE_devices, SPA_POD_Array(sizeof(int32_t), SPA_TYPE_Int, 1, devices), 0);
+        } else {
+            const char *names[] = {"off", "HiFi", "pro-audio", "headset"};
+            uint32_t index = id == SPA_PARAM_Profile ? (f->catalog_changed ? 3 : 1) : i;
+            spa_pod_builder_push_object(&b, &object, SPA_TYPE_OBJECT_ParamProfile, id);
+            spa_pod_builder_add(&b,
+                SPA_PARAM_PROFILE_index, SPA_POD_Int(index),
+                SPA_PARAM_PROFILE_name, SPA_POD_String(names[index]),
+                SPA_PARAM_PROFILE_description, SPA_POD_String(names[index]),
+                SPA_PARAM_PROFILE_priority, SPA_POD_Int(index ? 100 : 0),
+                SPA_PARAM_PROFILE_available, SPA_POD_Id(index == 3 || (f->catalog_changed && index == 1) ? SPA_PARAM_AVAILABILITY_no : SPA_PARAM_AVAILABILITY_yes), 0);
+            if (index) {
+                struct spa_pod_frame classes, class;
+                spa_pod_builder_prop(&b, SPA_PARAM_PROFILE_classes, 0);
+                spa_pod_builder_push_struct(&b, &classes);
+                spa_pod_builder_int(&b, 2);
+                for (int c = 0; c < 2; c++) {
+                    int32_t device = c ? 0 : 4;
+                    spa_pod_builder_push_struct(&b, &class);
+                    spa_pod_builder_add(&b, SPA_POD_String(c ? "Audio/Source" : "Audio/Sink"),
+                        SPA_POD_Int(1), SPA_POD_String("card.profile.devices"),
+                        SPA_POD_Array(sizeof(int32_t), SPA_TYPE_Int, 1, &device), 0);
+                    spa_pod_builder_pop(&b, &class);
+                }
+                spa_pod_builder_pop(&b, &classes);
+            }
+        }
+        struct spa_result_device_params result = { .id = id, .index = i, .next = i+1,
+            .param = spa_pod_builder_pop(&b, &object) };
+        spa_hook_list_call(&f->listeners, struct spa_device_events, result, 0,
+                          seq, 0, SPA_RESULT_TYPE_DEVICE_PARAMS, &result);
+    }
+    return 0;
+}
+
 static int enum_params(void *object, int seq, uint32_t id, uint32_t start,
                        uint32_t count, const struct spa_pod *filter) {
     struct fixture *f = object;
-    if (id != SPA_PARAM_Route) return -ENOENT;
+    if (id != SPA_PARAM_Route) return enum_catalog(f, seq, id, start, count);
     if (f->routes_hidden) return 0;
     for (uint32_t i = start; i < 2 && count--; i++) {
         uint8_t buffer[1024];
@@ -57,7 +113,7 @@ static int enum_params(void *object, int seq, uint32_t id, uint32_t start,
         struct spa_pod_frame route, props;
         spa_pod_builder_push_object(&b, &route, SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_Route);
         spa_pod_builder_add(&b,
-            SPA_PARAM_ROUTE_index, SPA_POD_Int(i ? 7 : 2),
+            SPA_PARAM_ROUTE_index, SPA_POD_Int(i ? 7 : f->catalog_changed ? 3 : 2),
             SPA_PARAM_ROUTE_device, SPA_POD_Int(i ? 0 : 4),
             SPA_PARAM_ROUTE_direction, SPA_POD_Id(i ? SPA_DIRECTION_INPUT : SPA_DIRECTION_OUTPUT), 0);
         spa_pod_builder_prop(&b, SPA_PARAM_ROUTE_props, 0);
@@ -84,7 +140,7 @@ static void apply(void *data, uint64_t expirations) {
     memcpy(f->volumes[i], f->pending_volumes, sizeof(f->pending_volumes));
     f->muted[i] = f->pending_mute;
     f->pending = -1;
-    f->param.flags ^= SPA_PARAM_INFO_SERIAL;
+    f->params[0].flags ^= SPA_PARAM_INFO_SERIAL;
     info(f);
 }
 
@@ -99,7 +155,7 @@ static int set_param(void *object, uint32_t id, uint32_t flags, const struct spa
         SPA_PARAM_ROUTE_device, SPA_POD_Int(&device),
         SPA_PARAM_ROUTE_props, SPA_POD_Pod(&props),
         SPA_PARAM_ROUTE_save, SPA_POD_Bool(&save)) < 0) return -EINVAL;
-    int i = index == 2 && device == 4 ? 0 : index == 7 && device == 0 ? 1 : -1;
+    int i = index == (f->catalog_changed ? 3 : 2) && device == 4 ? 0 : index == 7 && device == 0 ? 1 : -1;
     if (i < 0 || !save || f->pending >= 0) return -EINVAL;
     f->pending_mute = f->muted[i];
     memcpy(f->pending_volumes, f->volumes[i], sizeof(f->pending_volumes));
@@ -146,7 +202,14 @@ static void bound(void *data, uint32_t id) {
 static void toggle_routes(void *data, int signal) {
     struct fixture *f = data;
     f->routes_hidden = !f->routes_hidden;
-    f->param.flags ^= SPA_PARAM_INFO_SERIAL;
+    f->params[0].flags ^= SPA_PARAM_INFO_SERIAL;
+    info(f);
+}
+
+static void toggle_catalog(void *data, int signal) {
+    struct fixture *f = data;
+    f->catalog_changed = !f->catalog_changed;
+    for (unsigned i = 0; i < 4; i++) f->params[i].flags ^= SPA_PARAM_INFO_SERIAL;
     info(f);
 }
 
@@ -157,13 +220,16 @@ static void quit(void *data, int signal) {
 int main(int argc, char **argv) {
     pw_init(&argc, &argv);
     struct fixture f = { .pending = -1, .volumes = {{.008f, .027f}, {.064f, .125f}} };
-    f.param = (struct spa_param_info) { .id = SPA_PARAM_Route, .flags = SPA_PARAM_INFO_READWRITE };
+    uint32_t ids[] = {SPA_PARAM_Route, SPA_PARAM_EnumProfile, SPA_PARAM_Profile, SPA_PARAM_EnumRoute};
+    for (unsigned i = 0; i < 4; i++) f.params[i] = (struct spa_param_info) {
+        .id = ids[i], .flags = i ? SPA_PARAM_INFO_READ : SPA_PARAM_INFO_READWRITE };
     f.device.iface = SPA_INTERFACE_INIT(SPA_TYPE_INTERFACE_Device, SPA_VERSION_DEVICE, &methods, &f);
     spa_hook_list_init(&f.listeners);
     f.loop = pw_main_loop_new(NULL);
     struct pw_loop *loop = pw_main_loop_get_loop(f.loop);
     f.timer = pw_loop_add_timer(loop, apply, &f);
     pw_loop_add_signal(loop, SIGUSR1, toggle_routes, &f);
+    pw_loop_add_signal(loop, SIGUSR2, toggle_catalog, &f);
     pw_loop_add_signal(loop, SIGINT, quit, &f);
     pw_loop_add_signal(loop, SIGTERM, quit, &f);
     struct pw_context *context = pw_context_new(loop, NULL, 0);

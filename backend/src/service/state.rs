@@ -46,9 +46,13 @@ impl Service {
                     .unwrap_or(0)
                     + 1;
                 state["catalogRevision"] = json!(revision.to_string());
+                let (profiles, ports) = native::catalog::snapshot(graph);
+                state["profiles"] = profiles;
+                state["ports"] = ports;
             }
             state["connected"] = json!(graph.connected);
             state["graphReady"] = json!(graph.ready);
+            state["catalogReady"] = json!(native::catalog::ready(graph));
             state["generation"] = json!(graph.generation);
             state["error"] = json!(graph.error);
             state["nodes"] = json!(graph.nodes.values().collect::<Vec<_>>());

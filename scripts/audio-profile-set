@@ -31,50 +31,6 @@ valid_identifier "$card" && valid_identifier "$profile" || {
 source "$script_dir/.audio-common"
 audio_acquire_mutation_lock "Another audio profile change is still finishing" || exit 1
 
-profiles=$(/bin/bash "$script_dir/audio-profiles") || exit 1
-card_state=$(jq -c --arg card "$card" '
-  [.[] | select(.name == $card)] as $matches
-  | if ($matches | length) == 1 then $matches[0]
-    elif ($matches | length) == 0 then empty
-    else error("ambiguous card identity") end
-' <<<"$profiles") || exit 1
-profile_state=$(jq -c --arg profile "$profile" '
-  [.profiles[] | select(.value == $profile)] as $matches
-  | if ($matches | length) == 1 then $matches[0]
-    elif ($matches | length) == 0 then empty
-    else error("ambiguous profile identity") end
-' <<<"$card_state") || exit 1
-if [[ -z $profile_state ]]; then
-  echo "Profile is not available for this device" >&2
-  exit 3
-fi
-expected_sinks=$(jq -r '.sinks // 0' <<<"$profile_state")
-expected_sources=$(jq -r '.sources // 0' <<<"$profile_state")
-[[ $expected_sinks =~ ^[0-9]+$ ]] || expected_sinks=0
-[[ $expected_sources =~ ^[0-9]+$ ]] || expected_sources=0
-
-bluetooth=$(jq -r '.bluetooth == true' <<<"$card_state")
-bluetooth_address=$(jq -r '.address // ""' <<<"$card_state")
-normalized_address=${bluetooth_address,,}
-normalized_address=${normalized_address//[^0-9a-f]/}
-
-save_profile_preference() {
-  [[ $bluetooth == true ]] || return 0
-  [[ $normalized_address =~ ^[0-9a-f]{12}$ ]] || return 1
-  /bin/bash "$script_dir/audio-preferences" set-profile "$normalized_address" "$profile"
-}
-
-# A Bluetooth profile choice is also the shared preference used after a
-# temporary headset-mode switch. Validate that store before touching hardware,
-# matching the default-device helpers' no-partial-change guarantee.
-if [[ $bluetooth == true ]]; then
-  [[ $normalized_address =~ ^[0-9a-f]{12}$ ]] || {
-    echo "Bluetooth device address is not available" >&2
-    exit 1
-  }
-  /bin/bash "$script_dir/audio-preferences" show >/dev/null || exit 1
-fi
-
 # Exit codes: 0 changed (or was already active), 2 changed but preference lost,
 # 3 target card or profile absent, 4 changed/unknown with incomplete recovery,
 # and 1 for a verified unchanged failure.
@@ -104,6 +60,64 @@ card_index=$(jq -r '.index // empty' <<<"$card_info") || exit 1
 [[ $card_index =~ ^[0-9]{1,20}$ ]] || exit 1
 card_object_id=$(jq -r '.properties."object.id" // empty | tostring' <<<"$card_info") || exit 1
 [[ -z $card_object_id || $card_object_id =~ ^[0-9]{1,20}$ ]] || exit 1
+
+# Validate the requested profile against the same card identity used below.
+profile_state=$(jq -c --arg profile "$profile" '
+  def bounded_count:
+    if type == "number" and . >= 0 and . <= 64 then floor else 0 end;
+  def bounded_priority:
+    if type == "number" and . >= 0 and . <= 1000000000 then . else 0 end;
+  # Cards that ship a UCM profile name their ports "[Out] Speaker" instead of
+  # following the classic ACP scheme ("analog-output"), so match both.
+  def port_supports($card; $profile; $direction):
+    any(
+      (($card.ports // {})
+        | if type == "object" then to_entries[:256] else [] end)[]?;
+      (.value | type) == "object"
+      and ((.value.priority // 0) | bounded_priority) > 0
+      and ((.value.profiles // [])
+        | if type == "array" then .[:256] else [] end | index($profile) != null)
+      and ((.key | type) == "string" and (.key | test($direction)))
+    );
+  . as $card
+  | (.profiles | if type == "object" then .[$profile] else null end)
+  | select(type == "object")
+  | select((.available != false and .available != "no") or $profile == $card.active_profile)
+  | select($profile == $card.active_profile or $profile == "off"
+      or $card.properties["device.api"] == "bluez5"
+      or ((((.sinks // 0) | bounded_count) == 0
+          or port_supports($card; $profile; "^\\[Out\\] |output"))
+        and (((.sources // 0) | bounded_count) == 0
+          or port_supports($card; $profile; "^\\[In\\] |input"))))
+  | {sinks: ((.sinks // 0) | bounded_count), sources: ((.sources // 0) | bounded_count)}
+' <<<"$card_info") || exit 1
+if [[ -z $profile_state ]]; then
+  echo "Profile is not available for this device" >&2
+  exit 3
+fi
+expected_sinks=$(jq -r '.sinks' <<<"$profile_state")
+expected_sources=$(jq -r '.sources' <<<"$profile_state")
+bluetooth=$(jq -r '.properties["device.api"] == "bluez5"' <<<"$card_info")
+bluetooth_address=$(jq -r '.properties["api.bluez5.address"] // .properties["device.string"] // ""' <<<"$card_info")
+normalized_address=${bluetooth_address,,}
+normalized_address=${normalized_address//[^0-9a-f]/}
+
+save_profile_preference() {
+  [[ $bluetooth == true ]] || return 0
+  [[ $normalized_address =~ ^[0-9a-f]{12}$ ]] || return 1
+  /bin/bash "$script_dir/audio-preferences" set-profile "$normalized_address" "$profile"
+}
+
+# A Bluetooth profile choice is also the shared preference used after a
+# temporary headset-mode switch. Validate that store before touching hardware,
+# matching the default-device helpers' no-partial-change guarantee.
+if [[ $bluetooth == true ]]; then
+  [[ $normalized_address =~ ^[0-9a-f]{12}$ ]] || {
+    echo "Bluetooth device address is not available" >&2
+    exit 1
+  }
+  /bin/bash "$script_dir/audio-preferences" show >/dev/null || exit 1
+fi
 
 # Re-applying the active profile would run the whole mute-restore dance for
 # nothing, which briefly silences playback and can leave endpoints muted if

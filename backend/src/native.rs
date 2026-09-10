@@ -16,8 +16,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, oneshot, watch};
 
 mod audio;
+pub mod catalog;
+mod device;
+use device::{OwnedDevice, refresh};
 pub mod metadata;
-use audio::{patch_pod, read_audio, read_route, route_for};
+use audio::{patch_pod, read_audio, route_for};
 
 type Properties = BTreeMap<String, String>;
 
@@ -45,7 +48,10 @@ pub struct Device {
     #[serde(skip)]
     routes: BTreeMap<u32, audio::Route>,
     #[serde(skip)]
-    route_request: Option<i32>,
+    param_request: Option<i32>,
+    #[serde(skip)]
+    catalog: Arc<catalog::Catalog>,
+    pub catalog_ready: bool,
     pub id: u32,
     pub revision: u64,
     pub properties: Properties,
@@ -298,14 +304,6 @@ struct OwnedMetadata {
     metadata: pw::metadata::Metadata,
     name: String,
 }
-struct OwnedDevice {
-    _listener: pw::device::DeviceListener,
-    device: pw::device::Device,
-    param_flags: BTreeMap<u32, u32>,
-    route_params: BTreeMap<u32, audio::Route>,
-    route_dirty: bool,
-    route_readable: bool,
-}
 struct OwnedLink {
     _listener: pw::link::LinkListener,
     _link: pw::link::Link,
@@ -316,37 +314,6 @@ struct Proxies {
     metadata: BTreeMap<u32, OwnedMetadata>,
     devices: BTreeMap<u32, OwnedDevice>,
     links: BTreeMap<u32, OwnedLink>,
-}
-
-// Keep one enumeration per device in flight. Commit the complete result at its
-// barrier so route removal and duplex updates cannot leave stale entries.
-fn refresh_routes(
-    id: u32,
-    proxies: &Rc<RefCell<Proxies>>,
-    graph: &Rc<RefCell<Graph>>,
-    core: &pw::core::CoreRc,
-    syncs: &Rc<RefCell<BTreeMap<i32, u32>>>,
-) {
-    let mut proxies = proxies.borrow_mut();
-    let mut graph = graph.borrow_mut();
-    let (Some(device), Some(snapshot)) = (proxies.devices.get_mut(&id), graph.devices.get_mut(&id))
-    else {
-        return;
-    };
-    if !device.route_dirty || snapshot.route_request.is_some() {
-        return;
-    }
-    device.route_dirty = false;
-    device.route_params.clear();
-    if device.route_readable {
-        device
-            .device
-            .enum_params(0, Some(spa::param::ParamType::Route), 0, 256);
-    }
-    if let Ok(done) = core.sync(0) {
-        snapshot.route_request = Some(done.raw());
-        syncs.borrow_mut().insert(done.raw(), id);
-    }
 }
 
 fn session(
@@ -371,7 +338,7 @@ fn session(
     }));
     let proxies = Rc::new(RefCell::new(Proxies::default()));
     let pending = Rc::new(RefCell::new(BTreeMap::<i32, Completion>::new()));
-    let route_syncs = Rc::new(RefCell::new(BTreeMap::<i32, u32>::new()));
+    let device_syncs = Rc::new(RefCell::new(BTreeMap::<i32, u32>::new()));
     let initial = Rc::new(Cell::new(core.sync(0)?.raw()));
     let sync_round = Rc::new(Cell::new(0));
     let _core_listener = {
@@ -380,7 +347,7 @@ fn session(
         let pending = pending.clone();
         let initial = initial.clone();
         let proxies = Rc::downgrade(&proxies);
-        let route_syncs = route_syncs.clone();
+        let device_syncs = device_syncs.clone();
         let core = core.downgrade();
         let loop_ = main_loop.downgrade();
         core.upgrade()
@@ -404,42 +371,30 @@ fn session(
                             .borrow()
                             .devices
                             .values()
-                            .all(|d| d.route_request.is_none());
+                            .all(|d| d.param_request.is_none());
                         graph.borrow_mut().ready = ready;
                         publish(&graph, &tx);
                     }
                 }
-                let refreshed = route_syncs.borrow_mut().remove(&seq.raw());
+                let refreshed = device_syncs.borrow_mut().remove(&seq.raw());
                 if let (Some(id), Some(proxies)) = (refreshed, proxies.upgrade()) {
                     if let Some(device) = proxies.borrow_mut().devices.get_mut(&id) {
                         if let Some(snapshot) = graph.borrow_mut().devices.get_mut(&id) {
-                            if snapshot.route_request != Some(seq.raw()) {
+                            if snapshot.param_request != Some(seq.raw()) {
                                 return;
                             }
-                            snapshot.route_request = None;
-                            if !device.route_dirty {
-                                let topology = |routes: &BTreeMap<u32, audio::Route>| {
-                                    routes
-                                        .values()
-                                        .map(|r| (r.index, r.device))
-                                        .collect::<Vec<_>>()
-                                };
-                                if topology(&snapshot.routes) != topology(&device.route_params) {
-                                    snapshot.revision += 1;
-                                }
-                                snapshot.routes = std::mem::take(&mut device.route_params);
-                            }
+                            device.commit(snapshot);
                         }
                     }
                     if let Some(core) = core.upgrade() {
-                        refresh_routes(id, &proxies, &graph, &core, &route_syncs);
+                        refresh(id, &proxies, &graph, &core, &device_syncs);
                     }
                     if sync_round.get() == 2
                         && graph
                             .borrow()
                             .devices
                             .values()
-                            .all(|d| d.route_request.is_none())
+                            .all(|d| d.param_request.is_none())
                     {
                         graph.borrow_mut().ready = true;
                     }
@@ -468,7 +423,7 @@ fn session(
         let proxies_removed = proxies.clone();
         let tx_removed = tx.clone();
         let core = core.downgrade();
-        let route_syncs = route_syncs.clone();
+        let device_syncs = device_syncs.clone();
         registry
             .upgrade()
             .unwrap()
@@ -614,92 +569,41 @@ fn session(
                         let t = tx_added.clone();
                         let p = Rc::downgrade(&proxies_added);
                         let c = core.upgrade().unwrap().downgrade();
-                        let completions = route_syncs.clone();
+                        let completions = device_syncs.clone();
                         let listener = device
                             .add_listener_local()
                             .info(move |info| {
-                                if let Some(device) = g.borrow_mut().devices.get_mut(&id) {
-                                    device.properties.extend(copy_props(info.props()));
-                                }
                                 let Some(proxies) = p.upgrade() else {
                                     return;
                                 };
-                                if let Some(device) = proxies.borrow_mut().devices.get_mut(&id) {
-                                    // Remote devices announce parameter changes through info.
-                                    for param in info.params() {
-                                        let param_id = param.id().as_raw();
-                                        let flags = param.flags().bits();
-                                        if device.param_flags.insert(param_id, flags) == Some(flags)
-                                        {
-                                            continue;
-                                        }
-                                        if param.id() == spa::param::ParamType::Profile {
-                                            if let Some(snapshot) =
-                                                g.borrow_mut().devices.get_mut(&id)
-                                            {
-                                                snapshot.revision += 1;
-                                            }
-                                        } else if param.id() == spa::param::ParamType::Route {
-                                            device.route_dirty = true;
-                                            device.route_readable =
-                                                flags & spa::sys::SPA_PARAM_INFO_READ != 0;
-                                        }
-                                    }
-                                }
-                                if info
-                                    .change_mask()
-                                    .contains(pw::device::DeviceChangeMask::PARAMS)
-                                    && !info
-                                        .params()
-                                        .iter()
-                                        .any(|p| p.id() == spa::param::ParamType::Route)
-                                {
-                                    if let Some(device) = proxies.borrow_mut().devices.get_mut(&id)
-                                    {
-                                        if device
-                                            .param_flags
-                                            .remove(&spa::param::ParamType::Route.as_raw())
-                                            .is_some()
-                                        {
-                                            device.route_dirty = true;
-                                            device.route_readable = false;
-                                        }
-                                    }
+                                if let (Some(device), Some(snapshot)) = (
+                                    proxies.borrow_mut().devices.get_mut(&id),
+                                    g.borrow_mut().devices.get_mut(&id),
+                                ) {
+                                    device.info(snapshot, info);
                                 }
                                 if let Some(core) = c.upgrade() {
-                                    refresh_routes(id, &proxies, &g, &core, &completions);
+                                    refresh(id, &proxies, &g, &core, &completions);
                                 }
                                 publish(&g, &t);
                             })
                             .param({
                                 let p = Rc::downgrade(&proxies_added);
                                 move |_, param, index, _, pod| {
-                                    if param != spa::param::ParamType::Route {
-                                        return;
-                                    }
                                     let Some(proxies) = p.upgrade() else {
                                         return;
                                     };
                                     if let Some(device) = proxies.borrow_mut().devices.get_mut(&id)
                                     {
-                                        if let Some(route) = pod.and_then(read_route) {
-                                            device.route_params.insert(index, route);
-                                        }
+                                        device.param(param.as_raw(), index, pod);
                                     }
                                 }
                             })
                             .register();
-                        proxies_added.borrow_mut().devices.insert(
-                            id,
-                            OwnedDevice {
-                                _listener: listener,
-                                device,
-                                param_flags: BTreeMap::new(),
-                                route_params: BTreeMap::new(),
-                                route_dirty: false,
-                                route_readable: false,
-                            },
-                        );
+                        proxies_added
+                            .borrow_mut()
+                            .devices
+                            .insert(id, OwnedDevice::new(device, listener));
                     }
                     pw::types::ObjectType::Link => {
                         let Ok(link) = registry.bind::<pw::link::Link, _>(global) else {
@@ -798,7 +702,7 @@ fn session(
                         .get("device.id")
                         .and_then(|id| id.parse::<u32>().ok())
                         .and_then(|id| graph.devices.get(&id))
-                        .is_some_and(|device| device.route_request.is_some())
+                        .is_some_and(|device| device.param_request.is_some())
                     {
                         return Err(Failure::new("busy", "Audio route is updating"));
                     }

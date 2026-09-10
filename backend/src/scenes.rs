@@ -102,30 +102,12 @@ fn default_name(graph: &Graph, direction: &str) -> String {
         .unwrap_or_default()
 }
 
-pub async fn capture(
-    native: &Handle,
-    adapter: &Adapter,
-    name: &str,
-    overdrive: bool,
-) -> Result<Value> {
-    let ports = adapter.run(&Call::new("audio-ports", vec![]), None).await?;
-    let profiles = adapter
-        .run(&Call::new("audio-profiles", vec![]), None)
-        .await?;
-    if ports.exit_code != 0 || profiles.exit_code != 0 {
-        return Err(Failure::new(
-            "capture_failed",
-            "Could not capture device ports and profiles",
-        ));
-    }
-    let ports: Value = serde_json::from_str(&ports.stdout)
-        .map_err(|_| Failure::new("capture_failed", "Invalid port snapshot"))?;
-    let profiles: Value = serde_json::from_str(&profiles.stdout)
-        .map_err(|_| Failure::new("capture_failed", "Invalid profile snapshot"))?;
+pub fn capture(native: &Handle, name: &str, overdrive: bool) -> Result<Value> {
     let graph = native.snapshot();
-    if !graph.ready {
-        return Err(Failure::new("disconnected", "Audio graph is not ready"));
+    if !native::catalog::ready(&graph) {
+        return Err(Failure::new("busy", "Audio device information is updating"));
     }
+    let (profiles, ports) = native::catalog::snapshot(&graph);
     let devices: Vec<_> = graph.nodes.values().filter_map(|node| {
         let direction = if class(node) == "Audio/Sink" { "output" } else { "input" };
         resolve(&graph, direction, &node.name)?;

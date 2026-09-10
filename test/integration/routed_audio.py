@@ -59,8 +59,19 @@ with tempfile.TemporaryDirectory(prefix='audio-routes-') as temporary:
             until(path.exists)
             client = Client(path)
             client.request('state.subscribe')
-            state = client.wait_state(lambda s: s.get('graphReady') and
+            state = client.wait_state(lambda s: s.get('catalogReady') and
                 any(n['name'] == 'audio_test_routed_input' and n['audio']['volumes'] for n in s['nodes']))
+            def check_catalog(state):
+                card, = state['profiles']
+                assert card['name'] == 'audio_test_device' and card['activeProfile'] == 'HiFi', card
+                assert card['profiles'] == [dict(value='HiFi', label='HiFi', sinks=1, sources=1),
+                                            dict(value='off', label='off', sinks=0, sources=0)], card
+                assert len(state['ports']) == 2, state['ports']
+                assert [p['activePort'] for p in state['ports']] == ['[Out] Speaker', '[In] Mic'], state['ports']
+            check_catalog(state)
+            scene = client.request('scene.capture', dict(name='Routed devices'))
+            assert scene['profiles'] == [dict(card='audio_test_device', profile='HiFi')], scene
+            assert {p['value'] for p in scene['ports']} == {'[Out] Speaker', '[In] Mic'}, scene
             identities = {}
             for direction, expected in [('output', [.2, .3]), ('input', [.4, .5])]:
                 node = next(n for n in state['nodes'] if n['name'] == 'audio_test_routed_'+direction)
@@ -94,13 +105,24 @@ with tempfile.TemporaryDirectory(prefix='audio-routes-') as temporary:
             device_process.send_signal(signal.SIGUSR1)
             client.wait_state(lambda s: all(abs(max(n['audio']['volumes'])-.4) < .001
                 for n in s['nodes'] if n['name'].startswith('audio_test_routed_')))
+            # Publish profile, port availability and active route changes together.
+            device_process.send_signal(signal.SIGUSR2)
+            changed = client.wait_state(lambda s: s.get('catalogReady') and s['profiles'][0]['activeProfile'] == 'headset')
+            assert [p['value'] for p in changed['profiles'][0]['profiles']] == ['headset', 'off'], changed['profiles']
+            port, = changed['ports']
+            assert port['direction'] == 'output' and port['activePort'] == '[Out] Headphones', port
+            assert len(port['ports']) == 2, 'An unavailable active port must remain visible'
+            device_process.send_signal(signal.SIGUSR2)
+            restored = client.wait_state(lambda s: s.get('catalogReady') and s['profiles'][0]['activeProfile'] == 'HiFi')
+            check_catalog(restored)
             client.request('node.level', dict(identity=identities['output'], volume=.3))
             device_process.terminate()
             device_process.wait(timeout=5)
             client.wait_state(lambda s: all(n['id'] != identities['output']['id'] for n in s['nodes']))
+            assert not client.state['profiles'] and not client.state['ports'], client.state
             reply = client.response(client.send('node.level', dict(identity=identities['output'], volume=.2)))
             assert reply['error']['code'] == 'stale_node', reply
-            print('PASS: hardware route volume, balance, mute, delayed confirmation, route refresh and removal')
+            print('PASS: native profiles, ports, scene capture, hardware levels, delayed confirmation and removal')
         except Exception:
             log.flush()
             print((work/'log').read_text()[-5000:], file=sys.stderr)

@@ -61,7 +61,10 @@ Item {
       if (root.panel.directDeviceMutationBusy || root.advanced.audioControlWritePending) return
       switch (root.phase) {
       case 0:
-        if (!root.advanced.managedDevices.length) return
+        if (!root.advanced.managedDevices.length || !root.advanced.profilesLoaded) return
+        if (!root.check(root.advanced.audioCards.length === 1
+            && root.advanced.audioCards[0].activeProfile === "HiFi"
+            && root.advanced.audioPorts.length === 2, "native device catalog did not reach the panel")) return
         var restored = root.panel.candidateStreams.find(function(node) { return node.name === "audio_test_playback" })
         if (!restored || !root.panel.mutableAudioNode(restored)
             || Math.abs(root.panel.audioNodeVolume(restored) - 1) > .01) return

@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import select
+import shlex
 from pathlib import Path
 import shutil
 import socket
@@ -46,8 +47,6 @@ with tempfile.TemporaryDirectory(prefix='audio-integration-') as temporary:
     helpers = work / 'helpers'
     helpers.mkdir()
     shutil.copy(ROOT / 'scripts/.audio-common', helpers / '.audio-common')
-    for name in ('audio-profiles', 'audio-ports'):
-        (helpers / name).write_text("printf '[]\\n'\n")
     (helpers / 'audio-diagnostics').write_text('''printf 'sample\\n' >>"$AUDIO_INTEGRATION_LOG.diagnostics"
 printf '%s\\n' '{"version":1,"graph":{"rate":48000},"services":[],"devices":[],"routes":[],"warnings":[]}'
 ''')
@@ -266,6 +265,11 @@ assert len(sys.stdin.buffer.read()) > 0
             if not full_ui:
                 print('SKIP: QML entry points (the Omarchy shell or Weston is unavailable)')
             if full_ui:
+                fixture = work/'routed-device'
+                flags = shlex.split(subprocess.check_output(['pkg-config', '--cflags', '--libs', 'libpipewire-0.3'], text=True))
+                subprocess.run(['cc', str(ROOT/'test/fixtures/routed-device.c'), '-o', str(fixture), *flags], check=True)
+                processes.append(subprocess.Popen([str(fixture)], env=env, stdout=log, stderr=log))
+                a.wait_state(lambda s: s.get('catalogReady') and len(s.get('ports', [])) == 2)
                 compositor = subprocess.Popen([weston,'--backend=headless','--renderer=pixman',
                     '--shell=kiosk-shell.so','--socket=audio-test-wayland','--idle-time=0','--no-config'],
                     env=env,stdout=log,stderr=log)

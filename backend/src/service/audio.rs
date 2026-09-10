@@ -152,13 +152,7 @@ impl Service {
             )
             .await
         } else {
-            crate::scenes::capture(
-                native,
-                &self.adapter,
-                &request.params::<Capture>()?.name,
-                overdrive,
-            )
-            .await
+            crate::scenes::capture(native, &request.params::<Capture>()?.name, overdrive)
         };
         self.reload_stores().await?;
         result
