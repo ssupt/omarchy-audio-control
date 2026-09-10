@@ -1,11 +1,18 @@
 //! The shell owns a small stdio relay. The daemon outlives a UI reload long
 //! enough to verify admitted commands, then exits when its clients disappear.
-use std::{io, os::fd::FromRawFd, path::PathBuf, process::Stdio, time::Duration};
+use serde_json::json;
+use std::{
+    io,
+    os::fd::FromRawFd,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
     process::Command,
-    time::{Instant, sleep},
+    time::{Instant, sleep, timeout},
 };
 
 pub const BUILD_ID: &str = env!("AUDIO_BUILD_ID");
@@ -74,11 +81,43 @@ pub fn socket_path() -> io::Result<PathBuf> {
         .join(format!("backend-{}.sock", &BUILD_ID[..24])))
 }
 
+async fn connect_ready(path: &Path) -> io::Result<UnixStream> {
+    let mut socket = UnixStream::connect(path).await?;
+    // A dying daemon may still accept connections. Probe before forwarding any
+    // client bytes, so retrying startup cannot replay an admitted operation.
+    timeout(Duration::from_secs(1), async {
+        crate::server::write_frame(
+            &mut socket,
+            &json!({
+                "version": 1, "id": "relay-startup", "method": "hello", "params": {}
+            }),
+        )
+        .await?;
+        let frame = crate::server::read_frame(&mut BufReader::new(&mut socket))
+            .await?
+            .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+        let reply: serde_json::Value = serde_json::from_slice(&frame)?;
+        if reply["version"] != 1
+            || reply["id"] != "relay-startup"
+            || reply["result"]["buildId"] != BUILD_ID
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Audio backend startup identity mismatch",
+            ));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    Ok(socket)
+}
+
 pub async fn relay() -> io::Result<()> {
     let stdin = Pipe::new(0)?;
     let stdout = Pipe::new(1)?;
     let path = socket_path()?;
-    let socket = match UnixStream::connect(&path).await {
+    let socket = match connect_ready(&path).await {
         Ok(socket) => socket,
         Err(_) => {
             // No shell, downloaded code, installation hooks or user units.
@@ -104,7 +143,7 @@ pub async fn relay() -> io::Result<()> {
             loop {
                 // Concurrent launches converge on the same locked socket. Even
                 // if our child loses that race, connect to the winning daemon.
-                if let Ok(socket) = UnixStream::connect(&path).await {
+                if let Ok(socket) = connect_ready(&path).await {
                     break socket;
                 }
                 let _ = child.try_wait()?;

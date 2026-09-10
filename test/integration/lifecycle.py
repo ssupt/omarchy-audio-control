@@ -8,6 +8,7 @@ from pathlib import Path
 import select
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -50,7 +51,10 @@ class Relay:
                 left = deadline-time.monotonic()
                 assert left > 0 and select.select([self.process.stdout], [], [], left)[0], 'Relay response timed out'
                 chunk = os.read(self.process.stdout.fileno(), 8192)
-                assert chunk, 'Relay closed before responding'
+                if not chunk:
+                    self.process.wait(timeout=3)
+                    raise AssertionError('Relay closed before responding: '
+                                         + self.process.stderr.read(4096).decode(errors='replace'))
                 self.buffer += chunk
                 assert len(self.buffer) < 262144
             line, self.buffer = self.buffer.split(b'\n', 1)
@@ -99,6 +103,30 @@ with tempfile.TemporaryDirectory(prefix='audio-lifecycle-') as temporary:
     relays = []
     daemons = {}
     try:
+        # A listening socket may accept a connection while its daemon is
+        # shutting down. Connecting alone does not establish a usable session.
+        build = json.loads(subprocess.check_output([str(executable), '--build-info']))
+        socket_dir = work/'omarchy-audio-control'
+        socket_dir.mkdir(mode=0o700)
+        stale = socket.socket(socket.AF_UNIX)
+        stale.bind(str(socket_dir/('backend-'+build['buildId'][:24]+'.sock')))
+        stale.listen()
+        def close_during_startup():
+            stale.settimeout(8)
+            try:
+                connection, _ = stale.accept()
+                with connection:
+                    connection.settimeout(8)
+                    assert connection.recv(8192)
+            finally:
+                stale.close()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            closing = pool.submit(close_during_startup)
+            recovered = Relay(executable, env)
+            relays.append(recovered)
+            daemons[recovered.info['pid']] = os.pidfd_open(recovered.info['pid'])
+            closing.result()
+        recovered.close()
         previous = None
         if PREVIOUS:
             previous = Relay(PREVIOUS, env)
@@ -147,15 +175,15 @@ with tempfile.TemporaryDirectory(prefix='audio-lifecycle-') as temporary:
         result = e.request('adapter.run', dict(helper='audio-sink-availability', args=[]))
         assert result['exitCode'] == 0, result
         e.close()
-        socket = work/'omarchy-audio-control'/('backend-'+e.info['buildId'][:24]+'.sock')
-        until(lambda: not socket.exists(), timeout=36)
+        socket_path = work/'omarchy-audio-control'/('backend-'+e.info['buildId'][:24]+'.sock')
+        until(lambda: not socket_path.exists(), timeout=36)
         assert preferences.read_text() == original
         assert json.loads(settings.read_text())['outputOverdrive'] is True
         if previous:
             old_socket = work/'omarchy-audio-control'/('backend-'+previous.info['buildId'][:24]+'.sock')
             until(lambda: not old_socket.exists(), timeout=8)
             print('PASS: different release builds use separate daemons, retain settings, and retire the previous daemon')
-        print('PASS: shared daemon, UI reload, crash recovery, admitted-write drain, removal, idle exit, and existing preferences')
+        print('PASS: startup handshake, shared daemon, UI reload, crash recovery, admitted-write drain, removal, idle exit, and existing preferences')
     finally:
         for relay in relays:
             if relay.process.poll() is None:
