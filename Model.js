@@ -1714,6 +1714,56 @@ function audioScenePlan(scene) {
   return steps
 }
 
+// Mirrors the first-party omarchy.media selection for hosts where the media
+// service object is not reachable (Omarchy 4.0.3 capability scoping answers
+// null for firstPartyServiceFor): the first player in list order that is
+// playing and owns a matched playback stream, then any playing player, then
+// a controllable one. The host's hand-picked source preference cannot be
+// seen from here, so when the user pinned a source in the media widget this
+// fallback may pick a different-but-reasonable player.
+function pickActiveMprisPlayer(players, streams) {
+  var values = players && typeof players.length === "number" ? players : []
+  var nodes = streams && typeof streams.length === "number" ? streams : []
+  var matched = null, matchedProxy = null
+  var playing = null, playingProxy = null
+  var controllable = null, controllableProxy = null
+  for (var i = 0; i < values.length && i < 256; i++) {
+    var player = values[i]
+    if (!player) continue
+    var proxy = mprisPlayerIsProxy(player)
+    var label = mprisPlayerLabel(player)
+    var hasStream = false
+    if (label) {
+      for (var s = 0; s < nodes.length && s < 512; s++) {
+        var streamLabel = rawStreamLabel(nodes[s])
+        if (streamLabel && !streamLabelIsGeneric(streamLabel)
+            && streamRepresentsMprisPlayer(streamLabel, label)) {
+          hasStream = true
+          break
+        }
+      }
+    }
+    var isPlaying = false
+    var canControl = false
+    try { isPlaying = player.isPlaying === true } catch (e) { }
+    try { canControl = player.canControl === true } catch (e) { }
+    if (isPlaying) {
+      if (hasStream) {
+        if (!proxy && !matched) matched = player
+        else if (proxy && !matchedProxy) matchedProxy = player
+      } else {
+        if (!proxy && !playing) playing = player
+        else if (proxy && !playingProxy) playingProxy = player
+      }
+    } else if (canControl) {
+      if (!proxy && !controllable) controllable = player
+      else if (proxy && !controllableProxy) controllableProxy = player
+    }
+  }
+  return matched || matchedProxy || playing || playingProxy
+    || controllable || controllableProxy || null
+}
+
 function streamRepresentsPlayer(node, player, players, streams) {
   if (!node || !player) return false
   var playerLabel = mprisPlayerLabel(player)
@@ -1804,6 +1854,7 @@ if (typeof module !== "undefined") {
     addedRecordingStreamLabels: addedRecordingStreamLabels,
     streamIconName: streamIconName,
     streamRepresentsPlayer: streamRepresentsPlayer,
+    pickActiveMprisPlayer: pickActiveMprisPlayer,
     audioScenePlan: audioScenePlan
   }
 }
