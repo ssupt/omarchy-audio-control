@@ -17,6 +17,12 @@ impl FileLock {
         self._file.as_raw_fd()
     }
     pub async fn mutation() -> Result<Self> {
+        Self::runtime("omarchy-audio-mutation.lock").await
+    }
+    pub async fn settings() -> Result<Self> {
+        Self::runtime("omarchy-audio-settings.lock").await
+    }
+    async fn runtime(name: &'static str) -> Result<Self> {
         let runtime = std::env::var_os("AUDIO_CONTROL_PRIVATE_RUNTIME_DIR")
             .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
             .ok_or_else(|| Failure::new("unsafe_path", "Private audio runtime is unavailable"))?;
@@ -30,11 +36,9 @@ impl FileLock {
         {
             return Err(Failure::new("unsafe_path", "Audio runtime is not private"));
         }
-        tokio::task::spawn_blocking(move || {
-            Self::acquire(&runtime.join("omarchy-audio-mutation.lock"))
-        })
-        .await
-        .map_err(|_| Failure::new("internal_error", "Could not acquire audio lock"))?
+        tokio::task::spawn_blocking(move || Self::acquire(&runtime.join(name)))
+            .await
+            .map_err(|_| Failure::new("internal_error", "Could not acquire audio lock"))?
     }
     pub fn acquire(path: &Path) -> Result<Self> {
         let path = resolve_parent(path)?;

@@ -15,6 +15,7 @@ Item {
   property var deviceRows: []
   property string sceneName: ""
   property int sceneCount: 0
+  property var policy: null
   property int sliderMoves: 0
   property real lastMoved: -1
   property real lastReleased: -1
@@ -181,8 +182,34 @@ Item {
         pointerWindow.hide()
         root.panel.close()
         root.advanced.selectTab(0)
+        root.policy = root.descendants(root.advanced).find(function(item) {
+          return item.coreDefinitions !== undefined && typeof item.setSetting === "function"
+        })
+        if (!root.check(root.policy && root.policy.loaded, "policy controller is unavailable")) return
+        root.policy.setSetting("node.features.audio.mono", true)
+        root.phase++
+        break
+      case 11:
+        if (root.policy.busy || root.policy.settings["node.features.audio.mono"] !== true) return
+        if (!root.check(!root.policy.error, "native policy write failed")) return
+        root.policy.setSetting("device.routes.default-sink-volume", .5)
+        root.phase++
+        break
+      case 12:
+        if (root.policy.busy || Math.abs(root.policy.settings["device.routes.default-sink-volume"]-.5) > .001) return
+        root.advanced.setBluetoothAutoSwitch(false)
+        root.phase++
+        break
+      case 13:
+        if (root.policy.busy || root.advanced.bluetoothAutoSwitch) return
+        root.advanced.setBluetoothProfilePreference("latency")
+        root.phase++
+        break
+      case 14:
+        if (root.policy.busy || root.advanced.bluetoothProfilePreference !== "latency") return
+        if (!root.check(!root.policy.error, "Bluetooth policy write failed")) return
         root.done = true
-        console.log("RUNTIME_UI_SUCCESS volume, tabs, shared scenes and canceled pointer drag")
+        console.log("RUNTIME_UI_SUCCESS volume, tabs, shared scenes, canceled pointer drag and native policies")
       }
     }
   }

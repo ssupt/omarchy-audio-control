@@ -25,7 +25,6 @@ Item {
   AudioPolicyController {
     service: root.service
     id: policy
-    scriptPath: runtime.script("audio-policy-settings")
     onSettled: root.clampCursor()
   }
   AudioRulesController {
@@ -97,14 +96,10 @@ Item {
   property var audioCards: []
   property var audioPorts: []
   property bool profilesLoaded: false
-  property bool bluetoothAutoSwitch: true
-  property bool bluetoothAutoSwitchLoaded: false
-  property bool autoswitchMutation: false
-  property bool autoswitchReconcilePending: false
-  property string bluetoothProfilePreference: "quality"
-  property bool bluetoothProfilePreferenceLoaded: false
-  property bool bluetoothProfilePreferenceMutation: false
-  property bool bluetoothPreferenceReconcilePending: false
+  readonly property bool bluetoothAutoSwitch: policy.settings["bluetooth.autoswitch-to-headset-profile"] === true
+  readonly property bool bluetoothAutoSwitchLoaded: policy.loaded && Model.hasOwn(policy.settings, "bluetooth.autoswitch-to-headset-profile")
+  readonly property string bluetoothProfilePreference: policy.settings["bluetooth.profile-preference"] || "quality"
+  readonly property bool bluetoothProfilePreferenceLoaded: policy.loaded && Model.hasOwn(policy.settings, "bluetooth.profile-preference")
   readonly property var audioScenes: service && service.stores.scenes ? service.stores.scenes.scenes : []
   readonly property bool scenesLoaded: !!service && service.ready && !!service.stores.scenes
   readonly property bool settingsLoaded: !!service && service.ready && !!service.stores.settings
@@ -133,8 +128,6 @@ Item {
   property string portLoadError: ""
   property string profileSetError: ""
   property string portSetError: ""
-  property string bluetoothAutoswitchError: ""
-  property string bluetoothPreferenceError: ""
   property string settingsSaveError: ""
   readonly property string settingsFormatError: service && service.storeErrors.settings ? service.storeErrors.settings.message : ""
   readonly property bool audioControlSettingsWritable: !!service && service.ready && !service.storeErrors.settings
@@ -148,7 +141,7 @@ Item {
       ? [profileSetError, portSetError, settingsSaveError, settingsFormatError,
         profileLoadError, portLoadError]
       : (activeTab === 1
-        ? [profileSetError, bluetoothAutoswitchError, bluetoothPreferenceError,
+        ? [profileSetError, policyError,
           profileLoadError]
         : (activeTab === 2
           ? [settingsSaveError, settingsFormatError, policyError] : []))
@@ -286,8 +279,6 @@ Item {
     selectedIndex = 0
     clearErrors()
     profilesLoaded = false
-    bluetoothAutoSwitchLoaded = false
-    bluetoothProfilePreferenceLoaded = false
     recoveryConfirmOpen = false
     microphoneTest.discard()
     cancelAliasEdit()
@@ -300,8 +291,6 @@ Item {
     portLoadError = ""
     profileSetError = ""
     portSetError = ""
-    bluetoothAutoswitchError = ""
-    bluetoothPreferenceError = ""
     settingsSaveError = ""
     sceneStatus = ""
     outputGroupStatus = ""
@@ -350,26 +339,7 @@ Item {
   function refresh() {
     if (!window.visible) return
     if (!profilesProc.running && !profileSetProc.running) profilesProc.running = true
-    if (!bluetoothAutoswitchProc.running) {
-      autoswitchReconcileTimer.stop()
-      autoswitchReconcilePending = false
-      autoswitchMutation = false
-      bluetoothAutoswitchProc.responseValid = false
-      bluetoothAutoswitchProc.response = ""
-      bluetoothAutoswitchProc.command = runtime.scriptCommand("audio-bluetooth-autoswitch")
-      bluetoothAutoswitchProc.running = true
-    }
-    if (!bluetoothPreferenceProc.running) {
-      bluetoothPreferenceReconcileTimer.stop()
-      bluetoothPreferenceReconcilePending = false
-      bluetoothProfilePreferenceMutation = false
-      bluetoothPreferenceProc.responseValid = false
-      bluetoothPreferenceProc.response = ""
-      bluetoothPreferenceProc.command = runtime.scriptCommand("audio-bluetooth-profile-preference")
-      bluetoothPreferenceProc.running = true
-    }
     if (!portsProc.running && !portSetProc.running) portsProc.running = true
-    policy.refresh()
     resolveVolumeSink()
   }
 
@@ -762,28 +732,11 @@ Item {
   }
 
   function setBluetoothAutoSwitch(enabled) {
-    if (!bluetoothAutoSwitchLoaded || bluetoothAutoswitchProc.running
-        || autoswitchReconcilePending) return
-    bluetoothAutoswitchError = ""
-    autoswitchMutation = true
-    bluetoothAutoswitchProc.responseValid = false
-    bluetoothAutoswitchProc.response = ""
-    bluetoothAutoswitchProc.command = runtime.scriptCommand(
-      "audio-bluetooth-autoswitch", [enabled ? "on" : "off"])
-    bluetoothAutoswitchProc.running = true
+    policy.setSetting("bluetooth.autoswitch-to-headset-profile", enabled)
   }
 
   function setBluetoothProfilePreference(value) {
-    if (!bluetoothProfilePreferenceLoaded || bluetoothPreferenceProc.running
-        || bluetoothPreferenceReconcilePending
-        || (value !== "quality" && value !== "latency")) return
-    bluetoothPreferenceError = ""
-    bluetoothProfilePreferenceMutation = true
-    bluetoothPreferenceProc.responseValid = false
-    bluetoothPreferenceProc.response = ""
-    bluetoothPreferenceProc.command = runtime.scriptCommand(
-      "audio-bluetooth-profile-preference", [value])
-    bluetoothPreferenceProc.running = true
+    policy.setSetting("bluetooth.profile-preference", value)
   }
 
   Process {
@@ -1088,119 +1041,6 @@ Item {
           : (exitCode === 3 ? "That audio port is no longer available"
             : "Could not change the audio port"))
       portRefreshTimer.restart()
-    }
-  }
-
-  AudioCommand {
-    service: root.service
-    id: bluetoothAutoswitchProc
-    property bool responseValid: false
-    property string response: ""
-    stdout: AudioReply {
-      waitForEnd: true
-      onStreamFinished: {
-        var value = String(text || "").trim()
-        if (value === "true" || value === "false") {
-          bluetoothAutoswitchProc.response = value
-          bluetoothAutoswitchProc.responseValid = true
-        }
-      }
-    }
-    onExited: function(exitCode) {
-      var wasMutation = root.autoswitchMutation
-      var succeeded = exitCode === 0 && responseValid
-      if (succeeded) {
-        root.bluetoothAutoSwitch = response === "true"
-        root.bluetoothAutoSwitchLoaded = true
-      }
-      if (!succeeded)
-        root.bluetoothAutoswitchError = root.autoswitchMutation
-          ? (exitCode === 4
-            ? "Automatic headset mode changed and its previous value could not be restored"
-            : "Could not change automatic headset mode")
-          : "Could not load automatic headset mode"
-      else root.bluetoothAutoswitchError = ""
-      root.autoswitchMutation = false
-      responseValid = false
-      response = ""
-      if (wasMutation && exitCode === 4) {
-        root.autoswitchReconcilePending = true
-        autoswitchReconcileTimer.restart()
-      }
-    }
-  }
-
-  AudioCommand {
-    service: root.service
-    id: bluetoothPreferenceProc
-    property bool responseValid: false
-    property string response: ""
-    stdout: AudioReply {
-      waitForEnd: true
-      onStreamFinished: {
-        var value = String(text || "").trim()
-        if (value === "quality" || value === "latency") {
-          bluetoothPreferenceProc.response = value
-          bluetoothPreferenceProc.responseValid = true
-        }
-      }
-    }
-    onExited: function(exitCode) {
-      var wasMutation = root.bluetoothProfilePreferenceMutation
-      var succeeded = exitCode === 0 && responseValid
-      if (succeeded) {
-        root.bluetoothProfilePreference = response
-        root.bluetoothProfilePreferenceLoaded = true
-      }
-      if (!succeeded)
-        root.bluetoothPreferenceError = root.bluetoothProfilePreferenceMutation
-          ? (exitCode === 4
-            ? "Bluetooth profile preference changed and its previous value could not be restored"
-            : "Could not change Bluetooth profile preference")
-          : "Could not load Bluetooth profile preference"
-      else root.bluetoothPreferenceError = ""
-      root.bluetoothProfilePreferenceMutation = false
-      responseValid = false
-      response = ""
-      if (wasMutation && exitCode === 4) {
-        root.bluetoothPreferenceReconcilePending = true
-        bluetoothPreferenceReconcileTimer.restart()
-      }
-    }
-  }
-
-  Timer {
-    id: autoswitchReconcileTimer
-    interval: 250
-    repeat: false
-    onTriggered: {
-      if (bluetoothAutoswitchProc.running) {
-        restart()
-        return
-      }
-      root.autoswitchReconcilePending = false
-      bluetoothAutoswitchProc.responseValid = false
-      bluetoothAutoswitchProc.response = ""
-      bluetoothAutoswitchProc.command = runtime.scriptCommand("audio-bluetooth-autoswitch")
-      bluetoothAutoswitchProc.running = true
-    }
-  }
-
-  Timer {
-    id: bluetoothPreferenceReconcileTimer
-    interval: 250
-    repeat: false
-    onTriggered: {
-      if (bluetoothPreferenceProc.running) {
-        restart()
-        return
-      }
-      root.bluetoothPreferenceReconcilePending = false
-      bluetoothPreferenceProc.responseValid = false
-      bluetoothPreferenceProc.response = ""
-      bluetoothPreferenceProc.command = runtime.scriptCommand(
-        "audio-bluetooth-profile-preference")
-      bluetoothPreferenceProc.running = true
     }
   }
 
@@ -1562,8 +1402,7 @@ Item {
                     ToggleSwitch {
                       id: autoswitchToggle
                       checked: root.bluetoothAutoSwitch
-                      busy: bluetoothAutoswitchProc.running
-                        || root.autoswitchReconcilePending
+                      busy: policy.busy
                       interactive: false
                       cursorRing: false
                       foreground: root.foreground
@@ -1574,8 +1413,7 @@ Item {
                   MouseArea {
                     anchors.fill: parent
                     enabled: root.bluetoothAutoSwitchLoaded
-                      && !bluetoothAutoswitchProc.running
-                      && !root.autoswitchReconcilePending
+                      && !policy.busy
                     hoverEnabled: true
                     cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                     onContainsMouseChanged: if (containsMouse) root.setCursor(0)
@@ -1593,8 +1431,7 @@ Item {
                   fontFamily: root.fontFamily
                   preference: root.bluetoothProfilePreference
                   menuEnabled: root.bluetoothProfilePreferenceLoaded
-                    && !bluetoothPreferenceProc.running
-                    && !root.bluetoothPreferenceReconcilePending
+                    && !policy.busy
                   onCursorRequested: root.setCursor(1)
                   onPreferenceSelected: function(value) { root.setBluetoothProfilePreference(value) }
                   onMenuToggled: function(open) {

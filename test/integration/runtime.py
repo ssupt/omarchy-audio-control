@@ -95,8 +95,13 @@ assert len(sys.stdin.buffer.read()) > 0
     processes = []
     clients = []
     log = open(work / 'runtime.log', 'w+')
+    config = work/'pipewire.conf'
+    config.write_text((ROOT/'test/fixtures/pipewire.conf').read_text().replace(
+        'context.objects = [', 'context.objects = [\n'+''.join(
+            '    { factory = metadata args = { metadata.name = '+name+' } }\n'
+            for name in ('sm-settings', 'persistent-sm-settings', 'schema-sm-settings'))))
     def pipewire():
-        process = subprocess.Popen(['pipewire', '-c', str(ROOT / 'test/fixtures/pipewire.conf')], env=env, stdout=log, stderr=log)
+        process = subprocess.Popen(['pipewire', '-c', str(config)], env=env, stdout=log, stderr=log)
         processes.append(process)
         until(lambda: (work / 'audio-test').exists())
         return process
@@ -242,6 +247,15 @@ assert len(sys.stdin.buffer.read()) > 0
             assert len(list(Path(f'/proc/{backend.pid}/task').iterdir())) < 12
         finally:
             for client in idle: client.close()
+        # Seed protocol fixtures for real policy controls; persistence itself is
+        # covered against WirePlumber by policy.py.
+        for key, value in (('node.features.audio.mono', False),
+                ('device.routes.default-sink-volume', .064),
+                ('bluetooth.autoswitch-to-headset-profile', True),
+                ('bluetooth.profile-preference', 'quality')):
+            for store, raw in (('schema-sm-settings', '{}'), ('sm-settings', json.dumps(value))):
+                subprocess.run(['pw-metadata', '-n', store, '0', key, raw, 'Spa:String:JSON'],
+                    env=env, check=True, stdout=log, stderr=log, timeout=3)
         # Exercise the actual Service.qml against the real backend, not a JS mock.
         if shutil.which('quickshell'):
             shell_root = Path(os.environ.get('AUDIO_TEST_OMARCHY_SHELL','/usr/share/omarchy/shell'))
@@ -383,7 +397,7 @@ ShellRoot {
             assert (work/'operations.diagnostics').read_text().splitlines() == ['sample', 'sample'], output
             if full_ui:
                 assert 'RUNTIME_UI_SUCCESS' in output, output
-                print('PASS: volume limits, boost reset, deferred tabs, shared scenes and pointer cancellation')
+                print('PASS: volume limits, boost reset, deferred tabs, shared scenes, pointer cancellation and native policies')
                 print('PASS: actual Service.qml and both QML entry points on a private headless compositor')
             # Disabling/removing the QML service closes its relay. The private
             # daemon must retire without an installed systemd service.

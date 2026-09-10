@@ -305,20 +305,6 @@ assert.deepEqual(sanitizedScene.ports, [
 assert.deepEqual(model.audioScenePlan(sanitizedScene).map(step => step.kind), [
   'profile', 'settle', 'port', 'device', 'default'
 ])
-assert.deepEqual(model.parseAudioPolicySettings(JSON.stringify({
-  'node.features.audio.mono': true,
-  'linking.pause-playback': 'true',
-  'device.routes.default-sink-volume': 0.4,
-  'device.routes.default-source-volume': 2,
-  'unknown.setting': false
-})), {
-  valid: true,
-  values: {
-    'node.features.audio.mono': true,
-    'device.routes.default-sink-volume': 0.4
-  }
-})
-assert.deepEqual(model.parseAudioPolicySettings('not json'), { valid: false, values: {} })
 const audioPreferences = model.parseAudioPreferences(JSON.stringify({
   defaults: { output: 'headphones', input: 'headset-microphone' },
   bluetoothProfiles: { '00:11:22:33:44:55': 'a2dp-aac' }
@@ -1592,109 +1578,6 @@ fi
   fail "replacement endpoint received the vanished endpoint rollback"
 echo "PASS: audio port controls"
 
-policy_log=$(mktemp)
-policy_state=$(mktemp)
-trap 'rm -f "$route_log" "$input_default_log" "$port_log" "$policy_log" "$policy_state"' EXIT
-printf '{}\n' >"$policy_state"
-
-policy=$(AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings")
-jq -e '
-  .["node.features.audio.mono"] == false
-  and .["linking.pause-playback"] == true
-  and ((.["device.routes.default-sink-volume"] - 0.4) | fabs) < 0.000001
-  and .["node.stream.default-capture-volume"] == 1
-' <<<"$policy" >/dev/null || fail "audio policy snapshot"
-
-if AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  AUDIO_CONTROL_WPCTL_DUPLICATE_VALUE=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-policy-settings" >/dev/null 2>&1; then
-  fail "ambiguous audio policy output accepted"
-fi
-
-policy=$(AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings" \
-  set node.features.audio.mono true)
-jq -e '.["node.features.audio.mono"] == true' "$policy_state" >/dev/null ||
-  fail "boolean audio policy write"
-jq -e '.["node.features.audio.mono"] == true' <<<"$policy" >/dev/null ||
-  fail "boolean audio policy confirmation"
-
-policy=$(AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings" \
-  set device.routes.default-sink-volume 0.5)
-jq -e '((.["device.routes.default-sink-volume"] - 0.125) | fabs) < 0.000001' \
-  "$policy_state" >/dev/null || fail "cubic audio policy write"
-jq -e '((.["device.routes.default-sink-volume"] - 0.5) | fabs) < 0.000001' \
-  <<<"$policy" >/dev/null || fail "linear audio policy confirmation"
-
-if AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings" \
-  set unknown.audio.setting true >/dev/null 2>&1; then
-  fail "unknown audio policy accepted"
-fi
-if AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings" \
-  set device.routes.default-source-volume 1.5 >/dev/null 2>&1; then
-  fail "out-of-range audio policy volume accepted"
-fi
-if AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  AUDIO_CONTROL_POLICY_FAIL=linking.pause-playback PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-policy-settings" set linking.pause-playback false >/dev/null 2>&1; then
-  fail "failed audio policy write reported success"
-fi
-jq -e 'has("linking.pause-playback") | not' "$policy_state" >/dev/null ||
-  fail "failed audio policy write changed state"
-
-printf '{}\n' >"$policy_state"
-: >"$policy_log"
-if AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  AUDIO_CONTROL_POLICY_NO_EFFECT=linking.pause-playback PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-policy-settings" set linking.pause-playback false >/dev/null 2>&1; then
-  fail "no-op audio policy write reported success"
-fi
-jq -e 'has("linking.pause-playback") | not' "$policy_state" >/dev/null ||
-  fail "no-op audio policy write changed state"
-
-printf '{}\n' >"$policy_state"
-AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  AUDIO_CONTROL_POLICY_FAIL_AFTER_EFFECT=node.features.audio.mono PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-policy-settings" set node.features.audio.mono true >/dev/null ||
-  fail "verified policy rejected after late command failure"
-jq -e '.["node.features.audio.mono"] == true' "$policy_state" >/dev/null ||
-  fail "late policy change was not retained"
-
-printf '{}\n' >"$policy_state"
-if AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  AUDIO_CONTROL_POLICY_WRONG_VALUE=linking.pause-playback \
-  AUDIO_CONTROL_POLICY_WRONG_ON_VALUE=false AUDIO_CONTROL_POLICY_WRONG_RAW=null \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-policy-settings" set linking.pause-playback false >/dev/null 2>&1; then
-  fail "wrong audio policy value reported success"
-fi
-jq -e '.["linking.pause-playback"] == true' "$policy_state" >/dev/null ||
-  fail "wrong audio policy value was not rolled back"
-
-printf '{}\n' >"$policy_state"
-if AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  AUDIO_CONTROL_POLICY_WRONG_VALUE=linking.pause-playback \
-  AUDIO_CONTROL_POLICY_WRONG_ON_VALUE=false AUDIO_CONTROL_POLICY_WRONG_RAW=null \
-  AUDIO_CONTROL_POLICY_NO_EFFECT_VALUE='linking.pause-playback=true' \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-policy-settings" set linking.pause-playback false >/dev/null 2>&1; then
-  fail "unrecoverable audio policy mismatch reported success"
-else
-  [[ $? == 4 ]] || fail "unrecoverable audio policy mismatch reported wrong exit code"
-fi
-
-policy=$(AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  AUDIO_CONTROL_POLICY_UNSUPPORTED=monitor.alsa.autodetect-hdmi-channels \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings")
-jq -e 'has("monitor.alsa.autodetect-hdmi-channels") | not' <<<"$policy" >/dev/null ||
-  fail "unsupported audio policy exposed"
-echo "PASS: capability-aware audio safety policies"
-rm -f -- "$policy_log" "$policy_state"
-
 rules_dir=$(mktemp -d)
 trap 'rm -f "$route_log" "$input_default_log" "$port_log"; rm -rf "$rules_dir"' EXIT
 
@@ -2023,105 +1906,6 @@ rm -rf -- "$output_group_dir"
 unset -f run_output_group
 echo "PASS: named multi-output groups"
 
-bluetooth_preference_log=$(mktemp)
-bluetooth_preference_state=$(mktemp)
-trap 'rm -f "$route_log" "$input_default_log" "$port_log" "$bluetooth_preference_log" "$bluetooth_preference_state"' EXIT
-bluetooth_preference=$(AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG="$bluetooth_preference_log" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_STATE="$bluetooth_preference_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-bluetooth-profile-preference")
-[[ $bluetooth_preference == quality ]] || fail "Bluetooth profile preference read"
-if AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG="$bluetooth_preference_log" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_STATE="$bluetooth_preference_state" \
-  AUDIO_CONTROL_WPCTL_DUPLICATE_VALUE=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-bluetooth-profile-preference" >/dev/null 2>&1; then
-  fail "ambiguous Bluetooth profile preference accepted"
-fi
-bluetooth_preference=$(AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG="$bluetooth_preference_log" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_STATE="$bluetooth_preference_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-bluetooth-profile-preference" latency)
-[[ $bluetooth_preference == latency ]] || fail "Bluetooth profile preference write"
-[[ $(<"$bluetooth_preference_log") == "settings --save bluetooth.profile-preference latency" ]] ||
-  fail "Bluetooth profile preference command"
-
-# Reapplying the live value is a read-only no-op.
-AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG="$bluetooth_preference_log" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_STATE="$bluetooth_preference_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-bluetooth-profile-preference" latency >/dev/null
-[[ $(wc -l <"$bluetooth_preference_log") == 1 ]] ||
-  fail "unchanged Bluetooth preference was rewritten"
-
-AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG="$bluetooth_preference_log" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_STATE="$bluetooth_preference_state" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_FAIL_AFTER_EFFECT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-bluetooth-profile-preference" quality >/dev/null ||
-  fail "verified Bluetooth preference rejected after late failure"
-[[ $(<"$bluetooth_preference_state") == quality ]] ||
-  fail "late Bluetooth preference change was not retained"
-
-if AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG="$bluetooth_preference_log" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_STATE="$bluetooth_preference_state" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_NO_EFFECT_VALUE=latency PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-bluetooth-profile-preference" latency >/dev/null 2>&1; then
-  fail "no-op Bluetooth preference write reported success"
-fi
-
-if AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG="$bluetooth_preference_log" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_STATE="$bluetooth_preference_state" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_WRONG_VALUE=latency \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-bluetooth-profile-preference" latency >/dev/null 2>&1; then
-  fail "wrong Bluetooth preference value reported success"
-fi
-[[ $(<"$bluetooth_preference_state") == quality ]] ||
-  fail "wrong Bluetooth preference value was not rolled back"
-echo "PASS: Bluetooth profile preference"
-
-bluetooth_autoswitch_log=$(mktemp)
-bluetooth_autoswitch_state=$(mktemp)
-trap 'rm -f "$route_log" "$input_default_log" "$port_log" "$bluetooth_preference_log" "$bluetooth_preference_state" "$bluetooth_autoswitch_log" "$bluetooth_autoswitch_state"' EXIT
-bluetooth_autoswitch=$(AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG="$bluetooth_autoswitch_log" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_STATE="$bluetooth_autoswitch_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-bluetooth-autoswitch")
-[[ $bluetooth_autoswitch == true ]] || fail "Bluetooth autoswitch read"
-if AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG="$bluetooth_autoswitch_log" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_STATE="$bluetooth_autoswitch_state" \
-  AUDIO_CONTROL_WPCTL_DUPLICATE_VALUE=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-bluetooth-autoswitch" >/dev/null 2>&1; then
-  fail "ambiguous Bluetooth autoswitch value accepted"
-fi
-bluetooth_autoswitch=$(AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG="$bluetooth_autoswitch_log" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_STATE="$bluetooth_autoswitch_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-bluetooth-autoswitch" off)
-[[ $bluetooth_autoswitch == false ]] || fail "Bluetooth autoswitch write"
-if AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG="$bluetooth_autoswitch_log" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_STATE="$bluetooth_autoswitch_state" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_FAIL=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-bluetooth-autoswitch" on >/dev/null 2>&1; then
-  fail "failed Bluetooth autoswitch write reported success"
-fi
-[[ $(<"$bluetooth_autoswitch_state") == false ]] ||
-  fail "failed Bluetooth autoswitch write changed state"
-
-AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG="$bluetooth_autoswitch_log" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_STATE="$bluetooth_autoswitch_state" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_FAIL_AFTER_EFFECT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-bluetooth-autoswitch" on >/dev/null ||
-  fail "verified Bluetooth autoswitch rejected after late failure"
-[[ $(<"$bluetooth_autoswitch_state") == true ]] ||
-  fail "late Bluetooth autoswitch change was not retained"
-
-if AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG="$bluetooth_autoswitch_log" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_STATE="$bluetooth_autoswitch_state" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_WRONG_VALUE=false \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_NO_EFFECT_VALUE=true PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-bluetooth-autoswitch" off >/dev/null 2>&1; then
-  fail "unrecoverable Bluetooth autoswitch mismatch reported success"
-else
-  [[ $? == 4 ]] || fail "unrecoverable Bluetooth autoswitch mismatch reported wrong exit code"
-fi
-echo "PASS: Bluetooth autoswitch failure handling"
-rm -f -- "$bluetooth_autoswitch_log" "$bluetooth_autoswitch_state"
-
 profiles=$(
   AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
     PATH="$TEST_DIR/mocks:$PATH" \
@@ -2151,7 +1935,7 @@ profile_log=$(mktemp)
 profile_state=$(mktemp)
 profile_identity_fixture=$(mktemp)
 profile_endpoint_read_state=$(mktemp)
-trap 'rm -f "$route_log" "$input_default_log" "$port_log" "$bluetooth_preference_log" "$bluetooth_preference_state" "$profile_log" "$profile_state" "$profile_identity_fixture" "$profile_endpoint_read_state"' EXIT
+trap 'rm -f "$route_log" "$input_default_log" "$port_log" "$profile_log" "$profile_state" "$profile_identity_fixture" "$profile_endpoint_read_state"' EXIT
 printf 'old\n' >"$profile_state"
 
 for ambiguous_card_identity in duplicate-name duplicate-index duplicate-object invalid-index; do
@@ -2481,7 +2265,7 @@ echo "PASS: profile endpoint replacement safety"
 
 menu_tmp=$(mktemp -d)
 menu_file="$menu_tmp/omarchy-menu.jsonc"
-trap 'rm -f "$route_log" "$route_read_state" "$output_default_log" "$input_default_log" "$shared_preferences" "$shared_preferences_lock" "$shared_preferences_output_lock" "$shared_preferences_input_lock" "$port_log" "$policy_log" "$policy_state" "$bluetooth_preference_log" "$bluetooth_preference_state" "$bluetooth_autoswitch_log" "$bluetooth_autoswitch_state" "$profile_log" "$profile_state" "$profile_identity_fixture" "$profile_endpoint_read_state"; rm -rf "$menu_tmp"' EXIT
+trap 'rm -f "$route_log" "$route_read_state" "$output_default_log" "$input_default_log" "$shared_preferences" "$shared_preferences_lock" "$shared_preferences_output_lock" "$shared_preferences_input_lock" "$port_log" "$profile_log" "$profile_state" "$profile_identity_fixture" "$profile_endpoint_read_state"; rm -rf "$menu_tmp"' EXIT
 cat >"$menu_file" <<'EOF'
 {
   // Existing customization

@@ -23,6 +23,7 @@ Item {
   property var state: ({})
   property var stores: ({})
   property var storeErrors: ({})
+  property var policies: ({})
   readonly property bool busy: state.busy === true
   readonly property bool transactionBusy: busy && state.operation !== "node.audio"
   property var client: null
@@ -81,6 +82,7 @@ Item {
       state: function(value) {
         if (JSON.stringify(root.stores) !== JSON.stringify(value.stores || {})) root.stores = value.stores || {}
         if (JSON.stringify(root.storeErrors) !== JSON.stringify(value.storeErrors || {})) root.storeErrors = value.storeErrors || {}
+        if (JSON.stringify(root.policies) !== JSON.stringify(value.policies || {})) root.policies = value.policies || {}
         root.state = value
       },
       fault: function(message) {

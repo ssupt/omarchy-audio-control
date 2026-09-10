@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, oneshot, watch};
 
 mod audio;
+pub mod metadata;
 use audio::{patch_pod, read_audio, read_route, route_for};
 
 type Properties = BTreeMap<String, String>;
@@ -57,7 +58,7 @@ pub struct Link {
     pub input_node: u32,
     pub state: String,
 }
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct MetadataValue {
     pub subject: u32,
     pub key: String,
@@ -75,6 +76,8 @@ pub struct Graph {
     pub devices: BTreeMap<u32, Device>,
     pub links: BTreeMap<u32, Link>,
     pub metadata: BTreeMap<String, BTreeMap<String, MetadataValue>>,
+    #[serde(skip)]
+    pub metadata_ids: BTreeMap<String, u32>,
     pub error: String,
 }
 
@@ -95,11 +98,15 @@ pub struct AudioPatch {
 struct Command {
     identity: Identity,
     patch: AudioPatch,
+    completion: Completion,
+}
+struct Completion {
     reply: oneshot::Sender<Result<()>>,
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 enum Message {
     Patch(Command),
+    Metadata(metadata::Command),
     Stop,
 }
 type SenderSlot = Arc<Mutex<Option<pw::channel::Sender<Message>>>>;
@@ -190,8 +197,10 @@ impl Handle {
             .send(Message::Patch(Command {
                 identity,
                 patch,
-                reply,
-                _permit: permit,
+                completion: Completion {
+                    reply,
+                    _permit: permit,
+                },
             }))
             .map_err(|_| Failure::new("disconnected", "PipeWire is unavailable"))?;
         tokio::time::timeout(Duration::from_secs(3), async {
@@ -286,7 +295,7 @@ struct OwnedNode {
 }
 struct OwnedMetadata {
     _listener: pw::metadata::MetadataListener,
-    _metadata: pw::metadata::Metadata,
+    metadata: pw::metadata::Metadata,
     name: String,
 }
 struct OwnedDevice {
@@ -361,7 +370,7 @@ fn session(
         ..Graph::default()
     }));
     let proxies = Rc::new(RefCell::new(Proxies::default()));
-    let pending = Rc::new(RefCell::new(BTreeMap::<i32, Command>::new()));
+    let pending = Rc::new(RefCell::new(BTreeMap::<i32, Completion>::new()));
     let route_syncs = Rc::new(RefCell::new(BTreeMap::<i32, u32>::new()));
     let initial = Rc::new(Cell::new(core.sync(0)?.raw()));
     let sync_round = Rc::new(Cell::new(0));
@@ -436,11 +445,9 @@ fn session(
                     }
                     publish(&graph, &tx);
                 }
-                if let Some(command) = pending.borrow_mut().remove(&seq.raw()) {
-                    // Route changes may be applied by another PipeWire client after
-                    // this barrier. Handle::patch waits for the observed result.
-                    let result = validate_identity(&graph.borrow(), &command.identity).map(|_| ());
-                    let _ = command.reply.send(result);
+                if let Some(completion) = pending.borrow_mut().remove(&seq.raw()) {
+                    // Callers also wait for the observed properties after this barrier.
+                    let _ = completion.reply.send(Ok(()));
                 }
             })
             .error(move |id, _, _, _| {
@@ -535,11 +542,22 @@ fn session(
                         let g = graph_added.clone();
                         let t = tx_added.clone();
                         let n = name.clone();
+                        graph_added
+                            .borrow_mut()
+                            .metadata_ids
+                            .insert(name.clone(), id);
+                        graph_added
+                            .borrow_mut()
+                            .metadata
+                            .insert(name.clone(), BTreeMap::new());
                         let listener = metadata
                             .add_listener_local()
                             .property(move |subject, key, type_, value| {
                                 {
                                     let mut graph = g.borrow_mut();
+                                    if graph.metadata_ids.get(&n) != Some(&id) {
+                                        return 0;
+                                    }
                                     let store = graph.metadata.entry(n.clone()).or_default();
                                     match (key, value) {
                                         (Some(key), Some(value))
@@ -574,7 +592,7 @@ fn session(
                             id,
                             OwnedMetadata {
                                 _listener: listener,
-                                _metadata: metadata,
+                                metadata,
                                 name,
                             },
                         );
@@ -727,7 +745,10 @@ fn session(
                     graph.devices.remove(&id);
                     graph.links.remove(&id);
                     if let Some(metadata) = proxies.metadata.remove(&id) {
-                        graph.metadata.remove(&metadata.name);
+                        if graph.metadata_ids.get(&metadata.name) == Some(&id) {
+                            graph.metadata.remove(&metadata.name);
+                            graph.metadata_ids.remove(&metadata.name);
+                        }
                     }
                 }
                 publish(&graph_removed, &tx_removed);
@@ -745,6 +766,25 @@ fn session(
             Message::Stop => {
                 if let Some(loop_) = loop_weak.upgrade() {
                     loop_.quit();
+                }
+            }
+            Message::Metadata(command) => {
+                let result = command
+                    .batch
+                    .apply(&graph.borrow(), &proxies.borrow())
+                    .and_then(|()| {
+                        core.upgrade()
+                            .ok_or_else(|| Failure::unknown("Audio server disconnected"))?
+                            .sync(0)
+                            .map_err(|_| Failure::unknown("Audio server disconnected"))
+                    });
+                match result {
+                    Ok(seq) => {
+                        pending.borrow_mut().insert(seq.raw(), command.completion);
+                    }
+                    Err(error) => {
+                        let _ = command.completion.reply.send(Err(error));
+                    }
                 }
             }
             Message::Patch(command) => {
@@ -789,10 +829,10 @@ fn session(
                 })();
                 match result {
                     Ok(seq) => {
-                        pending.borrow_mut().insert(seq.raw(), command);
+                        pending.borrow_mut().insert(seq.raw(), command.completion);
                     }
                     Err(error) => {
-                        let _ = command.reply.send(Err(error));
+                        let _ = command.completion.reply.send(Err(error));
                     }
                 }
             }

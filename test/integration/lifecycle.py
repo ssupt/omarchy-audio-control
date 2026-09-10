@@ -80,9 +80,9 @@ with tempfile.TemporaryDirectory(prefix='audio-lifecycle-') as temporary:
     shutil.copy2(BINARY, executable)
     commands = work/'commands'
     commands.mkdir()
-    wpctl = commands/'wpctl'
-    wpctl.write_text('#!/bin/bash\n[[ "$*" == "settings bluetooth.profile-preference" ]] || exit 1\nprintf "Value: quality\\n"\n')
-    wpctl.chmod(0o755)
+    availability = commands/'omarchy-audio-sink-availability'
+    availability.write_text('#!/bin/bash\nprintf "test-output\\t1\\n"\n')
+    availability.chmod(0o755)
     env = dict(os.environ, XDG_RUNTIME_DIR=temporary, PIPEWIRE_RUNTIME_DIR=temporary,
                PIPEWIRE_REMOTE='absent-test-server', PULSE_SERVER='unix:'+str(work/'absent-pulse'),
                XDG_CONFIG_HOME=str(work/'config'), XDG_STATE_HOME=str(work/'state'),
@@ -144,7 +144,7 @@ with tempfile.TemporaryDirectory(prefix='audio-lifecycle-') as temporary:
         shutil.rmtree(plugin)
         # The checkout can disappear during removal/update. Embedded helpers
         # and already accepted work remain available to the draining daemon.
-        result = e.request('adapter.run', dict(helper='audio-bluetooth-profile-preference', args=[]))
+        result = e.request('adapter.run', dict(helper='audio-sink-availability', args=[]))
         assert result['exitCode'] == 0, result
         e.close()
         socket = work/'omarchy-audio-control'/('backend-'+e.info['buildId'][:24]+'.sock')

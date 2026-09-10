@@ -46,8 +46,6 @@ impl Call {
             "audio-output-set-default" | "audio-input-set-default" => (2, 4),
             "audio-stream-route-set" => (3, 4),
             "audio-output-groups" => (1, 4),
-            "audio-policy-settings" => (0, 3),
-            "audio-bluetooth-autoswitch" | "audio-bluetooth-profile-preference" => (0, 1),
             "audio-diagnostics" if self.args == ["snapshot"] => (1, 1),
             _ => return Err(Failure::new("method_not_found", "Unknown audio adapter")),
         };
@@ -63,18 +61,15 @@ impl Call {
         Ok(())
     }
     pub fn mutating(&self) -> bool {
-        match self.helper.as_str() {
+        !matches!(
+            self.helper.as_str(),
             "audio-profiles"
-            | "audio-ports"
-            | "audio-stream-routes"
-            | "audio-resolve-output-sink"
-            | "audio-sink-availability" => false,
-            "audio-diagnostics" => false,
-            "audio-policy-settings"
-            | "audio-bluetooth-autoswitch"
-            | "audio-bluetooth-profile-preference" => !self.args.is_empty(),
-            _ => true,
-        }
+                | "audio-ports"
+                | "audio-stream-routes"
+                | "audio-resolve-output-sink"
+                | "audio-sink-availability"
+                | "audio-diagnostics"
+        )
     }
 }
 

@@ -55,6 +55,7 @@ impl Service {
             state["devices"] = json!(graph.devices.values().collect::<Vec<_>>());
             state["links"] = json!(graph.links.values().collect::<Vec<_>>());
             state["metadata"] = json!(graph.metadata);
+            state["policies"] = super::policy::snapshot(graph);
         });
     }
 

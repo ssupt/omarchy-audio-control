@@ -259,7 +259,8 @@ def run(plugin, label, iteration):
             assert not any(error in output for error in ('ReferenceError:', 'TypeError:', 'Binding loop')), output[-10000:]
             return {'label': label, 'round': iteration, 'version': manifest['version'],
                     'buildId': json.loads((plugin/'backend-release.json').read_text())['buildId'] if (plugin/'backend-release.json').exists() else None,
-                    'measurements': measurements, 'volumeObservationLatencyMs': latency,
+                    'measurements': measurements, 'helpersAcrossRun': dict(Counter(helper_log.read_text().splitlines())),
+                    'volumeObservationLatencyMs': latency,
                     'serverObservedVolumeLatency': confirmation}
         except Exception:
             print('Final UI status:', ipc('status'), flush=True)

@@ -737,46 +737,6 @@ function deviceSortComparator(favorites) {
   }
 }
 
-function parseAudioPolicySettings(raw) {
-  var parsed
-  var text = boundedSerializedInput(raw, 262144)
-  try {
-    if (text === null) throw new Error("Audio policy response is too large")
-    parsed = JSON.parse(text)
-  } catch (e) {
-    return { valid: false, values: {} }
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-    return { valid: false, values: {} }
-
-  var booleanKeys = [
-    "node.features.audio.mono",
-    "linking.pause-playback",
-    "device.routes.mute-on-alsa-playback-removed",
-    "device.routes.mute-on-bluetooth-playback-removed",
-    "monitor.alsa.autodetect-hdmi-channels"
-  ]
-  var volumeKeys = [
-    "device.routes.default-sink-volume",
-    "device.routes.default-source-volume",
-    "node.stream.default-playback-volume",
-    "node.stream.default-capture-volume"
-  ]
-  var values = {}
-  var i
-  for (i = 0; i < booleanKeys.length; i++) {
-    var booleanKey = booleanKeys[i]
-    if (typeof parsed[booleanKey] === "boolean") values[booleanKey] = parsed[booleanKey]
-  }
-  for (i = 0; i < volumeKeys.length; i++) {
-    var volumeKey = volumeKeys[i]
-    var volume = parsed[volumeKey]
-    if (typeof volume === "number" && isFinite(volume) && volume >= 0 && volume <= 1)
-      values[volumeKey] = volume
-  }
-  return { valid: true, values: values }
-}
-
 function emptyAudioDiagnostics() {
   return {
     version: 1,
@@ -1765,7 +1725,6 @@ if (typeof module !== "undefined") {
     findAppRule: findAppRule,
     availableRuleApplicationLabels: availableRuleApplicationLabels,
     deviceSortComparator: deviceSortComparator,
-    parseAudioPolicySettings: parseAudioPolicySettings,
     emptyAudioDiagnostics: emptyAudioDiagnostics,
     parseAudioDiagnostics: parseAudioDiagnostics,
     normalizeAudioDiagnostics: normalizeAudioDiagnostics,

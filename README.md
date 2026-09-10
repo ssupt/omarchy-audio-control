@@ -85,19 +85,21 @@ Use the same helper with `remove` before removing the plugin.
 ## Architecture
 
 Both panels share one Rust service for PipeWire state, volume changes, saved
-settings, scenes, routing automation, microphone jobs and diagnostic snapshots.
+settings, WirePlumber policies, scenes, routing automation, microphone jobs and
+diagnostic snapshots.
 The service serializes changes and checks device identities so queued commands
 cannot target a replacement device after a disconnect. It starts with the plugin
 and exits after its clients leave and accepted work finishes.
 
 **The Bash migration is incomplete.** Profiles, ports, default-device changes,
-application routing, output groups, WirePlumber settings and diagnostic
-collection still use helper adapters. Rust coordinates those operations. Desktop
-actions such as speaker tests, support-report copying and recovery also use
-helpers.
+application routing, output groups and diagnostic collection still use helper
+adapters. Rust coordinates those operations. Desktop actions such as speaker
+tests, support-report copying and recovery also use helpers.
 
-Graph and settings updates use events. Visible diagnostic views share cached
-samples. The [benchmark harness](test/integration/benchmark.py) measures CPU,
+Graph and settings updates use events. WirePlumber policies use the existing
+PipeWire connection, including saved values and external changes. Visible
+diagnostic views share cached samples. The
+[benchmark harness](test/integration/benchmark.py) measures CPU,
 memory and helper launches; the Rust preview reduced polling CPU in local tests,
 but used more memory than 0.8.0.
 
@@ -139,7 +141,7 @@ tests and package lifecycle tests. QML tests require Quickshell, Weston and the
 Omarchy shell. Automated recording tests use synthetic audio.
 
 Local hardware checks confirm USB microphone feedback and basic hotplug, codec
-switching, and selecting output groups during playback. [PR #15](https://github.com/ssupt/omarchy-audio-control/pull/15)
+switching, slider release, group fallback/reconnect and timed microphone clips. [PR #15](https://github.com/ssupt/omarchy-audio-control/pull/15)
 tracks the remaining physical checks before public rollout.
 Detailed development notes stay outside this repository.
 

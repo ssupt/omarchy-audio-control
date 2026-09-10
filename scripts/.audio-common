@@ -134,11 +134,6 @@ audio_acquire_mutation_lock() {
     "${1:-Another audio change is still finishing; try again}"
 }
 
-audio_acquire_settings_lock() {
-  audio_open_lock omarchy-audio-settings 8 \
-    "${1:-Another audio setting change is still finishing; try again}"
-}
-
 # Capture command output without allowing a malfunctioning audio service to
 # grow an unbounded shell variable. The producer and limiter are both checked;
 # output one byte over the ceiling is rejected rather than silently truncated.

@@ -4,6 +4,7 @@ mod audio;
 mod automation;
 mod diagnostics;
 mod microphone;
+mod policy;
 mod state;
 
 use crate::adapter::Adapter;
@@ -157,7 +158,7 @@ impl Service {
                         "store.read", "settings.set", "preferences.default", "preferences.profile",
                         "rules.set_app", "rules.delete_app", "devices.alias", "devices.flag",
                         "scenes.save", "scenes.delete", "adapter.run", "scene.apply", "scene.capture",
-                        "microphone.start", "microphone.stop", "diagnostics.refresh"
+                        "microphone.start", "microphone.stop", "diagnostics.refresh", "policy.set"
                     ],
                     "maxFrameBytes": MAX_FRAME_BYTES, "maxSnapshotBytes": MAX_SNAPSHOT_BYTES
                 }))
@@ -173,6 +174,7 @@ impl Service {
             "node.audio" | "node.level" => self.audio_request(request).await,
             "microphone.start" => self.start_microphone(request).await,
             "microphone.stop" => self.stop_microphone_request(request).await,
+            "policy.set" => self.policy_request(request).await,
             "diagnostics.refresh" => self.refresh_diagnostics(request).await,
             "scene.apply" | "scene.capture" => self.scene_request(request).await,
             "adapter.run" => self.adapter_request(request).await,
