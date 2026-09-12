@@ -52,8 +52,12 @@ with tempfile.TemporaryDirectory(prefix='audio-policy-') as temporary, ExitStack
         raise AssertionError('Private policy condition exceeded its deadline')
 
     def run(*command):
-        return subprocess.check_output(command, env=env, text=True, stderr=log, timeout=5)
+        output = subprocess.check_output(command, env=env, text=True, stderr=log, timeout=5)
+        log.write('Command: '+repr(command)+'\n'+output+'\n')
+        log.flush()
+        return output
 
+    client = None
     try:
         launch(['dbus-daemon', '--nofork', '--config-file='+str(bus)])
         until(lambda: (work/'bus').exists())
@@ -97,11 +101,14 @@ with tempfile.TemporaryDirectory(prefix='audio-policy-') as temporary, ExitStack
         assert reply['error']['code'] == 'stale_graph', reply
         assert client.state['metadata']['persistent-sm-settings'] == before
 
-        # wpctl uses SPA JSON bare strings. Both live and saved external changes
-        # arrive without a refresh request from either UI surface.
-        run('wpctl', 'settings', '--save', preference, 'quality')
-        client.wait_state(lambda s: s.get('policies', {}).get(preference) == 'quality')
-        run('wpctl', 'settings', volume, '0.027')
+        # Exercise external metadata updates, including SPA JSON bare strings.
+        # wpctl settings can exit 0 after reporting a failed write; this test
+        # checks backend observation and WirePlumber persistence directly.
+        for store in ('sm-settings', 'persistent-sm-settings'):
+            run('pw-metadata', '-n', store, '0', preference, 'quality', 'Spa:String:JSON')
+        client.wait_state(lambda s: s.get('policies', {}).get(preference) == 'quality' and
+            s.get('metadata', {}).get('persistent-sm-settings', {}).get('0:'+preference, {}).get('value') == 'quality')
+        run('pw-metadata', '-n', 'sm-settings', '0', volume, '0.027', 'Spa:String:JSON')
         client.wait_state(lambda s: abs(s.get('policies', {}).get(volume, -1)-.3) < .000001)
         change(volume, .5)
         client.wait_state(lambda s: s.get('policies', {}).get(volume) == .5)
@@ -139,6 +146,13 @@ with tempfile.TemporaryDirectory(prefix='audio-policy-') as temporary, ExitStack
         assert not Path('/proc', str(backend.pid), 'task', str(backend.pid), 'children').read_text().strip()
         print('PASS: native policies, cubic volumes, validation, partial-write rollback, external updates and persistence across WirePlumber restart')
     except BaseException:
+        if client and client.state:
+            print('Last backend policies:', json.dumps(client.state.get('policies')), file=sys.stderr)
+        for name in ('sm-settings', 'persistent-sm-settings'):
+            try:
+                run('pw-metadata', '-n', name)
+            except (OSError, subprocess.SubprocessError) as error:
+                log.write('Could not inspect '+name+': '+str(error)+'\n')
         log.flush()
         print((work/'runtime.log').read_text()[-14000:], file=sys.stderr)
         raise
