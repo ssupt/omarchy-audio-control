@@ -180,9 +180,11 @@ pub async fn apply(
                 device(native, step, overdrive).await
             } else if domain == "ports" {
                 let graph = native.snapshot();
-                if let Some(node) = resolve(&graph, text(step, "direction"), name) {
+                if let Some(identity) =
+                    native::catalog::port_identity(&graph, text(step, "direction"), name)
+                {
                     native
-                        .select_port(identity(&graph, node), text(step, "value"))
+                        .select_port(identity, text(step, "value"))
                         .await
                         .map(|()| 0)
                         .or_else(|error| {

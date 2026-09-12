@@ -1,5 +1,5 @@
 //! Device profiles and endpoint ports derived from SPA parameters.
-use super::{Device, Graph, Node};
+use super::{Device, Graph, Identity, Node};
 use crate::storage::{identifier, label};
 use pipewire::spa::{
     self,
@@ -311,6 +311,25 @@ pub(super) fn endpoint<'a>(graph: &'a Graph, node: &Node) -> Option<Endpoint<'a>
         direction,
         active,
         choices,
+    })
+}
+
+pub fn port_identity(graph: &Graph, direction: &str, name: &str) -> Option<Identity> {
+    if !graph.ready || !graph.connected {
+        return None;
+    }
+    graph.nodes.values().find_map(|node| {
+        if node.name != name
+            || node.serial.is_empty()
+            || endpoint(graph, node)?.direction != direction
+        {
+            return None;
+        }
+        Some(Identity {
+            generation: graph.generation.clone(),
+            id: node.id,
+            serial: node.serial.clone(),
+        })
     })
 }
 

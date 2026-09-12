@@ -389,6 +389,14 @@ mod tests {
     #[test]
     fn port_changes_reject_read_only_pending_and_monitor_devices() {
         let (mut graph, identity) = fixture();
+        assert!(graph.nodes[&20].audio.volumes.is_empty());
+        assert_eq!(
+            catalog::port_identity(&graph, "output", "speaker")
+                .unwrap()
+                .serial,
+            identity.serial
+        );
+        assert!(catalog::port_identity(&graph, "input", "speaker").is_none());
         graph.devices.get_mut(&10).unwrap().route_writable = false;
         assert_eq!(
             Change::new(&graph, identity.clone(), "port1")
