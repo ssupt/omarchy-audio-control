@@ -670,6 +670,26 @@ assert.equal(model.uniqueRecordingStreamLabels(Array.from({ length: 600 }, (_, i
   properties: { 'application.name': 'Recorder ' + index }
 }))).length, 512)
 assert.deepEqual(model.addedRecordingStreamLabels([], ['Recorder', 'recorder']), ['Recorder'])
+// A paused player's surviving stream must beat an unrelated idle player.
+const idleBrowser = { identity: 'Firefox', canControl: true }
+const pausedMusic = { identity: 'Spotify', canControl: true }
+const playingBrowser = { identity: 'Firefox', isPlaying: true, canControl: true }
+const playingMusic = { identity: 'Spotify', isPlaying: true, canControl: true }
+const musicStream = { ready: true, properties: { 'application.name': 'Spotify' } }
+const browserStream = { ready: true, properties: { 'application.name': 'Firefox' } }
+const proxyMusic = { identity: 'Spotify', dbusName: 'org.mpris.MediaPlayer2.playerctld', canControl: true }
+assert.equal(model.pickActiveMprisPlayer([idleBrowser, pausedMusic], [musicStream]), pausedMusic)
+assert.equal(model.pickActiveMprisPlayer([proxyMusic, pausedMusic], [musicStream]), pausedMusic)
+assert.equal(model.pickActiveMprisPlayer([idleBrowser, proxyMusic], [musicStream]), proxyMusic)
+assert.equal(model.pickActiveMprisPlayer([pausedMusic, playingBrowser], [musicStream]), playingBrowser)
+assert.equal(model.pickActiveMprisPlayer([playingBrowser, playingMusic], [musicStream]), playingMusic)
+assert.equal(model.pickActiveMprisPlayer([playingBrowser, playingMusic], [browserStream, musicStream]), playingBrowser)
+assert.equal(model.pickActiveMprisPlayer([idleBrowser, pausedMusic], []), idleBrowser)
+assert.equal(model.pickActiveMprisPlayer([], []), null)
+assert.equal(model.pickActiveMprisPlayer({ 0: idleBrowser, 1: pausedMusic, length: 2 },
+  { 0: musicStream, length: 1 }), pausedMusic)
+// Selection identifies a player's stream; it does not imply audible playback.
+assert.equal(model.streamRepresentsPlayer(musicStream, pausedMusic, [pausedMusic], [musicStream]), true)
 const lateMprisPlayers = Array.from({ length: 257 }, () => null)
 lateMprisPlayers[256] = { identity: 'Late Player', isPlaying: true, canPlay: true }
 assert.equal(model.mprisLabelsFor(lateMprisPlayers, () => true), '')
