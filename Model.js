@@ -1714,6 +1714,57 @@ function audioScenePlan(scene) {
   return steps
 }
 
+// Scoped hosts may hide the media service. Prefer playing players, then paused
+// players with a matching stream, then controllable players. Within each tier,
+// prefer real players over proxies and keep list order. The host's pinned source
+// and playback-start history are unavailable, so this is a fallback heuristic.
+function pickActiveMprisPlayer(players, streams) {
+  var values = players && typeof players.length === "number" ? players : []
+  var nodes = streams && typeof streams.length === "number" ? streams : []
+  var matched = null, matchedProxy = null
+  var playing = null, playingProxy = null
+  var paused = null, pausedProxy = null
+  var controllable = null, controllableProxy = null
+  for (var i = 0; i < values.length && i < 256; i++) {
+    var player = values[i]
+    if (!player) continue
+    var proxy = mprisPlayerIsProxy(player)
+    var label = mprisPlayerLabel(player)
+    var hasStream = false
+    if (label) {
+      for (var s = 0; s < nodes.length && s < 512; s++) {
+        var streamLabel = rawStreamLabel(nodes[s])
+        if (streamLabel && !streamLabelIsGeneric(streamLabel)
+            && streamRepresentsMprisPlayer(streamLabel, label)) {
+          hasStream = true
+          break
+        }
+      }
+    }
+    var isPlaying = false
+    var canControl = false
+    try { isPlaying = player.isPlaying === true } catch (e) { }
+    try { canControl = player.canControl === true } catch (e) { }
+    if (isPlaying) {
+      if (hasStream) {
+        if (!proxy && !matched) matched = player
+        else if (proxy && !matchedProxy) matchedProxy = player
+      } else {
+        if (!proxy && !playing) playing = player
+        else if (proxy && !playingProxy) playingProxy = player
+      }
+    } else if (hasStream) {
+      if (!proxy && !paused) paused = player
+      else if (proxy && !pausedProxy) pausedProxy = player
+    } else if (canControl) {
+      if (!proxy && !controllable) controllable = player
+      else if (proxy && !controllableProxy) controllableProxy = player
+    }
+  }
+  return matched || matchedProxy || playing || playingProxy
+    || paused || pausedProxy || controllable || controllableProxy || null
+}
+
 function streamRepresentsPlayer(node, player, players, streams) {
   if (!node || !player) return false
   var playerLabel = mprisPlayerLabel(player)
@@ -1804,6 +1855,7 @@ if (typeof module !== "undefined") {
     addedRecordingStreamLabels: addedRecordingStreamLabels,
     streamIconName: streamIconName,
     streamRepresentsPlayer: streamRepresentsPlayer,
+    pickActiveMprisPlayer: pickActiveMprisPlayer,
     audioScenePlan: audioScenePlan
   }
 }

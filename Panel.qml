@@ -56,7 +56,11 @@ Panel {
   readonly property var appLibrary: bar && bar.shell ? bar.shell.appLibrary : null
   readonly property var mediaService: bar && bar.shell
     ? bar.shell.firstPartyServiceFor("omarchy.media") : null
-  readonly property var activeMediaPlayer: mediaService ? mediaService.activePlayer : null
+  readonly property var activeMediaPlayer: mediaService && mediaService.activePlayer
+    ? mediaService.activePlayer
+    // Scoped hosts do not hand out the media service object; pick a player
+    // from MPRIS directly so stream association keeps working.
+    : Model.pickActiveMprisPlayer(mprisPlayers, displayAudioStreams)
   property var audioPreferences: Model.parseAudioPreferences("")
   property bool audioPreferencesLoaded: false
   property bool outputOverdrive: false
