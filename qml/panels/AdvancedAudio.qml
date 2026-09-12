@@ -111,7 +111,7 @@ Item {
   readonly property bool diagnosticsMutationBusy: diagnostics.speakerTesting
     || diagnostics.recovering
   readonly property bool graphMutationBusy: !service || !service.ready || service.transactionBusy || sceneController.busy
-    || profileSetProc.running || portSetPending || microphoneTest.busy || policy.busy
+    || profileSetPending || portSetPending || microphoneTest.busy || policy.busy
   readonly property bool sceneMutationBusy: graphMutationBusy
     || sceneWritePending
     || diagnosticsMutationBusy
@@ -122,6 +122,7 @@ Item {
   property bool outputGroupStatusIsError: false
   property string routingStatus: ""
   property bool routingStatusIsError: false
+  property bool profileSetPending: false
   property string profileSetError: ""
   property string portSetError: ""
   property bool portSetPending: false
@@ -234,7 +235,7 @@ Item {
   onAudioMutationBusyChanged: if (!audioMutationBusy) enforceOutputVolumeLimit()
   onOutputOverdriveChanged: enforceOutputVolumeLimit()
   readonly property bool policyMutationBlocked: sceneController.busy
-    || profileSetProc.running || portSetPending || microphoneTest.busy
+    || profileSetPending || portSetPending || microphoneTest.busy
     || diagnosticsMutationBusy
   readonly property color hoverFill: Style.hoverFillFor(foreground, Color.accent)
   onDefaultOutputDeviceChanged: {
@@ -651,7 +652,7 @@ Item {
       return
     }
     if (activeTab === 0 && selectedIndex === microphoneTestIndex) {
-      if (profileSetProc.running || portSetPending || sceneController.busy
+      if (profileSetPending || portSetPending || sceneController.busy
           || policy.busy || diagnosticsMutationBusy) return
       microphoneTest.activate()
       return
@@ -707,11 +708,13 @@ Item {
   }
 
   function setAudioProfile(card, profile) {
-    if (!card || !card.name || !profile || audioMutationBusy) return
+    if (!card || !card.identity || !profile || !service || audioMutationBusy) return
     profileSetError = ""
-    profileSetProc.command = runtime.scriptCommand(
-      "audio-profile-set", [String(card.name), profile])
-    profileSetProc.running = true
+    profileSetPending = true
+    service.request("profile.set", { identity: card.identity, profile: profile }, function(result, failure) {
+      root.profileSetPending = false
+      root.profileSetError = failure ? failure.message : (result && result.message ? result.message : "")
+    }, { timeout: 100000 })
   }
 
   function setAudioPort(port, value) {
@@ -975,19 +978,6 @@ Item {
     }
   }
 
-  AudioCommand {
-    service: root.service
-    id: profileSetProc
-    onExited: function(exitCode) {
-      root.profileSetError = exitCode === 0 ? ""
-        : (exitCode === 2
-          ? "Audio profile changed, but its shared preference could not be saved"
-          : (exitCode === 4
-            ? "Audio profile changed, but endpoint volume or mute state was only partially restored"
-            : (exitCode === 3 ? "That audio profile is no longer available"
-              : "Could not change the audio profile")))
-    }
-  }
 
   FloatingWindow {
     id: window
@@ -2309,7 +2299,7 @@ Item {
                     level: microphoneTest.level
                     microphoneMuted: root.inputDeviceMuted
                     error: microphoneTest.error
-                    enabled: !profileSetProc.running && !portSetPending
+                    enabled: !profileSetPending && !portSetPending
                       && !sceneController.busy && !policy.busy
                       && !root.diagnosticsMutationBusy
                     hasCursor: root.cursorActive && root.activeTab === 0

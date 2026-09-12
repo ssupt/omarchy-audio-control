@@ -21,6 +21,33 @@ struct NodeLevel {
     muted: Option<bool>,
 }
 impl Service {
+    pub(super) async fn profile_request(&self, request: &Request) -> Result<Value> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Set {
+            identity: Identity,
+            profile: String,
+        }
+        let params = request.params::<Set>()?;
+        let native = self
+            .native
+            .as_ref()
+            .ok_or_else(|| Failure::new("disconnected", "Native audio is unavailable"))?;
+        let _transaction = self.transaction().await?;
+        let _external_lock = FileLock::mutation().await?;
+        self.set_busy_for(true, "profile.set");
+        let _busy = Busy(self);
+        let result = crate::profiles::select(
+            native,
+            self.storage.as_ref(),
+            params.identity,
+            &params.profile,
+        )
+        .await;
+        self.reload_stores().await?;
+        result
+    }
+
     pub(super) async fn port_request(&self, request: &Request) -> Result<Value> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -167,6 +194,7 @@ impl Service {
                 native,
                 &self.adapter,
                 &lock,
+                self.storage.as_ref(),
                 &request.params::<Apply>()?.scene,
                 overdrive,
             )

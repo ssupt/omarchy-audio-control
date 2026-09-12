@@ -87,6 +87,7 @@ jobs:
           cargo build --locked --manifest-path backend/Cargo.toml
           python test/integration/runtime.py backend/target/debug/omarchy-audio-service
           python test/integration/routed_audio.py backend/target/debug/omarchy-audio-service
+          python test/integration/profiles.py backend/target/debug/omarchy-audio-service
           python test/integration/deadlines.py
           python test/integration/microphone.py backend/target/debug/omarchy-audio-service
           python test/integration/output_groups.py backend/target/debug/omarchy-audio-service
@@ -98,6 +99,7 @@ jobs:
           python packaging/build-release.py --output "$RUNNER_TEMP/audio-upgrade-candidate" --binary backend/target/debug/omarchy-audio-service
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/runtime.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/routed_audio.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
+          python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/profiles.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/microphone.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/output_groups.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/policy.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"

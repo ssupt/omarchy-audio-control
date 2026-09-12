@@ -144,6 +144,7 @@ pub async fn apply(
     native: &Handle,
     adapter: &Adapter,
     lock: &FileLock,
+    storage: Option<&crate::storage::Storage>,
     raw: &Value,
     overdrive: bool,
 ) -> Result<Value> {
@@ -178,6 +179,28 @@ pub async fn apply(
             }
             let change: Result<i32> = if domain == "devices" {
                 device(native, step, overdrive).await
+            } else if domain == "profiles" {
+                let graph = native.snapshot();
+                if let Some(identity) = native::catalog::profile_identity(&graph, name) {
+                    crate::profiles::select(native, storage, identity, text(step, "profile"))
+                        .await
+                        .map(|value| {
+                            if value["outcome"] == "persistence_failed" {
+                                2
+                            } else {
+                                0
+                            }
+                        })
+                        .or_else(|error| {
+                            if error.code == "unavailable" {
+                                Ok(3)
+                            } else {
+                                Err(error)
+                            }
+                        })
+                } else {
+                    Ok(3)
+                }
             } else if domain == "ports" {
                 let graph = native.snapshot();
                 if let Some(identity) =
@@ -198,22 +221,16 @@ pub async fn apply(
                     Ok(3)
                 }
             } else {
-                let args = match domain {
-                    "profiles" => vec![name.into(), text(step, "profile").into()],
-                    _ => {
-                        let graph = native.snapshot();
-                        if let Some(node) = resolve(&graph, text(step, "direction"), name) {
-                            vec![node.id.to_string(), name.into()]
-                        } else {
-                            result["skipped"].as_array_mut().unwrap().push(json!(name));
-                            continue;
-                        }
-                    }
+                let graph = native.snapshot();
+                let Some(node) = resolve(&graph, text(step, "direction"), name) else {
+                    result["skipped"].as_array_mut().unwrap().push(json!(name));
+                    continue;
                 };
-                let helper = match domain {
-                    "profiles" => "audio-profile-set",
-                    _ if text(step, "direction") == "input" => "audio-input-set-default",
-                    _ => "audio-output-set-default",
+                let args = vec![node.id.to_string(), name.into()];
+                let helper = if text(step, "direction") == "input" {
+                    "audio-input-set-default"
+                } else {
+                    "audio-output-set-default"
                 };
                 adapter
                     .run(&Call::new(helper, args), Some(lock))
@@ -243,9 +260,6 @@ pub async fn apply(
                     }
                 }
             }
-        }
-        if domain == "profiles" && !steps.is_empty() {
-            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
     if !result["errors"].as_array().unwrap().is_empty() {

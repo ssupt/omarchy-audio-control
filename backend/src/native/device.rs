@@ -42,6 +42,10 @@ impl OwnedDevice {
             .change_mask()
             .contains(pw::device::DeviceChangeMask::PARAMS)
         {
+            snapshot.profile_writable = info.params().iter().any(|p| {
+                p.id() == spa::param::ParamType::Profile
+                    && p.flags().bits() & spa::sys::SPA_PARAM_INFO_WRITE != 0
+            });
             snapshot.route_writable = info.params().iter().any(|p| {
                 p.id() == spa::param::ParamType::Route
                     && p.flags().bits() & spa::sys::SPA_PARAM_INFO_WRITE != 0
@@ -100,6 +104,9 @@ impl OwnedDevice {
                 changed = true;
             } else {
                 self.catalog.clear(param);
+            }
+            if param == spa::sys::SPA_PARAM_Profile {
+                snapshot.profile_revision = snapshot.profile_revision.wrapping_add(1);
             }
             if param == spa::sys::SPA_PARAM_Route {
                 snapshot.routes = std::mem::take(&mut self.routes);

@@ -39,7 +39,6 @@ impl Call {
             "audio-stream-routes" | "audio-resolve-output-sink" | "audio-sink-availability" => {
                 (0, 0)
             }
-            "audio-profile-set" => (2, 2),
             "audio-output-set-default" | "audio-input-set-default" => (2, 4),
             "audio-stream-route-set" => (3, 4),
             "audio-output-groups" => (1, 4),
@@ -205,9 +204,9 @@ mod tests {
     #[test]
     fn only_fixed_programs_are_accepted() {
         for helper in [
-            "../audio-profile-set",
+            "../audio-input-set-default",
             "/bin/sh",
-            "audio-profile-set;id",
+            "audio-input-set-default;id",
             "audio-rust-backend",
         ] {
             assert!(Call::new(helper, vec![]).validate().is_err());

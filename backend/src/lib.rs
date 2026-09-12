@@ -5,6 +5,7 @@ pub mod files;
 pub mod launch;
 pub mod microphone;
 pub mod native;
+pub mod profiles;
 pub mod protocol;
 pub mod scenes;
 pub mod server;

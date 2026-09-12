@@ -50,7 +50,7 @@ with tempfile.TemporaryDirectory(prefix='audio-integration-') as temporary:
     (helpers / 'audio-diagnostics').write_text('''printf 'sample\\n' >>"$AUDIO_INTEGRATION_LOG.diagnostics"
 printf '%s\\n' '{"version":1,"graph":{"rate":48000},"services":[],"devices":[],"routes":[],"warnings":[]}'
 ''')
-    (helpers / 'audio-profile-set').write_text('''set -eu
+    (helpers / 'audio-input-set-default').write_text('''set -eu
 source "$(dirname "$0")/.audio-common"
 audio_acquire_mutation_lock
 printf 'start %s\\n' "$1" >>"$AUDIO_INTEGRATION_LOG"
@@ -210,18 +210,18 @@ assert len(sys.stdin.buffer.read()) > 0
         assert b.response(pending)['error']['code'] == 'cancelled'
         assert (work/'operations.capture').read_text().splitlines() == ['record','play']
         # Two clients serialize through the complete native + helper lock boundary.
-        one = a.send('adapter.run',dict(helper='audio-profile-set',generation=identity['generation'],args=['one','profile']))
+        one = a.send('adapter.run',dict(helper='audio-input-set-default',generation=identity['generation'],args=['one','profile']))
         until(lambda: (work/'operations').exists())
         health = a.send('health')
         assert a.response(health)['result']['status'] == 'ok'
         assert one not in a.replies, 'A long command blocked health/cancellation on the same connection'
-        two = b.send('adapter.run',dict(helper='audio-profile-set',generation=identity['generation'],args=['two','profile']))
+        two = b.send('adapter.run',dict(helper='audio-input-set-default',generation=identity['generation'],args=['two','profile']))
         assert a.response(one)['result']['exitCode'] == 0
         assert b.response(two)['result']['exitCode'] == 0
         assert (work/'operations').read_text().splitlines() == ['start one','finish one','start two','finish two']
         # Admitted operations are not cancelled by a lost requesting connection.
         c = Client(path)
-        c.send('adapter.run',dict(helper='audio-profile-set',generation=identity['generation'],args=['disconnected','profile']))
+        c.send('adapter.run',dict(helper='audio-input-set-default',generation=identity['generation'],args=['disconnected','profile']))
         until(lambda: 'start disconnected' in (work/'operations').read_text())
         c.close()
         until(lambda: 'finish disconnected' in (work/'operations').read_text())
@@ -268,7 +268,7 @@ assert len(sys.stdin.buffer.read()) > 0
                 fixture = work/'routed-device'
                 flags = shlex.split(subprocess.check_output(['pkg-config', '--cflags', '--libs', 'libpipewire-0.3'], text=True))
                 subprocess.run(['cc', str(ROOT/'test/fixtures/routed-device.c'), '-o', str(fixture), *flags], check=True)
-                processes.append(subprocess.Popen([str(fixture)], env=env, stdout=log, stderr=log))
+                processes.append(subprocess.Popen([str(fixture), str(work/"unused-control"), "--profiles"], env=env, stdout=log, stderr=log))
                 a.wait_state(lambda s: s.get('catalogReady') and len(s.get('ports', [])) == 2)
                 compositor = subprocess.Popen([weston,'--backend=headless','--renderer=pixman',
                     '--shell=kiosk-shell.so','--socket=audio-test-wayland','--idle-time=0','--no-config'],

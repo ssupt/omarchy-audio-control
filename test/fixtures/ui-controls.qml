@@ -238,8 +238,30 @@ Item {
         if (root.advanced.audioMutationBusy) return
         if (!root.check(!!root.advanced.portSetError && !root.advanced.portSetPending,
             "rejected port selection left the control blocked or hid its error")) return
+        root.advanced.setAudioProfile(root.advanced.audioCards[0], "headset")
+        if (!root.check(root.advanced.profileSetPending, "profile request did not guard duplicate changes")) return
+        root.phase++
+        break
+      case 18:
+        if (root.advanced.audioMutationBusy) return
+        if (!root.check(!root.advanced.profileSetError, "native profile selection failed")) return
+        if (root.advanced.audioCards[0].activeProfile !== "headset") return
+        root.advanced.setAudioProfile(root.advanced.audioCards[0], "HiFi")
+        root.phase++
+        break
+      case 19:
+        if (root.advanced.audioMutationBusy) return
+        if (!root.check(!root.advanced.profileSetError, "original profile was not restored")) return
+        if (root.advanced.audioCards[0].activeProfile !== "HiFi") return
+        root.advanced.setAudioProfile(root.advanced.audioCards[0], "missing-profile")
+        root.phase++
+        break
+      case 20:
+        if (root.advanced.audioMutationBusy) return
+        if (!root.check(!!root.advanced.profileSetError && !root.advanced.profileSetPending,
+            "rejected profile selection left the control blocked or hid its error")) return
         root.done = true
-        console.log("RUNTIME_UI_SUCCESS volume, tabs, shared scenes, canceled pointer drag, native policies and port selection")
+        console.log("RUNTIME_UI_SUCCESS volume, tabs, shared scenes, canceled pointer drag, native policies, ports and profiles")
       }
     }
   }

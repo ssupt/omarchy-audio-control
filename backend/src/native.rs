@@ -21,6 +21,7 @@ mod device;
 use device::{OwnedDevice, refresh};
 pub mod metadata;
 mod ports;
+pub(crate) mod profiles;
 use audio::{patch_pod, read_audio, route_for};
 
 type Properties = BTreeMap<String, String>;
@@ -56,6 +57,10 @@ pub struct Device {
     route_writable: bool,
     #[serde(skip)]
     route_revision: u64,
+    #[serde(skip)]
+    profile_writable: bool,
+    #[serde(skip)]
+    profile_revision: u64,
     pub catalog_ready: bool,
     pub id: u32,
     pub revision: u64,
@@ -109,6 +114,7 @@ pub struct AudioPatch {
 struct Command {
     identity: Identity,
     patch: AudioPatch,
+    guard: Option<profiles::Guard>,
     completion: Completion,
 }
 struct Completion {
@@ -119,6 +125,7 @@ enum Message {
     Patch(Command),
     Metadata(metadata::Command),
     Port(ports::Command),
+    Profile(profiles::Command),
     Stop,
 }
 type SenderSlot = Arc<Mutex<Option<pw::channel::Sender<Message>>>>;
@@ -186,6 +193,21 @@ impl Handle {
         self.state.borrow().clone()
     }
     pub async fn patch(&self, identity: Identity, patch: AudioPatch) -> Result<()> {
+        self.patch_guarded(identity, patch, None).await
+    }
+    pub(crate) async fn patch_guarded(
+        &self,
+        identity: Identity,
+        patch: AudioPatch,
+        guard: Option<profiles::Guard>,
+    ) -> Result<()> {
+        if let Some(guard) = &guard {
+            let graph = self.snapshot();
+            guard.inspect(&graph)?;
+            if verify_patch(&graph, &identity, &patch).is_ok() {
+                return Ok(());
+            }
+        }
         let permit = self
             .inner
             .permits
@@ -209,6 +231,7 @@ impl Handle {
             .send(Message::Patch(Command {
                 identity,
                 patch,
+                guard: guard.clone(),
                 completion: Completion {
                     reply,
                     _permit: permit,
@@ -223,6 +246,22 @@ impl Handle {
                 let graph = state.borrow_and_update().clone();
                 validate_identity(&graph, &expected_identity)
                     .map_err(|_| Failure::unknown("Audio node changed during the operation"))?;
+                if let Some(guard) = &guard {
+                    match guard.inspect(&graph) {
+                        Ok(_) => (),
+                        Err(error) if error.code == "busy" => {
+                            state.changed().await.map_err(|_| {
+                                Failure::unknown("Audio disconnected during restoration")
+                            })?;
+                            continue;
+                        }
+                        Err(_) => {
+                            return Err(Failure::unknown(
+                                "Audio profile changed during restoration",
+                            ));
+                        }
+                    }
+                }
                 if verify_patch(&graph, &expected_identity, &expected_patch).is_ok() {
                     return Ok(());
                 }
@@ -716,12 +755,34 @@ fn session(
                     }
                 }
             }
+            Message::Profile(command) => {
+                let result = command
+                    .change
+                    .apply(&graph.borrow(), &proxies.borrow())
+                    .and_then(|()| {
+                        core.upgrade()
+                            .ok_or_else(|| Failure::unknown("Audio server disconnected"))?
+                            .sync(0)
+                            .map_err(|_| Failure::unknown("Audio server disconnected"))
+                    });
+                match result {
+                    Ok(seq) => {
+                        pending.borrow_mut().insert(seq.raw(), command.completion);
+                    }
+                    Err(error) => {
+                        let _ = command.completion.reply.send(Err(error));
+                    }
+                }
+            }
             Message::Patch(command) => {
                 let result = (|| {
                     validate_identity(&graph.borrow(), &command.identity)?;
                     validate_patch(&command.patch)?;
                     let graph = graph.borrow();
                     let node = validate_identity(&graph, &command.identity)?;
+                    if let Some(guard) = &command.guard {
+                        guard.inspect(&graph)?;
+                    }
                     if node
                         .properties
                         .get("device.id")
@@ -776,7 +837,7 @@ fn session(
     Ok(())
 }
 
-fn verify_patch(graph: &Graph, identity: &Identity, patch: &AudioPatch) -> Result<()> {
+pub(crate) fn verify_patch(graph: &Graph, identity: &Identity, patch: &AudioPatch) -> Result<()> {
     let node = validate_identity(graph, identity)
         .map_err(|_| Failure::unknown("Audio node changed during the operation"))?;
     if patch.muted.is_some() && node.audio.muted != patch.muted {

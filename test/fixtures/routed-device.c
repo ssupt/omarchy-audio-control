@@ -29,6 +29,11 @@ struct fixture {
     bool suppress_report;
     const char *control;
     unsigned port_requests;
+    bool profile_mode;
+    uint32_t device_id;
+    uint32_t active_profile;
+    int pending_profile;
+    unsigned profile_requests;
     float pending_volumes[2];
     bool pending_mute;
     struct pw_proxy *nodes[2];
@@ -74,14 +79,14 @@ static int enum_catalog(struct fixture *f, int seq, uint32_t id, uint32_t start,
                 SPA_PARAM_ROUTE_devices, SPA_POD_Array(sizeof(int32_t), SPA_TYPE_Int, 1, devices), 0);
         } else {
             const char *names[] = {"off", "HiFi", "pro-audio", "headset"};
-            uint32_t index = id == SPA_PARAM_Profile ? (f->catalog_changed ? 3 : 1) : i;
+            uint32_t index = id == SPA_PARAM_Profile ? (f->profile_mode ? f->active_profile : (f->catalog_changed ? 3 : 1)) : i;
             spa_pod_builder_push_object(&b, &object, SPA_TYPE_OBJECT_ParamProfile, id);
             spa_pod_builder_add(&b,
                 SPA_PARAM_PROFILE_index, SPA_POD_Int(index),
                 SPA_PARAM_PROFILE_name, SPA_POD_String(names[index]),
                 SPA_PARAM_PROFILE_description, SPA_POD_String(names[index]),
                 SPA_PARAM_PROFILE_priority, SPA_POD_Int(index ? 100 : 0),
-                SPA_PARAM_PROFILE_available, SPA_POD_Id(index == 3 || (f->catalog_changed && index == 1) ? SPA_PARAM_AVAILABILITY_no : SPA_PARAM_AVAILABILITY_yes), 0);
+                SPA_PARAM_PROFILE_available, SPA_POD_Id((!f->profile_mode && index == 3) || (f->catalog_changed && index == 1) ? SPA_PARAM_AVAILABILITY_no : SPA_PARAM_AVAILABILITY_yes), 0);
             if (index) {
                 struct spa_pod_frame classes, class;
                 spa_pod_builder_prop(&b, SPA_PARAM_PROFILE_classes, 0);
@@ -110,7 +115,7 @@ static int enum_params(void *object, int seq, uint32_t id, uint32_t start,
                        uint32_t count, const struct spa_pod *filter) {
     struct fixture *f = object;
     if (id != SPA_PARAM_Route) return enum_catalog(f, seq, id, start, count);
-    if (f->routes_hidden) return 0;
+    if (f->routes_hidden || (f->profile_mode && f->active_profile == 0)) return 0;
     for (uint32_t i = start; i < 2 && count--; i++) {
         uint8_t buffer[1024];
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
@@ -138,9 +143,27 @@ static int enum_params(void *object, int seq, uint32_t id, uint32_t start,
     return 0;
 }
 
+static void bound(void *data, uint32_t id);
+
 static void apply(void *data, uint64_t expirations) {
     struct fixture *f = data;
     int i = f->pending;
+    if (f->pending_profile >= 0) {
+        for (int n = 0; n < 2; n++) {
+            if (f->nodes[n]) pw_proxy_destroy(f->nodes[n]);
+            f->nodes[n] = NULL;
+            f->volumes[n][0] = f->volumes[n][1] = 1.f;
+            f->muted[n] = false;
+        }
+        f->active_profile = f->pending_profile;
+        f->pending_profile = -1;
+        if (f->active_profile) bound(f, f->device_id);
+        if (f->suppress_report) { f->suppress_report = false; return; }
+        f->params[2].flags ^= SPA_PARAM_INFO_SERIAL;
+        f->params[0].flags ^= SPA_PARAM_INFO_SERIAL;
+        info(f);
+        return;
+    }
     if (i < 0) return;
     memcpy(f->volumes[i], f->pending_volumes, sizeof(f->pending_volumes));
     f->muted[i] = f->pending_mute;
@@ -156,6 +179,23 @@ static int set_param(void *object, uint32_t id, uint32_t flags, const struct spa
     int32_t index = -1, device = -1;
     bool save = false;
     struct spa_pod *props = NULL, *volumes = NULL;
+    if (id == SPA_PARAM_Profile && f->profile_mode) {
+        if (spa_pod_parse_object(param, SPA_TYPE_OBJECT_ParamProfile, NULL,
+            SPA_PARAM_PROFILE_index, SPA_POD_Int(&index),
+            SPA_PARAM_PROFILE_save, SPA_POD_Bool(&save)) < 0 || !save || index < 0 || index > 3
+            || f->pending >= 0 || f->pending_profile >= 0) return -EINVAL;
+        char mode[32] = "";
+        FILE *control = f->control ? fopen(f->control, "r") : NULL;
+        if (control) { assert(fgets(mode, sizeof(mode), control)); fclose(control); }
+        printf("PROFILE %d\n", index);
+        fflush(stdout);
+        if (strcmp(mode, "profile-ignore") == 0) return 0;
+        if (strcmp(mode, "profile-silent-once") == 0 && f->profile_requests++ == 0) f->suppress_report = true;
+        f->pending_profile = strcmp(mode, "profile-third") == 0 ? 0 : index;
+        struct timespec delay = { .tv_nsec = 80000000 };
+        pw_loop_update_timer(pw_main_loop_get_loop(f->loop), f->timer, &delay, NULL, false);
+        return 0;
+    }
     if (id != SPA_PARAM_Route || spa_pod_parse_object(param,
         SPA_TYPE_OBJECT_ParamRoute, NULL,
         SPA_PARAM_ROUTE_index, SPA_POD_Int(&index),
@@ -201,6 +241,7 @@ static const struct spa_device_methods methods = {
 
 static void bound(void *data, uint32_t id) {
     struct fixture *f = data;
+    f->device_id = id;
     char device_id[24];
     snprintf(device_id, sizeof(device_id), "%u", id);
     for (int i = 0; i < 2; i++) {
@@ -209,6 +250,7 @@ static void bound(void *data, uint32_t id) {
             "node.name", i ? "audio_test_routed_input" : "audio_test_routed_output",
             "media.class", i ? "Audio/Source" : "Audio/Sink",
             "audio.position", "[ FL FR ]", "device.id", device_id,
+            "adapter.auto-port-config", "{ mode = dsp monitor = true position = preserve }",
             "card.profile.device", i ? "0" : "4", NULL);
         f->nodes[i] = pw_core_create_object(f->core, "adapter", PW_TYPE_INTERFACE_Node,
                                           PW_VERSION_NODE, &props->dict, 0);
@@ -238,11 +280,11 @@ static void quit(void *data, int signal) {
 
 int main(int argc, char **argv) {
     pw_init(&argc, &argv);
-    struct fixture f = { .pending = -1, .active_ports = {2, 7},
+    struct fixture f = { .pending = -1, .pending_profile = -1, .active_profile = 1, .profile_mode = argc > 2, .active_ports = {2, 7},
         .volumes = {{.008f, .027f}, {.064f, .125f}}, .control = argc > 1 ? argv[1] : NULL };
     uint32_t ids[] = {SPA_PARAM_Route, SPA_PARAM_EnumProfile, SPA_PARAM_Profile, SPA_PARAM_EnumRoute};
     for (unsigned i = 0; i < 4; i++) f.params[i] = (struct spa_param_info) {
-        .id = ids[i], .flags = i ? SPA_PARAM_INFO_READ : SPA_PARAM_INFO_READWRITE };
+        .id = ids[i], .flags = (i == 0 || (i == 2 && f.profile_mode)) ? SPA_PARAM_INFO_READWRITE : SPA_PARAM_INFO_READ };
     f.device.iface = SPA_INTERFACE_INIT(SPA_TYPE_INTERFACE_Device, SPA_VERSION_DEVICE, &methods, &f);
     spa_hook_list_init(&f.listeners);
     f.loop = pw_main_loop_new(NULL);
@@ -256,6 +298,8 @@ int main(int argc, char **argv) {
     f.core = pw_context_connect(context, NULL, 0);
     assert(f.core);
     struct pw_properties *props = pw_properties_new("device.name", "audio_test_device", NULL);
+    if (argc > 3) pw_properties_set(props, "device.api", "bluez5");
+    if (argc > 3) pw_properties_set(props, "api.bluez5.address", "AA:BB:CC:DD:EE:FF");
     struct pw_proxy *proxy = pw_core_export(f.core, SPA_TYPE_INTERFACE_Device, &props->dict, &f.device, 0);
     assert(proxy);
     struct spa_hook listener;

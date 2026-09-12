@@ -17,14 +17,14 @@ pub(super) struct Catalog {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Profile {
-    index: i32,
-    name: String,
+pub(crate) struct Profile {
+    pub index: i32,
+    pub name: String,
     label: String,
     priority: i32,
     available: bool,
-    sinks: i32,
-    sources: i32,
+    pub sinks: i32,
+    pub sources: i32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -333,6 +333,94 @@ pub fn port_identity(graph: &Graph, direction: &str, name: &str) -> Option<Ident
     })
 }
 
+pub(super) struct Card<'a> {
+    pub bluetooth: bool,
+    pub active: Option<&'a Profile>,
+    pub choices: Vec<&'a Profile>,
+}
+
+pub(super) fn card<'a>(graph: &Graph, device: &'a Device) -> Option<Card<'a>> {
+    let name = device.properties.get("device.name")?;
+    if identifier(&json!(name), 160).is_empty()
+        || graph
+            .devices
+            .values()
+            .filter(|d| d.properties.get("device.name") == Some(name))
+            .count()
+            != 1
+    {
+        return None;
+    }
+    let catalog = &device.catalog;
+    let mut ids = BTreeSet::new();
+    let mut names = BTreeSet::new();
+    if catalog.active_profile.len() > 1
+        || catalog
+            .profiles
+            .values()
+            .any(|p| !ids.insert(p.index) || !names.insert(&p.name))
+    {
+        return None;
+    }
+    let active = catalog
+        .profiles
+        .values()
+        .find(|p| Some(p.index) == catalog.profile());
+    let bluetooth = device
+        .properties
+        .get("device.api")
+        .is_some_and(|v| v == "bluez5");
+    let choices = catalog
+        .profiles
+        .values()
+        .filter(|p| {
+            let is_active = Some(p.index) == catalog.profile();
+            (is_active || p.available)
+                && (is_active
+                    || p.name == "off"
+                    || bluetooth
+                    || [
+                        (spa::sys::SPA_DIRECTION_OUTPUT, p.sinks),
+                        (spa::sys::SPA_DIRECTION_INPUT, p.sources),
+                    ]
+                    .iter()
+                    .all(|(direction, count)| {
+                        *count == 0
+                            || catalog.ports.values().any(|port| {
+                                port.priority > 0
+                                    && port.direction == *direction
+                                    && port.profiles.contains(&p.index)
+                            })
+                    }))
+        })
+        .collect();
+    Some(Card {
+        bluetooth,
+        active,
+        choices,
+    })
+}
+
+pub fn profile_identity(graph: &Graph, name: &str) -> Option<Identity> {
+    if !graph.ready || !graph.connected {
+        return None;
+    }
+    let device = graph
+        .devices
+        .values()
+        .find(|d| d.properties.get("device.name").is_some_and(|n| n == name))?;
+    card(graph, device)?;
+    let serial = device
+        .properties
+        .get("object.serial")
+        .filter(|s| !s.is_empty())?;
+    Some(Identity {
+        generation: graph.generation.clone(),
+        id: device.id,
+        serial: serial.clone(),
+    })
+}
+
 pub fn snapshot(graph: &Graph) -> (Json, Json) {
     let mut cards = vec![];
     let mut ports = vec![];
@@ -349,49 +437,12 @@ pub fn snapshot(graph: &Graph) -> (Json, Json) {
         {
             continue;
         }
-        let catalog = &device.catalog;
-        let mut profile_ids = BTreeSet::new();
-        let mut profile_names = BTreeSet::new();
-        if catalog.active_profile.len() > 1
-            || catalog
-                .profiles
-                .values()
-                .any(|p| !profile_ids.insert(p.index) || !profile_names.insert(&p.name))
-        {
+        let Some(card) = card(graph, device) else {
             continue;
-        }
-        let bluetooth = props.get("device.api").is_some_and(|v| v == "bluez5");
-        let active = catalog.active_profile.values().next().copied();
-        let active_name = catalog
-            .profiles
-            .values()
-            .find(|p| Some(p.index) == active)
-            .map(|p| p.name.as_str())
-            .unwrap_or("off");
-        let mut profiles: Vec<_> = catalog
-            .profiles
-            .values()
-            .filter(|profile| {
-                let active = profile.name == active_name;
-                (active || profile.available)
-                    && (active
-                        || profile.name == "off"
-                        || bluetooth
-                        || [
-                            (spa::sys::SPA_DIRECTION_OUTPUT, profile.sinks),
-                            (spa::sys::SPA_DIRECTION_INPUT, profile.sources),
-                        ]
-                        .iter()
-                        .all(|(direction, count)| {
-                            *count == 0
-                                || catalog.ports.values().any(|p| {
-                                    p.priority > 0
-                                        && p.direction == *direction
-                                        && p.profiles.contains(&profile.index)
-                                })
-                        }))
-            })
-            .collect();
+        };
+        let bluetooth = card.bluetooth;
+        let active_name = card.active.map(|p| p.name.as_str()).unwrap_or("off");
+        let mut profiles = card.choices;
         profiles.sort_by_key(|p| (std::cmp::Reverse(p.priority), p.label.to_lowercase()));
         let mut seen = BTreeSet::new();
         let profiles: Vec<_> = profiles
@@ -409,7 +460,7 @@ pub fn snapshot(graph: &Graph) -> (Json, Json) {
                 ),
                 160,
             );
-            cards.push(json!({"name":name,"label":if description.is_empty() {&name} else {&description},
+            cards.push(json!({"name":name,"identity":{"generation":graph.generation,"id":device.id,"serial":props.get("object.serial").cloned().unwrap_or_default()},"label":if description.is_empty() {&name} else {&description},
                 "bluetooth":bluetooth,"address":identifier(&json!(props.get("api.bluez5.address").or_else(|| props.get("device.string"))),80),
                 "activeProfile":active_name,"profiles":profiles}));
         }
