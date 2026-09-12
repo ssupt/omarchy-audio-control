@@ -111,7 +111,7 @@ Item {
   readonly property bool diagnosticsMutationBusy: diagnostics.speakerTesting
     || diagnostics.recovering
   readonly property bool graphMutationBusy: !service || !service.ready || service.transactionBusy || sceneController.busy
-    || profileSetProc.running || portSetProc.running || microphoneTest.busy || policy.busy
+    || profileSetProc.running || portSetPending || microphoneTest.busy || policy.busy
   readonly property bool sceneMutationBusy: graphMutationBusy
     || sceneWritePending
     || diagnosticsMutationBusy
@@ -124,6 +124,7 @@ Item {
   property bool routingStatusIsError: false
   property string profileSetError: ""
   property string portSetError: ""
+  property bool portSetPending: false
   property string settingsSaveError: ""
   readonly property string settingsFormatError: service && service.storeErrors.settings ? service.storeErrors.settings.message : ""
   readonly property bool audioControlSettingsWritable: !!service && service.ready && !service.storeErrors.settings
@@ -233,7 +234,7 @@ Item {
   onAudioMutationBusyChanged: if (!audioMutationBusy) enforceOutputVolumeLimit()
   onOutputOverdriveChanged: enforceOutputVolumeLimit()
   readonly property bool policyMutationBlocked: sceneController.busy
-    || profileSetProc.running || portSetProc.running || microphoneTest.busy
+    || profileSetProc.running || portSetPending || microphoneTest.busy
     || diagnosticsMutationBusy
   readonly property color hoverFill: Style.hoverFillFor(foreground, Color.accent)
   onDefaultOutputDeviceChanged: {
@@ -650,7 +651,7 @@ Item {
       return
     }
     if (activeTab === 0 && selectedIndex === microphoneTestIndex) {
-      if (profileSetProc.running || portSetProc.running || sceneController.busy
+      if (profileSetProc.running || portSetPending || sceneController.busy
           || policy.busy || diagnosticsMutationBusy) return
       microphoneTest.activate()
       return
@@ -714,11 +715,13 @@ Item {
   }
 
   function setAudioPort(port, value) {
-    if (!port || !value || audioMutationBusy) return
+    if (!port || !port.identity || !value || !service || audioMutationBusy) return
     portSetError = ""
-    portSetProc.command = runtime.scriptCommand(
-      "audio-port-set", [port.direction, port.endpoint, value])
-    portSetProc.running = true
+    portSetPending = true
+    service.request("port.set", { identity: port.identity, port: value }, function(_result, failure) {
+      root.portSetPending = false
+      root.portSetError = failure ? failure.message : ""
+    }, { timeout: 15000 })
   }
 
   function setBluetoothAutoSwitch(enabled) {
@@ -983,17 +986,6 @@ Item {
             ? "Audio profile changed, but endpoint volume or mute state was only partially restored"
             : (exitCode === 3 ? "That audio profile is no longer available"
               : "Could not change the audio profile")))
-    }
-  }
-
-  AudioCommand {
-    service: root.service
-    id: portSetProc
-    onExited: function(exitCode) {
-      root.portSetError = exitCode === 0 ? ""
-        : (exitCode === 4 ? "Audio port changed, but the active port could not be verified"
-          : (exitCode === 3 ? "That audio port is no longer available"
-            : "Could not change the audio port"))
     }
   }
 
@@ -2317,7 +2309,7 @@ Item {
                     level: microphoneTest.level
                     microphoneMuted: root.inputDeviceMuted
                     error: microphoneTest.error
-                    enabled: !profileSetProc.running && !portSetProc.running
+                    enabled: !profileSetProc.running && !portSetPending
                       && !sceneController.busy && !policy.busy
                       && !root.diagnosticsMutationBusy
                     hasCursor: root.cursorActive && root.activeTab === 0

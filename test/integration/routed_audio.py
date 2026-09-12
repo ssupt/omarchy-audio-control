@@ -53,7 +53,9 @@ with tempfile.TemporaryDirectory(prefix='audio-routes-') as temporary:
         try:
             start(['pipewire', '-c', str(ROOT/'test/fixtures/pipewire.conf')])
             until(lambda: (work/'audio-test').exists())
-            device_process = start([str(fixture)])
+            control = work/'device-control'
+            control.write_text('normal')
+            device_process = start([str(fixture), str(control)])
             start([str(BINARY)])
             path = work/'omarchy-audio-control/backend.sock'
             until(path.exists)
@@ -77,6 +79,62 @@ with tempfile.TemporaryDirectory(prefix='audio-routes-') as temporary:
                 node = next(n for n in state['nodes'] if n['name'] == 'audio_test_routed_'+direction)
                 identities[direction] = dict(generation=state['generation'], id=node['id'], serial=node['serial'])
                 assert all(abs(a-b) < .001 for a, b in zip(node['audio']['volumes'], expected)), node
+            def port_request(direction, name):
+                result = client.request('port.set', dict(identity=identities[direction], port=name))
+                client.wait_state(lambda s: any(p['direction'] == direction and p['activePort'] == name for p in s['ports']))
+                return result
+
+            def active_port(direction):
+                return next(p['activePort'] for p in client.state['ports'] if p['direction'] == direction)
+
+            assert {p['direction']: p['identity'] for p in state['ports']} == identities
+            before = (work/'log').read_text().count('PORT ')
+            port_request('output', '[Out] Speaker')
+            assert (work/'log').read_text().count('PORT ') == before, 'Selecting the active port sent a write'
+            for direction, target, original in [('output', '[Out] Headphones', '[Out] Speaker'),
+                                                 ('input', '[In] Line', '[In] Mic')]:
+                started = time.monotonic()
+                port_request(direction, target)
+                assert time.monotonic()-started >= .06, 'Port selection returned before the device applied it'
+                assert active_port(direction) == target
+                observed = dump()
+                device = next(n for n in observed if n.get('info', {}).get('props', {}).get('device.name') == 'audio_test_device')
+                route = next(r for r in device['info']['params']['Route'] if r['device'] == (4 if direction == 'output' else 0))
+                expected = [.008, .027] if direction == 'output' else [.064, .125]
+                assert all(abs(a-b) < .00001 for a, b in zip(route['props']['channelVolumes'], expected)), route
+                port_request(direction, original)
+            before = (work/'log').read_text().count('PORT ')
+            for identity, target, code in [
+                (dict(identities['output'], serial='stale'), '[Out] Headphones', 'stale_node'),
+                (dict(identities['output'], generation='stale'), '[Out] Headphones', 'stale_graph'),
+                (identities['output'], '[In] Mic', 'unavailable'),
+                (identities['output'], 'missing', 'unavailable'),
+                (identities['output'], ' bad\n', 'invalid_params')]:
+                reply = client.response(client.send('port.set', dict(identity=identity, port=target)))
+                assert reply['error']['code'] == code and reply['error']['outcome'] == 'rejected', reply
+            assert (work/'log').read_text().count('PORT ') == before, 'An invalid port request reached the device'
+            applied = client.request('scene.apply', dict(scene=dict(name='Ports only', ports=[
+                dict(direction='output', endpoint='audio_test_routed_output', value='[Out] Headphones'),
+                dict(direction='input', endpoint='missing', value='absent'),
+                dict(direction='input', endpoint='audio_test_routed_input', value='absent') ])))
+            assert applied['applied'] == 1 and len(applied['skipped']) == 2 and not applied['errors'], applied
+            client.wait_state(lambda s: any(p['direction'] == 'output' and p['activePort'] == '[Out] Headphones' for p in s['ports']))
+            assert active_port('output') == '[Out] Headphones'
+            port_request('output', '[Out] Speaker')
+            # The device changes state but withholds its update. Confirmation must
+            # time out and wait for a fresh observation of the rollback, not trust
+            # the cached original port after only a core roundtrip.
+            control.write_text('silent-once')
+            reply = client.response(client.send('port.set', dict(identity=identities['output'], port='[Out] Headphones')))
+            assert reply['error']['code'] == 'not_applied', reply
+            observed = dump()
+            device = next(n for n in observed if n.get('info', {}).get('props', {}).get('device.name') == 'audio_test_device')
+            assert next(r for r in device['info']['params']['Route'] if r['device'] == 4)['index'] == 2
+            control.write_text('ignore')
+            reply = client.response(client.send('port.set', dict(identity=identities['output'], port='[Out] Headphones')))
+            assert reply['error']['outcome'] == 'unknown', 'Unobserved rollback was reported as verified: '+str(reply)
+            control.write_text('normal')
+            state = client.state
             catalog = state['catalogRevision']
             for direction in ('output', 'input'):
                 identity = identities[direction]
@@ -112,16 +170,29 @@ with tempfile.TemporaryDirectory(prefix='audio-routes-') as temporary:
             port, = changed['ports']
             assert port['direction'] == 'output' and port['activePort'] == '[Out] Headphones', port
             assert len(port['ports']) == 2, 'An unavailable active port must remain visible'
+            port_request('output', '[Out] Headphones')
+            client.request('port.set', dict(identity=identities['output'], port='[Out] Speaker'))
+            client.wait_state(lambda s: not any(p['direction'] == 'output' for p in s['ports']))
+            reply = client.response(client.send('port.set', dict(identity=identities['output'], port='[Out] Headphones')))
+            assert reply['error']['code'] == 'unavailable', reply
             device_process.send_signal(signal.SIGUSR2)
             restored = client.wait_state(lambda s: s.get('catalogReady') and s['profiles'][0]['activeProfile'] == 'HiFi')
             check_catalog(restored)
             client.request('node.level', dict(identity=identities['output'], volume=.3))
+            writes = (work/'log').read_text().count('PORT ')
+            pending = client.send('port.set', dict(identity=identities['output'], port='[Out] Headphones'))
+            until(lambda: (work/'log').read_text().count('PORT ') > writes)
             device_process.terminate()
             device_process.wait(timeout=5)
+            reply = client.response(pending)
+            assert reply['error']['outcome'] == 'unknown', reply
             client.wait_state(lambda s: all(n['id'] != identities['output']['id'] for n in s['nodes']))
             assert not client.state['profiles'] and not client.state['ports'], client.state
             reply = client.response(client.send('node.level', dict(identity=identities['output'], volume=.2)))
             assert reply['error']['code'] == 'stale_node', reply
+            reply = client.response(client.send('port.set', dict(identity=identities['output'], port='[Out] Headphones')))
+            assert reply['error']['code'] == 'stale_node', reply
+            print('PASS: native port selection, scene ports, stale/unavailable targets, delayed confirmation and rollback')
             print('PASS: native profiles, ports, scene capture, hardware levels, delayed confirmation and removal')
         except Exception:
             log.flush()

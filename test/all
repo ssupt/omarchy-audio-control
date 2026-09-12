@@ -1472,105 +1472,8 @@ rm -f -- "$output_default_log" "$shared_preferences" "$shared_preferences_lock" 
   "$multiple_preferences" "${multiple_preferences}.lock" \
   "$future_preferences" "${future_preferences}.lock"
 
-port_log=$(mktemp)
-trap 'rm -f "$route_log" "$input_default_log" "$port_log"' EXIT
-: >"$port_log"
-if AUDIO_CONTROL_PORT_LOG="$port_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-port-set" input loopback-source two >/dev/null 2>&1; then
-  fail "nonstandard monitor source accepted as an input port target"
-else
-  [[ $? == 3 ]] || fail "monitor source port reported the wrong exit code"
-fi
-[[ ! -s $port_log ]] || fail "monitor source port changed hardware"
-
-: >"$port_log"
-AUDIO_CONTROL_PORT_LOG="$port_log" AUDIO_CONTROL_PORT_OBJECT_ACTIVE=1 \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-port-set" \
-  output speakers analog-output-speaker
-[[ ! -s $port_log ]] || fail "object-form active port no-op detection"
-
-AUDIO_CONTROL_PORT_LOG="$port_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-port-set" output speakers analog-output-headphones
-[[ $(<"$port_log") == "set-sink-port 10 analog-output-headphones" ]] ||
-  fail "audio port selection"
-if AUDIO_CONTROL_PORT_LOG="$port_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-port-set" output speakers hdmi-output >/dev/null 2>&1; then
-  fail "unavailable audio port accepted"
-else
-  [[ $? == 3 ]] || fail "unavailable audio port reported wrong exit code"
-fi
-
-: >"$port_log"
-if AUDIO_CONTROL_PORT_LOG="$port_log" \
-  AUDIO_CONTROL_PORT_SET_NO_EFFECT_TARGET=analog-output-headphones PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-port-set" output speakers analog-output-headphones >/dev/null 2>&1; then
-  fail "no-op audio port command reported success"
-fi
-[[ $(<"$port_log") == $'set-sink-port 10 analog-output-headphones\nset-sink-port 10 analog-output-speaker' ]] ||
-  fail "no-op audio port rollback"
-
-: >"$port_log"
-if AUDIO_CONTROL_PORT_LOG="$port_log" \
-  AUDIO_CONTROL_PORT_SET_FAIL_AFTER_EFFECT_TARGET=analog-output-headphones \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-port-set" output speakers analog-output-headphones >/dev/null 2>&1; then
-  fail "late-failing audio port change reported success"
-fi
-[[ $(<"$port_log") == $'set-sink-port 10 analog-output-headphones\nset-sink-port 10 analog-output-speaker' ]] ||
-  fail "late-failing audio port rollback"
-
-: >"$port_log"
-if AUDIO_CONTROL_PORT_LOG="$port_log" \
-  AUDIO_CONTROL_PORT_SET_WRONG_TARGET=analog-output-headphones \
-  AUDIO_CONTROL_PORT_WRONG_ACTIVE=unexpected-port \
-  AUDIO_CONTROL_PORT_SET_NO_EFFECT_TARGET=analog-output-speaker PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-port-set" output speakers analog-output-headphones >/dev/null 2>&1; then
-  fail "unrecoverable audio port mismatch reported success"
-else
-  [[ $? == 4 ]] || fail "unrecoverable audio port mismatch reported wrong exit code"
-fi
-
-for ambiguous_port_fixture in duplicate-endpoint duplicate-port missing-object; do
-  : >"$port_log"
-  case "$ambiguous_port_fixture" in
-    duplicate-endpoint) port_environment=AUDIO_CONTROL_PORT_DUPLICATE_ENDPOINT=1 ;;
-    duplicate-port) port_environment=AUDIO_CONTROL_PORT_DUPLICATE_PORT=1 ;;
-    missing-object) port_environment=AUDIO_CONTROL_PORT_MISSING_OBJECT=1 ;;
-  esac
-  if env "$port_environment" AUDIO_CONTROL_PORT_LOG="$port_log" \
-    PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-port-set" \
-      output speakers analog-output-headphones >/dev/null 2>&1; then
-    fail "$ambiguous_port_fixture audio port identity accepted"
-  else
-    [[ $? == 1 ]] || fail "$ambiguous_port_fixture audio port identity exit code"
-  fi
-  [[ ! -s $port_log ]] || fail "$ambiguous_port_fixture changed an audio port"
-done
-
-: >"$port_log"
-if AUDIO_CONTROL_PORT_LOG="$port_log" AUDIO_CONTROL_PORT_REINDEX_AFTER_SET=1 \
-  AUDIO_CONTROL_PORT_SET_NO_EFFECT_TARGET=analog-output-headphones \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-port-set" \
-    output speakers analog-output-headphones >/dev/null 2>&1; then
-  fail "reindexed no-op audio port command reported success"
-fi
-[[ $(<"$port_log") == $'set-sink-port 10 analog-output-headphones\nset-sink-port 12 analog-output-speaker' ]] ||
-  fail "reindexed audio endpoint was not rolled back by object identity"
-
-: >"$port_log"
-if AUDIO_CONTROL_PORT_LOG="$port_log" AUDIO_CONTROL_PORT_ORIGINAL_GONE_AFTER_SET=1 \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-port-set" \
-    output speakers analog-output-headphones >/dev/null 2>&1; then
-  fail "vanished audio endpoint port change reported success"
-else
-  [[ $? == 4 ]] || fail "vanished audio endpoint port change exit code"
-fi
-[[ $(<"$port_log") == 'set-sink-port 10 analog-output-headphones' ]] ||
-  fail "replacement endpoint received the vanished endpoint rollback"
-echo "PASS: audio port controls"
-
 rules_dir=$(mktemp -d)
-trap 'rm -f "$route_log" "$input_default_log" "$port_log"; rm -rf "$rules_dir"' EXIT
+trap 'rm -f "$route_log" "$input_default_log"; rm -rf "$rules_dir"' EXIT
 
 rules_file="$rules_dir/audio-rules.json"
 export OMARCHY_AUDIO_RULES_FILE="$rules_file"
@@ -1901,7 +1804,7 @@ profile_log=$(mktemp)
 profile_state=$(mktemp)
 profile_identity_fixture=$(mktemp)
 profile_endpoint_read_state=$(mktemp)
-trap 'rm -f "$route_log" "$input_default_log" "$port_log" "$profile_log" "$profile_state" "$profile_identity_fixture" "$profile_endpoint_read_state"' EXIT
+trap 'rm -f "$route_log" "$input_default_log" "$profile_log" "$profile_state" "$profile_identity_fixture" "$profile_endpoint_read_state"' EXIT
 printf 'old\n' >"$profile_state"
 
 for ambiguous_card_identity in duplicate-name duplicate-index duplicate-object invalid-index; do
@@ -2227,7 +2130,7 @@ echo "PASS: profile endpoint replacement safety"
 
 menu_tmp=$(mktemp -d)
 menu_file="$menu_tmp/omarchy-menu.jsonc"
-trap 'rm -f "$route_log" "$route_read_state" "$output_default_log" "$input_default_log" "$shared_preferences" "$shared_preferences_lock" "$shared_preferences_output_lock" "$shared_preferences_input_lock" "$port_log" "$profile_log" "$profile_state" "$profile_identity_fixture" "$profile_endpoint_read_state"; rm -rf "$menu_tmp"' EXIT
+trap 'rm -f "$route_log" "$route_read_state" "$output_default_log" "$input_default_log" "$shared_preferences" "$shared_preferences_lock" "$shared_preferences_output_lock" "$shared_preferences_input_lock" "$profile_log" "$profile_state" "$profile_identity_fixture" "$profile_endpoint_read_state"; rm -rf "$menu_tmp"' EXIT
 cat >"$menu_file" <<'EOF'
 {
   // Existing customization

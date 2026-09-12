@@ -42,6 +42,10 @@ impl OwnedDevice {
             .change_mask()
             .contains(pw::device::DeviceChangeMask::PARAMS)
         {
+            snapshot.route_writable = info.params().iter().any(|p| {
+                p.id() == spa::param::ParamType::Route
+                    && p.flags().bits() & spa::sys::SPA_PARAM_INFO_WRITE != 0
+            });
             for id in PARAMS {
                 let flags = info
                     .params()
@@ -99,6 +103,7 @@ impl OwnedDevice {
             }
             if param == spa::sys::SPA_PARAM_Route {
                 snapshot.routes = std::mem::take(&mut self.routes);
+                snapshot.route_revision = snapshot.route_revision.wrapping_add(1);
             }
         }
         if changed {

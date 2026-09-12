@@ -20,6 +20,7 @@ pub mod catalog;
 mod device;
 use device::{OwnedDevice, refresh};
 pub mod metadata;
+mod ports;
 use audio::{patch_pod, read_audio, route_for};
 
 type Properties = BTreeMap<String, String>;
@@ -51,6 +52,10 @@ pub struct Device {
     param_request: Option<i32>,
     #[serde(skip)]
     catalog: Arc<catalog::Catalog>,
+    #[serde(skip)]
+    route_writable: bool,
+    #[serde(skip)]
+    route_revision: u64,
     pub catalog_ready: bool,
     pub id: u32,
     pub revision: u64,
@@ -113,6 +118,7 @@ struct Completion {
 enum Message {
     Patch(Command),
     Metadata(metadata::Command),
+    Port(ports::Command),
     Stop,
 }
 type SenderSlot = Arc<Mutex<Option<pw::channel::Sender<Message>>>>;
@@ -675,6 +681,25 @@ fn session(
             Message::Metadata(command) => {
                 let result = command
                     .batch
+                    .apply(&graph.borrow(), &proxies.borrow())
+                    .and_then(|()| {
+                        core.upgrade()
+                            .ok_or_else(|| Failure::unknown("Audio server disconnected"))?
+                            .sync(0)
+                            .map_err(|_| Failure::unknown("Audio server disconnected"))
+                    });
+                match result {
+                    Ok(seq) => {
+                        pending.borrow_mut().insert(seq.raw(), command.completion);
+                    }
+                    Err(error) => {
+                        let _ = command.completion.reply.send(Err(error));
+                    }
+                }
+            }
+            Message::Port(command) => {
+                let result = command
+                    .change
                     .apply(&graph.borrow(), &proxies.borrow())
                     .and_then(|()| {
                         core.upgrade()

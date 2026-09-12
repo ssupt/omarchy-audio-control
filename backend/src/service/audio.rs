@@ -21,6 +21,26 @@ struct NodeLevel {
     muted: Option<bool>,
 }
 impl Service {
+    pub(super) async fn port_request(&self, request: &Request) -> Result<Value> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Set {
+            identity: Identity,
+            port: String,
+        }
+        let params = request.params::<Set>()?;
+        let native = self
+            .native
+            .as_ref()
+            .ok_or_else(|| Failure::new("disconnected", "Native audio is unavailable"))?;
+        let _transaction = self.transaction().await?;
+        let _external_lock = FileLock::mutation().await?;
+        self.set_busy_for(true, "port.set");
+        let _busy = Busy(self);
+        native.select_port(params.identity, &params.port).await?;
+        Ok(json!({"outcome":"applied"}))
+    }
+
     pub(super) async fn audio_request(&self, request: &Request) -> Result<Value> {
         let native = self
             .native

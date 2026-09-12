@@ -40,7 +40,6 @@ impl Call {
                 (0, 0)
             }
             "audio-profile-set" => (2, 2),
-            "audio-port-set" => (3, 3),
             "audio-output-set-default" | "audio-input-set-default" => (2, 4),
             "audio-stream-route-set" => (3, 4),
             "audio-output-groups" => (1, 4),

@@ -178,14 +178,26 @@ pub async fn apply(
             }
             let change: Result<i32> = if domain == "devices" {
                 device(native, step, overdrive).await
+            } else if domain == "ports" {
+                let graph = native.snapshot();
+                if let Some(node) = resolve(&graph, text(step, "direction"), name) {
+                    native
+                        .select_port(identity(&graph, node), text(step, "value"))
+                        .await
+                        .map(|()| 0)
+                        .or_else(|error| {
+                            if error.code == "unavailable" {
+                                Ok(3)
+                            } else {
+                                Err(error)
+                            }
+                        })
+                } else {
+                    Ok(3)
+                }
             } else {
                 let args = match domain {
                     "profiles" => vec![name.into(), text(step, "profile").into()],
-                    "ports" => vec![
-                        text(step, "direction").into(),
-                        name.into(),
-                        text(step, "value").into(),
-                    ],
                     _ => {
                         let graph = native.snapshot();
                         if let Some(node) = resolve(&graph, text(step, "direction"), name) {
@@ -198,7 +210,6 @@ pub async fn apply(
                 };
                 let helper = match domain {
                     "profiles" => "audio-profile-set",
-                    "ports" => "audio-port-set",
                     _ if text(step, "direction") == "input" => "audio-input-set-default",
                     _ => "audio-output-set-default",
                 };

@@ -1,5 +1,5 @@
 //! Device profiles and endpoint ports derived from SPA parameters.
-use super::Graph;
+use super::{Device, Graph, Node};
 use crate::storage::{identifier, label};
 use pipewire::spa::{
     self,
@@ -28,9 +28,9 @@ struct Profile {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Port {
-    index: i32,
-    name: String,
+pub(super) struct Port {
+    pub index: i32,
+    pub name: String,
     label: String,
     direction: u32,
     priority: i32,
@@ -94,6 +94,10 @@ pub(super) fn object(pod: &spa::pod::Pod) -> Option<Object> {
 }
 
 impl Catalog {
+    pub(super) fn profile(&self) -> Option<i32> {
+        self.active_profile.values().next().copied()
+    }
+
     pub fn clear(&mut self, param: u32) {
         match param {
             spa::sys::SPA_PARAM_EnumProfile => self.profiles.clear(),
@@ -226,6 +230,90 @@ pub fn ready(graph: &Graph) -> bool {
     graph.ready && graph.devices.values().all(|d| d.catalog_ready)
 }
 
+pub(super) struct Endpoint<'a> {
+    pub device: &'a Device,
+    pub profile_device: i32,
+    pub direction: &'static str,
+    pub active: Option<&'a Port>,
+    pub choices: Vec<&'a Port>,
+}
+
+pub(super) fn endpoint<'a>(graph: &'a Graph, node: &Node) -> Option<Endpoint<'a>> {
+    let device = graph
+        .devices
+        .get(&node.properties.get("device.id")?.parse::<u32>().ok()?)?;
+    let catalog = &device.catalog;
+    if catalog.active_profile.len() > 1 {
+        return None;
+    }
+    let direction = match node.properties.get("media.class").map(String::as_str) {
+        Some("Audio/Sink") => "output",
+        Some("Audio/Source")
+            if !node.name.ends_with(".monitor")
+                && node
+                    .properties
+                    .get("device.class")
+                    .is_none_or(|v| !v.eq_ignore_ascii_case("monitor")) =>
+        {
+            "input"
+        }
+        _ => return None,
+    };
+    if identifier(&json!(node.name), 160).is_empty()
+        || graph.nodes.values().filter(|n| n.name == node.name).count() != 1
+    {
+        return None;
+    }
+    let profile_device = node
+        .properties
+        .get("card.profile.device")?
+        .parse::<i32>()
+        .ok()
+        .filter(|v| *v >= 0)?;
+    let mut active_routes = catalog
+        .active_routes
+        .values()
+        .filter(|(_, d)| *d == profile_device);
+    let active_route = active_routes.next().map(|(r, _)| *r);
+    if active_routes.next().is_some() {
+        return None;
+    }
+    let mut choices: Vec<_> = catalog
+        .ports
+        .values()
+        .filter(|p| {
+            p.direction
+                == if direction == "output" {
+                    spa::sys::SPA_DIRECTION_OUTPUT
+                } else {
+                    spa::sys::SPA_DIRECTION_INPUT
+                }
+                && p.devices.contains(&profile_device)
+                && (p.available || Some(p.index) == active_route)
+        })
+        .collect();
+    choices.sort_by_key(|p| std::cmp::Reverse(p.priority));
+    let mut seen = BTreeSet::new();
+    let mut route_ids = BTreeSet::new();
+    if choices
+        .iter()
+        .any(|p| !seen.insert(&p.name) || !route_ids.insert(p.index))
+    {
+        return None;
+    }
+    let active = choices
+        .iter()
+        .find(|p| Some(p.index) == active_route)
+        .copied();
+    Some(Endpoint {
+        device,
+        profile_device,
+        direction,
+        active,
+        choices,
+    })
+}
+
 pub fn snapshot(graph: &Graph) -> (Json, Json) {
     let mut cards = vec![];
     let mut ports = vec![];
@@ -315,70 +403,16 @@ pub fn snapshot(graph: &Graph) -> (Json, Json) {
             {
                 continue;
             }
-            let direction = match node.properties.get("media.class").map(String::as_str) {
-                Some("Audio/Sink") => "output",
-                Some("Audio/Source")
-                    if !node.name.ends_with(".monitor")
-                        && node
-                            .properties
-                            .get("device.class")
-                            .is_none_or(|v| !v.eq_ignore_ascii_case("monitor")) =>
-                {
-                    "input"
-                }
-                _ => continue,
-            };
-            if identifier(&json!(node.name), 160).is_empty()
-                || graph.nodes.values().filter(|n| n.name == node.name).count() != 1
-            {
-                continue;
-            }
-            let Some(profile_device) = node
-                .properties
-                .get("card.profile.device")
-                .and_then(|v| v.parse::<i32>().ok())
-            else {
+            let Some(endpoint) = endpoint(graph, node) else {
                 continue;
             };
-            let mut active_routes = catalog
-                .active_routes
-                .values()
-                .filter(|(_, d)| *d == profile_device);
-            let active_route = active_routes.next().map(|(r, _)| *r);
-            if active_routes.next().is_some() {
-                continue;
-            }
-            let mut choices: Vec<_> = catalog
-                .ports
-                .values()
-                .filter(|p| {
-                    p.direction
-                        == if direction == "output" {
-                            spa::sys::SPA_DIRECTION_OUTPUT
-                        } else {
-                            spa::sys::SPA_DIRECTION_INPUT
-                        }
-                        && p.devices.contains(&profile_device)
-                        && (p.available || Some(p.index) == active_route)
-                })
-                .collect();
-            choices.sort_by_key(|p| std::cmp::Reverse(p.priority));
-            let mut seen = BTreeSet::new();
-            let mut route_ids = BTreeSet::new();
-            if choices
-                .iter()
-                .any(|p| !seen.insert(&p.name) || !route_ids.insert(p.index))
-            {
-                continue;
-            }
-            let active_port = choices
-                .iter()
-                .find(|p| Some(p.index) == active_route)
-                .map(|p| p.name.as_str())
-                .unwrap_or("");
+            let direction = endpoint.direction;
+            let choices = &endpoint.choices;
+            let active_port = endpoint.active.map(|p| p.name.as_str()).unwrap_or("");
             if choices.len() > 1 {
                 let description = label(&json!(node.properties.get("node.description")), 160);
                 ports.push(json!({"direction":direction,"endpoint":node.name,
+                    "identity":{"generation":graph.generation,"id":node.id,"serial":node.serial},
                     "label":if description.is_empty() {&node.name} else {&description},"activePort":active_port,
                     "ports":choices.iter().take(64).map(|p| json!({"value":p.name,"label":p.label})).collect::<Vec<_>>()}));
             }

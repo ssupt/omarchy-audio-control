@@ -91,14 +91,14 @@ The service serializes changes and checks device identities so queued commands
 cannot target a replacement device after a disconnect. It starts with the plugin
 and exits after its clients leave and accepted work finishes.
 
-**The Bash migration is incomplete.** Profile and port changes, default-device
-changes, application routing, output groups and diagnostic collection still use helper
+**The Bash migration is incomplete.** Profile changes, default-device changes,
+application routing, output groups and diagnostic collection still use helper
 adapters. Rust coordinates those operations. Desktop actions such as speaker
 tests, support-report copying and recovery also use helpers.
 
-Graph and settings updates use events. Device profiles, ports and WirePlumber
-policies use the existing PipeWire connection. Visible
-diagnostic views share cached samples. The
+Graph and settings updates use events. Profile and port discovery, port selection,
+and WirePlumber policies use the existing PipeWire connection. Visible diagnostic
+views share cached samples. The
 [benchmark harness](test/integration/benchmark.py) measures CPU,
 memory and helper launches; the Rust preview reduced polling CPU in local tests,
 but used more memory than 0.8.0.

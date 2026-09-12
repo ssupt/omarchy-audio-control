@@ -24,6 +24,11 @@ struct fixture {
     int pending;
     bool routes_hidden;
     bool catalog_changed;
+    int active_ports[2];
+    int pending_port;
+    bool suppress_report;
+    const char *control;
+    unsigned port_requests;
     float pending_volumes[2];
     bool pending_mute;
     struct pw_proxy *nodes[2];
@@ -113,7 +118,7 @@ static int enum_params(void *object, int seq, uint32_t id, uint32_t start,
         struct spa_pod_frame route, props;
         spa_pod_builder_push_object(&b, &route, SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_Route);
         spa_pod_builder_add(&b,
-            SPA_PARAM_ROUTE_index, SPA_POD_Int(i ? 7 : f->catalog_changed ? 3 : 2),
+            SPA_PARAM_ROUTE_index, SPA_POD_Int(f->active_ports[i]),
             SPA_PARAM_ROUTE_device, SPA_POD_Int(i ? 0 : 4),
             SPA_PARAM_ROUTE_direction, SPA_POD_Id(i ? SPA_DIRECTION_INPUT : SPA_DIRECTION_OUTPUT), 0);
         spa_pod_builder_prop(&b, SPA_PARAM_ROUTE_props, 0);
@@ -139,7 +144,9 @@ static void apply(void *data, uint64_t expirations) {
     if (i < 0) return;
     memcpy(f->volumes[i], f->pending_volumes, sizeof(f->pending_volumes));
     f->muted[i] = f->pending_mute;
+    f->active_ports[i] = f->pending_port;
     f->pending = -1;
+    if (f->suppress_report) { f->suppress_report = false; return; }
     f->params[0].flags ^= SPA_PARAM_INFO_SERIAL;
     info(f);
 }
@@ -153,13 +160,24 @@ static int set_param(void *object, uint32_t id, uint32_t flags, const struct spa
         SPA_TYPE_OBJECT_ParamRoute, NULL,
         SPA_PARAM_ROUTE_index, SPA_POD_Int(&index),
         SPA_PARAM_ROUTE_device, SPA_POD_Int(&device),
-        SPA_PARAM_ROUTE_props, SPA_POD_Pod(&props),
+        SPA_PARAM_ROUTE_props, SPA_POD_OPT_Pod(&props),
         SPA_PARAM_ROUTE_save, SPA_POD_Bool(&save)) < 0) return -EINVAL;
-    int i = index == (f->catalog_changed ? 3 : 2) && device == 4 ? 0 : index == 7 && device == 0 ? 1 : -1;
+    int i = (index == 2 || index == 3) && device == 4 ? 0 : (index == 7 || index == 8) && device == 0 ? 1 : -1;
     if (i < 0 || !save || f->pending >= 0) return -EINVAL;
+    if (!props) {
+        char mode[32] = "";
+        FILE *control = f->control ? fopen(f->control, "r") : NULL;
+        if (control) { assert(fgets(mode, sizeof(mode), control)); fclose(control); }
+        printf("PORT %d %d\n", device, index);
+        fflush(stdout);
+        if (strcmp(mode, "ignore") == 0) return 0;
+        if (strcmp(mode, "silent") == 0) f->suppress_report = true;
+        if (strcmp(mode, "silent-once") == 0 && f->port_requests++ == 0) f->suppress_report = true;
+    }
+    f->pending_port = index;
     f->pending_mute = f->muted[i];
     memcpy(f->pending_volumes, f->volumes[i], sizeof(f->pending_volumes));
-    if (spa_pod_parse_object(props, SPA_TYPE_OBJECT_Props, NULL,
+    if (props && spa_pod_parse_object(props, SPA_TYPE_OBJECT_Props, NULL,
         SPA_PROP_channelVolumes, SPA_POD_OPT_Pod(&volumes),
         SPA_PROP_mute, SPA_POD_OPT_Bool(&f->pending_mute)) < 0) return -EINVAL;
     if (volumes && spa_pod_copy_array(volumes, SPA_TYPE_Float,
@@ -209,6 +227,7 @@ static void toggle_routes(void *data, int signal) {
 static void toggle_catalog(void *data, int signal) {
     struct fixture *f = data;
     f->catalog_changed = !f->catalog_changed;
+    f->active_ports[0] = f->catalog_changed ? 3 : 2;
     for (unsigned i = 0; i < 4; i++) f->params[i].flags ^= SPA_PARAM_INFO_SERIAL;
     info(f);
 }
@@ -219,7 +238,8 @@ static void quit(void *data, int signal) {
 
 int main(int argc, char **argv) {
     pw_init(&argc, &argv);
-    struct fixture f = { .pending = -1, .volumes = {{.008f, .027f}, {.064f, .125f}} };
+    struct fixture f = { .pending = -1, .active_ports = {2, 7},
+        .volumes = {{.008f, .027f}, {.064f, .125f}}, .control = argc > 1 ? argv[1] : NULL };
     uint32_t ids[] = {SPA_PARAM_Route, SPA_PARAM_EnumProfile, SPA_PARAM_Profile, SPA_PARAM_EnumRoute};
     for (unsigned i = 0; i < 4; i++) f.params[i] = (struct spa_param_info) {
         .id = ids[i], .flags = i ? SPA_PARAM_INFO_READ : SPA_PARAM_INFO_READWRITE };

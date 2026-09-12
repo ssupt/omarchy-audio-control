@@ -211,8 +211,35 @@ Item {
       case 14:
         if (root.policy.busy || root.advanced.bluetoothProfilePreference !== "latency") return
         if (!root.check(!root.policy.error, "Bluetooth policy write failed")) return
+        if (root.advanced.audioMutationBusy) return
+        var port = root.advanced.audioPorts.find(function(p) { return p.direction === "output" })
+        if (!root.check(port && port.identity, "port identity did not reach the control")) return
+        root.advanced.setAudioPort(port, "[Out] Headphones")
+        if (!root.check(root.advanced.portSetPending, "port request did not guard duplicate changes")) return
+        root.phase++
+        break
+      case 15:
+        if (root.advanced.audioMutationBusy) return
+        if (!root.check(!root.advanced.portSetError, "native port selection failed")) return
+        var output = root.advanced.audioPorts.find(function(p) { return p.direction === "output" })
+        if (!output || output.activePort !== "[Out] Headphones") return
+        root.advanced.setAudioPort(output, "[Out] Speaker")
+        root.phase++
+        break
+      case 16:
+        if (root.advanced.audioMutationBusy) return
+        var original = root.advanced.audioPorts.find(function(p) { return p.direction === "output" })
+        if (!original || original.activePort !== "[Out] Speaker") return
+        if (!root.check(!root.advanced.portSetError, "original port was not restored")) return
+        root.advanced.setAudioPort(original, "missing-port")
+        root.phase++
+        break
+      case 17:
+        if (root.advanced.audioMutationBusy) return
+        if (!root.check(!!root.advanced.portSetError && !root.advanced.portSetPending,
+            "rejected port selection left the control blocked or hid its error")) return
         root.done = true
-        console.log("RUNTIME_UI_SUCCESS volume, tabs, shared scenes, canceled pointer drag and native policies")
+        console.log("RUNTIME_UI_SUCCESS volume, tabs, shared scenes, canceled pointer drag, native policies and port selection")
       }
     }
   }

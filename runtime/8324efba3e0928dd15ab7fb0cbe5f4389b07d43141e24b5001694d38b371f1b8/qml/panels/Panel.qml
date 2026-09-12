@@ -63,7 +63,8 @@ Panel {
   readonly property var appLibrary: bar && bar.shell ? bar.shell.appLibrary : null
   readonly property var mediaService: bar && bar.shell
     ? bar.shell.firstPartyServiceFor("omarchy.media") : null
-  readonly property var activeMediaPlayer: mediaService ? mediaService.activePlayer : null
+  readonly property var activeMediaPlayer: mediaService && mediaService.activePlayer
+    ? mediaService.activePlayer : Model.pickActiveMprisPlayer(mprisPlayers, candidateStreams)
   readonly property var audioPreferences: audioService && audioService.stores.preferences ? audioService.stores.preferences : Model.parseAudioPreferences("")
   readonly property bool audioPreferencesLoaded: !!audioService && audioService.ready && !!audioService.stores.preferences
   readonly property bool outputOverdrive: !!audioService && !!audioService.stores.settings && audioService.stores.settings.outputOverdrive === true
