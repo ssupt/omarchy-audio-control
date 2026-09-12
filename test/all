@@ -679,6 +679,26 @@ assert.equal(model.uniqueRecordingStreamLabels(Array.from({ length: 600 }, (_, i
   properties: { 'application.name': 'Recorder ' + index }
 }))).length, 512)
 assert.deepEqual(model.addedRecordingStreamLabels([], ['Recorder', 'recorder']), ['Recorder'])
+// A paused player's surviving stream must beat an unrelated idle player.
+const idleBrowser = { identity: 'Firefox', canControl: true }
+const pausedMusic = { identity: 'Spotify', canControl: true }
+const playingBrowser = { identity: 'Firefox', isPlaying: true, canControl: true }
+const playingMusic = { identity: 'Spotify', isPlaying: true, canControl: true }
+const musicStream = { ready: true, properties: { 'application.name': 'Spotify' } }
+const browserStream = { ready: true, properties: { 'application.name': 'Firefox' } }
+const proxyMusic = { identity: 'Spotify', dbusName: 'org.mpris.MediaPlayer2.playerctld', canControl: true }
+assert.equal(model.pickActiveMprisPlayer([idleBrowser, pausedMusic], [musicStream]), pausedMusic)
+assert.equal(model.pickActiveMprisPlayer([proxyMusic, pausedMusic], [musicStream]), pausedMusic)
+assert.equal(model.pickActiveMprisPlayer([idleBrowser, proxyMusic], [musicStream]), proxyMusic)
+assert.equal(model.pickActiveMprisPlayer([pausedMusic, playingBrowser], [musicStream]), playingBrowser)
+assert.equal(model.pickActiveMprisPlayer([playingBrowser, playingMusic], [musicStream]), playingMusic)
+assert.equal(model.pickActiveMprisPlayer([playingBrowser, playingMusic], [browserStream, musicStream]), playingBrowser)
+assert.equal(model.pickActiveMprisPlayer([idleBrowser, pausedMusic], []), idleBrowser)
+assert.equal(model.pickActiveMprisPlayer([], []), null)
+assert.equal(model.pickActiveMprisPlayer({ 0: idleBrowser, 1: pausedMusic, length: 2 },
+  { 0: musicStream, length: 1 }), pausedMusic)
+// Selection identifies a player's stream; it does not imply audible playback.
+assert.equal(model.streamRepresentsPlayer(musicStream, pausedMusic, [pausedMusic], [musicStream]), true)
 const lateMprisPlayers = Array.from({ length: 257 }, () => null)
 lateMprisPlayers[256] = { identity: 'Late Player', isPlaying: true, canPlay: true }
 assert.equal(model.mprisLabelsFor(lateMprisPlayers, () => true), '')
@@ -732,6 +752,8 @@ assert.equal(model.parseAudioDiagnostics('not json').valid, false)
 console.log('PASS: profile and routing model')
 JS
 
+plugin_version=$(jq -er '.version | strings | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$ROOT/manifest.json") ||
+  fail "manifest version"
 diagnostics_fixture="$TEST_DIR/fixtures/diagnostics"
 diagnostics_snapshot=$(
   AUDIO_CONTROL_DIAGNOSTICS_FIXTURE_DIR="$diagnostics_fixture" \
@@ -741,9 +763,9 @@ diagnostics_snapshot=$(
   AUDIO_CONTROL_CLIPBOARD_COMMAND=wl-copy \
   PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-diagnostics" snapshot
 )
-jq -e '
+jq -e --arg plugin_version "$plugin_version" '
   .healthy == false
-  and .versions == {"plugin":"0.8.0","pipewire":"1.6.8","wireplumber":"0.5.15"}
+  and .versions == {"plugin":$plugin_version,"pipewire":"1.6.8","wireplumber":"0.5.15"}
   and .graph.rate == 48000
   and .graph.quantum == 256
   and .graph.latencyMs == 5.3
@@ -777,7 +799,7 @@ support_report=$(
 )
 grep -q '^  playback: Browser -> Output Filter -> Wireless Headphones$' <<<"$support_report" ||
   fail "support report active route"
-grep -q '^  Advanced Audio Control: 0.8.0$' <<<"$support_report" ||
+grep -Fqx "  Advanced Audio Control: $plugin_version" <<<"$support_report" ||
   fail "support report plugin version"
 grep -q '^  Peak DSP load: 5%$' <<<"$support_report" || fail "support report DSP load"
 ! grep -q 'bluez_output.test\|alsa_input.usb-microphone' <<<"$support_report" ||
@@ -2819,7 +2841,7 @@ echo "PASS: menu integration"
 jq -e '
   .schemaVersion == 1
   and .id == "ssupt.audio-control"
-  and .version == "0.8.0"
+  and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
   and .author == "ssupt"
   and (.kinds | index("bar-widget") != null)
   and (.kinds | index("panel") != null)

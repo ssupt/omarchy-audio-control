@@ -1714,18 +1714,16 @@ function audioScenePlan(scene) {
   return steps
 }
 
-// Mirrors the first-party omarchy.media selection for hosts where the media
-// service object is not reachable (Omarchy 4.0.3 capability scoping answers
-// null for firstPartyServiceFor): the first player in list order that is
-// playing and owns a matched playback stream, then any playing player, then
-// a controllable one. The host's hand-picked source preference cannot be
-// seen from here, so when the user pinned a source in the media widget this
-// fallback may pick a different-but-reasonable player.
+// Scoped hosts may hide the media service. Prefer playing players, then paused
+// players with a matching stream, then controllable players. Within each tier,
+// prefer real players over proxies and keep list order. The host's pinned source
+// and playback-start history are unavailable, so this is a fallback heuristic.
 function pickActiveMprisPlayer(players, streams) {
   var values = players && typeof players.length === "number" ? players : []
   var nodes = streams && typeof streams.length === "number" ? streams : []
   var matched = null, matchedProxy = null
   var playing = null, playingProxy = null
+  var paused = null, pausedProxy = null
   var controllable = null, controllableProxy = null
   for (var i = 0; i < values.length && i < 256; i++) {
     var player = values[i]
@@ -1755,13 +1753,16 @@ function pickActiveMprisPlayer(players, streams) {
         if (!proxy && !playing) playing = player
         else if (proxy && !playingProxy) playingProxy = player
       }
+    } else if (hasStream) {
+      if (!proxy && !paused) paused = player
+      else if (proxy && !pausedProxy) pausedProxy = player
     } else if (canControl) {
       if (!proxy && !controllable) controllable = player
       else if (proxy && !controllableProxy) controllableProxy = player
     }
   }
   return matched || matchedProxy || playing || playingProxy
-    || controllable || controllableProxy || null
+    || paused || pausedProxy || controllable || controllableProxy || null
 }
 
 function streamRepresentsPlayer(node, player, players, streams) {
