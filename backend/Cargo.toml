@@ -1,0 +1,20 @@
+[package]
+name = "omarchy-audio-service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Rust control service for Advanced Audio Control"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[dependencies]
+libc = "0.2"
+pipewire = "0.10.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.149", features = ["preserve_order"] }
+tempfile = "3.27"
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "sync", "time", "signal", "process"] }

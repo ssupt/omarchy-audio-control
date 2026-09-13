@@ -5,6 +5,15 @@ set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 TEST_DIR="$ROOT/test"
 
+if [[ ${AUDIO_TEST_ISOLATED:-} != 1 ]]; then
+  suite_runtime=$(mktemp -d /tmp/omarchy-audio-suite.XXXXXXXX)
+  trap 'rm -rf -- "$suite_runtime"' EXIT
+  mkdir -m 700 -- "$suite_runtime/runtime"
+  TMPDIR="$suite_runtime" AUDIO_CONTROL_PRIVATE_RUNTIME_DIR="$suite_runtime/runtime" \
+    AUDIO_TEST_ISOLATED=1 "$0" "$@"
+  exit $?
+fi
+
 fail() {
   echo "FAIL: $*" >&2
   exit 1
@@ -15,6 +24,15 @@ for script in "$ROOT"/scripts/*; do
 done
 bash -n "$ROOT/scripts/.audio-common" || fail "bash syntax: .audio-common"
 echo "PASS: helper syntax"
+
+cargo fmt --manifest-path "$ROOT/backend/Cargo.toml" --check ||
+  fail "Rust formatting"
+cargo test --manifest-path "$ROOT/backend/Cargo.toml" --locked ||
+  fail "Rust backend tests"
+cargo clippy --manifest-path "$ROOT/backend/Cargo.toml" --locked --all-targets \
+  -- -D warnings || fail "Rust backend lints"
+echo "PASS: Rust backend"
+node "$TEST_DIR/protocol.js" || fail "QML service protocol"
 
 runtime_safety_dir=$(mktemp -d)
 runtime_private="$runtime_safety_dir/private"
@@ -63,9 +81,8 @@ else
   [[ $? != 124 ]] || fail "hard-linked runtime lock blocked"
 fi
 
-# A symlinked config directory (e.g. a dotfiles-managed ~/.config/omarchy)
-# must still be usable as a lock directory once it resolves to a real,
-# safely-permissioned directory the user owns.
+# PR #14: dotfiles-managed configuration directories may be symlinks; validate
+# their resolved permissions without relaxing the checks on lock files.
 symlinked_lock_target="$runtime_safety_dir/real-config"
 mkdir -m 755 -- "$symlinked_lock_target"
 symlinked_lock_dir="$runtime_safety_dir/linked-config"
@@ -75,14 +92,9 @@ bash -c 'source "$1"; audio_open_lock_path "$2/lock" 9' _ \
   fail "symlinked but safe lock directory rejected"
 [[ -f $symlinked_lock_target/lock ]] ||
   fail "symlinked lock directory did not resolve to its real target"
-
-# A symlink to a non-sticky, world-writable directory must still be rejected.
-unsafe_lock_target="$runtime_safety_dir/unsafe-config"
-mkdir -m 777 -- "$unsafe_lock_target"
-unsafe_lock_dir="$runtime_safety_dir/linked-unsafe-config"
-ln -s -- "$unsafe_lock_target" "$unsafe_lock_dir"
+chmod 777 -- "$symlinked_lock_target"
 if bash -c 'source "$1"; audio_open_lock_path "$2/lock" 9' _ \
-  "$ROOT/scripts/.audio-common" "$unsafe_lock_dir" >/dev/null 2>&1; then
+  "$ROOT/scripts/.audio-common" "$symlinked_lock_dir" >/dev/null 2>&1; then
   fail "symlink to a world-writable directory accepted"
 fi
 
@@ -130,11 +142,8 @@ fi
 rm -rf -- "$runtime_safety_dir"
 
 for helper_call in \
-  'audio-profiles extra' \
-  'audio-ports extra' \
   'audio-resolve-output-sink extra' \
   'audio-sink-availability extra' \
-  'audio-stream-routes extra' \
   'audio-speaker-test output extra' \
   'audio-recovery extra' \
   'prepare-advanced-window extra' \
@@ -148,7 +157,10 @@ done
 echo "PASS: private runtime and strict helper interfaces"
 
 if command -v qmllint >/dev/null 2>&1; then
-  qmllint "$ROOT"/*.qml || fail "QML lint"
+  (
+    shopt -s globstar
+    qmllint "$ROOT"/qml/**/*.qml
+  ) || fail "QML lint"
   echo "PASS: QML lint"
 fi
 
@@ -157,24 +169,24 @@ fi
 # delegates may resolve the panel snapshot by a stable integer index instead.
 for live_model in displayAudioSinks displayAudioSources \
     displayAudioStreams displayRecordingStreams; do
-  grep -q "model: root\\.${live_model}\\.length$" "$ROOT/Panel.qml" ||
+  grep -q "model: root\\.${live_model}\\.length$" "$ROOT/qml/panels/Panel.qml" ||
     fail "safe numeric Repeater model: $live_model"
-  if grep -q "model: root\\.${live_model}$" "$ROOT/Panel.qml"; then
+  if grep -q "model: root\\.${live_model}$" "$ROOT/qml/panels/Panel.qml"; then
     fail "native PipeWire objects used directly as Repeater rows: $live_model"
   fi
 done
-grep -q 'model: root\.memberLevels\.length$' "$ROOT/AudioOutputGroupRow.qml" ||
+grep -q 'model: root\.memberLevels\.length$' "$ROOT/qml/routing/AudioOutputGroupRow.qml" ||
   fail "safe numeric output-group member level model"
-if grep -q 'model: root\.memberLevels$' "$ROOT/AudioOutputGroupRow.qml"; then
+if grep -q 'model: root\.memberLevels$' "$ROOT/qml/routing/AudioOutputGroupRow.qml"; then
   fail "native PipeWire group members used directly as Repeater rows"
 fi
 echo "PASS: unplug-safe PipeWire delegate models"
 
-node - "$ROOT/Model.js" <<'JS'
+node - "$ROOT/qml/core/Model.js" <<'JS'
 const assert = require('node:assert/strict')
 const model = require(process.argv[2])
 
-const cards = model.parseAudioProfiles(JSON.stringify([{
+const cards = [{
   name: 'bluez_card.test',
   label: 'Headphones',
   bluetooth: true,
@@ -183,7 +195,7 @@ const cards = model.parseAudioProfiles(JSON.stringify([{
     { value: 'a2dp-aac', label: 'High Fidelity Playback (codec AAC)', sinks: 1, sources: 0 },
     { value: 'headset-msbc', label: 'Headset Head Unit (codec mSBC)', sinks: 1, sources: 1 }
   ]
-}]))
+}]
 
 assert.deepEqual(model.parseAudioControlSettings('{"outputOverdrive":true}'), {
   version: 1,
@@ -290,20 +302,6 @@ assert.deepEqual(sanitizedScene.ports, [
 assert.deepEqual(model.audioScenePlan(sanitizedScene).map(step => step.kind), [
   'profile', 'settle', 'port', 'device', 'default'
 ])
-assert.deepEqual(model.parseAudioPolicySettings(JSON.stringify({
-  'node.features.audio.mono': true,
-  'linking.pause-playback': 'true',
-  'device.routes.default-sink-volume': 0.4,
-  'device.routes.default-source-volume': 2,
-  'unknown.setting': false
-})), {
-  valid: true,
-  values: {
-    'node.features.audio.mono': true,
-    'device.routes.default-sink-volume': 0.4
-  }
-})
-assert.deepEqual(model.parseAudioPolicySettings('not json'), { valid: false, values: {} })
 const audioPreferences = model.parseAudioPreferences(JSON.stringify({
   defaults: { output: 'headphones', input: 'headset-microphone' },
   bluetoothProfiles: { '00:11:22:33:44:55': 'a2dp-aac' }
@@ -380,14 +378,6 @@ assert.equal(model.outputVolumeName(1.25, false), 'Concert hall')
 assert.equal(model.outputVolumeName(1.26, false), 'Overdrive')
 assert.equal(model.outputVolumeName(NaN, false), 'Silenced')
 assert.equal(model.outputVolumeName(Infinity, false), 'Silenced')
-assert.deepEqual(model.parseAudioPorts(JSON.stringify([{
-  direction: 'output', endpoint: 'speakers', label: 'Built-in Audio', activePort: 'speaker',
-  ports: [{ value: 'speaker', label: 'Speakers' }, { value: 'headphones', label: 'Headphones' }]
-}])), [{
-  direction: 'output', endpoint: 'speakers', label: 'Built-in Audio', activePort: 'speaker',
-  ports: [{ value: 'speaker', label: 'Speakers' }, { value: 'headphones', label: 'Headphones' }]
-}])
-
 assert.equal(cards.length, 1)
 assert.equal(model.hasBluetoothCards(cards), true)
 assert.deepEqual(model.audioCardsByBluetooth(cards, true).map(card => card.label), ['Headphones'])
@@ -718,22 +708,7 @@ const prototypeAvailability = model.parseSinkAvailability('__proto__\t0\nconstru
 assert.equal(model.mapValue(prototypeAvailability, '__proto__', true), false)
 assert.equal(model.mapValue(prototypeAvailability, 'constructor', true), false)
 assert.equal(model.parseSinkAvailability('duplicate\t1\nduplicate\t0\n').duplicate, false)
-assert.deepEqual(model.parseAudioStreamRoutes(JSON.stringify({
-  playback: { 300: { target: 101, mode: 'override' }, bad: { target: 9, mode: 'override' } },
-  recording: { 400: { target: '201', mode: 'default' }, 401: { target: 'x', mode: 'default' } }
-})), {
-  valid: true,
-  playback: { 300: { target: '101', mode: 'override' } },
-  recording: { 400: { target: '201', mode: 'default' } }
-})
-assert.deepEqual(model.parseAudioStreamRoutes('not json'), {
-  valid: false, playback: {}, recording: {}
-})
 assert.deepEqual(model.parseStreamOutputOption('override:' + '1'.repeat(21)), { mode: '', sink: '' })
-assert.deepEqual(model.parseAudioStreamRoutes(JSON.stringify({
-  playback: { ['1'.repeat(21)]: { target: 1, mode: 'override' } },
-  recording: { 1: { target: '2'.repeat(21), mode: 'default' } }
-})), { valid: true, playback: {}, recording: {} })
 const diagnostics = model.parseAudioDiagnostics(JSON.stringify({
   version: 1,
   healthy: true,
@@ -749,12 +724,20 @@ assert.equal(diagnostics.value.graph.quantum, 256)
 assert.deepEqual(diagnostics.value.routes[0].labels, ['Browser', 'Filter', 'Speakers'])
 assert.deepEqual(diagnostics.value.warnings, ['XRUN reported'])
 assert.equal(model.parseAudioDiagnostics('not json').valid, false)
+const diagnosticObject = JSON.parse(JSON.stringify(diagnostics.value))
+const diagnosticBefore = JSON.stringify(diagnosticObject)
+assert.deepEqual(model.normalizeAudioDiagnostics(diagnosticObject),
+  model.parseAudioDiagnostics(diagnosticBefore))
+assert.equal(JSON.stringify(diagnosticObject), diagnosticBefore,
+  'diagnostic normalization must not mutate a shared service snapshot')
+for (const invalid of [null, [], {}, { version: 2, graph: {} }])
+  assert.equal(model.normalizeAudioDiagnostics(invalid).valid, false)
 console.log('PASS: profile and routing model')
 JS
 
-plugin_version=$(jq -er '.version | strings | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$ROOT/manifest.json") ||
-  fail "manifest version"
 diagnostics_fixture="$TEST_DIR/fixtures/diagnostics"
+plugin_version=$(jq -er '.version | strings | select(length > 0)' "$ROOT/manifest.json") ||
+  fail "manifest plugin version"
 diagnostics_snapshot=$(
   AUDIO_CONTROL_DIAGNOSTICS_FIXTURE_DIR="$diagnostics_fixture" \
   AUDIO_CONTROL_RECOVERY_COMMAND=omarchy-restart-audio \
@@ -933,501 +916,13 @@ fi
 echo "PASS: native diagnostics and guarded recovery"
 rm -rf -- "$diagnostic_tmp"
 
-route_log=$(mktemp)
-route_read_state=$(mktemp)
-trap 'rm -f "$route_log" "$route_read_state"' EXIT
-
-AUDIO_CONTROL_ROUTE_LOG="$route_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override
-
-expected_route_log=$(cat <<'EOF'
-move-sink-input 300 101
-pw-metadata -n default -- 900 target.object 101 Spa:Id
-pw-metadata -n default -- 900 target.node 1001 Spa:Id
-EOF
-)
-[[ $(<"$route_log") == "$expected_route_log" ]] || fail "persistent stream target"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_STREAM_OWNER_MODULE=1 \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "module-owned playback stream accepted a manual route"
-fi
-[[ ! -s $route_log ]] || fail "module-owned playback stream was moved"
-
-: >"$route_log"
-AUDIO_CONTROL_ROUTE_LOG="$route_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 default
-
-expected_route_log=$(cat <<'EOF'
-move-sink-input 300 101
-pw-metadata -n default -- 900 target.object -1 Spa:Id
-pw-metadata -n default -- 900 target.node -1 Spa:Id
-EOF
-)
-[[ $(<"$route_log") == "$expected_route_log" ]] || fail "default-following stream target"
-
-: >"$route_log"
-AUDIO_CONTROL_ROUTE_LOG="$route_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" recording 400 201 override
-
-expected_route_log=$(cat <<'EOF'
-move-source-output 400 201
-pw-metadata -n default -- 901 target.object 201 Spa:Id
-pw-metadata -n default -- 901 target.node 2001 Spa:Id
-EOF
-)
-[[ $(<"$route_log") == "$expected_route_log" ]] || fail "persistent recording target"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_METADATA_READ_FAIL=1 \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "stream route accepted unreadable persistence metadata"
-fi
-[[ ! -s $route_log ]] || fail "stream moved before persistence metadata validation"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_DUPLICATE_METADATA_VALUE=1 \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "stream route accepted ambiguous persistence metadata"
-fi
-[[ ! -s $route_log ]] || fail "stream moved after ambiguous persistence metadata"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT=123456789012345678901 \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_NODE=123456789012345678901 \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "stream route accepted unbounded persistence metadata"
-fi
-[[ ! -s $route_log ]] || fail "stream moved after malformed persistence metadata"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT=-2 AUDIO_CONTROL_ROUTE_PREVIOUS_NODE=-2 \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "stream route accepted an invalid negative metadata target"
-fi
-[[ ! -s $route_log ]] || fail "stream moved after invalid negative metadata"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_ORIGINAL_SINK=100 \
-  AUDIO_CONTROL_ROUTE_DUPLICATE_ORIGINAL_OBJECT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "stream route accepted an ambiguous rollback endpoint"
-fi
-[[ ! -s $route_log ]] || fail "stream moved without a unique rollback endpoint"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_ORIGINAL_SINK=100 \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT=100 AUDIO_CONTROL_ROUTE_PREVIOUS_NODE=1000 \
-  AUDIO_CONTROL_ROUTE_METADATA_WRITE_FAIL=target.node PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "partially persisted stream route reported success"
-fi
-expected_route_log=$(cat <<'EOF'
-move-sink-input 300 101
-pw-metadata -n default -- 900 target.object 101 Spa:Id
-pw-metadata -n default -- 900 target.node 1001 Spa:Id
-move-sink-input 300 100
-pw-metadata -n default -- 900 target.object 100 Spa:Id
-pw-metadata -n default -- 900 target.node 1000 Spa:Id
-EOF
-)
-[[ $(<"$route_log") == "$expected_route_log" ]] || fail "partial stream route rollback"
-
-# Command status is not authoritative: accept a fully verified change even
-# when Pulse reports a late transport failure.
-: >"$route_log"
-AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_ORIGINAL_SINK=100 \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT=100 AUDIO_CONTROL_ROUTE_PREVIOUS_NODE=1000 \
-  AUDIO_CONTROL_ROUTE_MOVE_FAIL_AFTER_EFFECT_TARGET=101 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override ||
-  fail "verified route rejected after late move failure"
-
-: >"$route_log"
-AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_ORIGINAL_SINK=100 \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT=100 AUDIO_CONTROL_ROUTE_PREVIOUS_NODE=1000 \
-  AUDIO_CONTROL_ROUTE_METADATA_WRITE_FAIL=target.node \
-  AUDIO_CONTROL_ROUTE_METADATA_FAIL_AFTER_EFFECT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override ||
-  fail "verified route rejected after late metadata failure"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_ORIGINAL_SINK=100 \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT=100 AUDIO_CONTROL_ROUTE_PREVIOUS_NODE=1000 \
-  AUDIO_CONTROL_ROUTE_MOVE_NO_EFFECT_TARGET=101 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "stream route accepted a no-op move"
-fi
-[[ $(<"$route_log") == "move-sink-input 300 101" ]] ||
-  fail "no-op stream move wrote persistence metadata"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 999 override >/dev/null 2>&1; then
-  fail "stream route accepted an absent target"
-fi
-[[ ! -s $route_log ]] || fail "absent stream target changed live state"
-
-: >"$route_log"
-printf '0\n' >"$route_read_state"
-AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_READ_STATE="$route_read_state" \
-  AUDIO_CONTROL_ROUTE_STREAM_INDEX_REUSE=1 AUDIO_CONTROL_ROUTE_ORIGINAL_SINK=100 \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT=100 AUDIO_CONTROL_ROUTE_PREVIOUS_NODE=1000 \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override ||
-  fail "identity-safe route rejected a reindexed stream"
-grep -q '^move-sink-input 302 101$' "$route_log" ||
-  fail "route mutation targeted a reused stream index"
-! grep -q '^move-sink-input 300 ' "$route_log" ||
-  fail "route mutation touched the replacement stream"
-
-: >"$route_log"
-printf '0\n' >"$route_read_state"
-AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_READ_STATE="$route_read_state" \
-  AUDIO_CONTROL_ROUTE_TARGET_REINDEX=1 AUDIO_CONTROL_ROUTE_ORIGINAL_SINK=100 \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT=100 AUDIO_CONTROL_ROUTE_PREVIOUS_NODE=1000 \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override ||
-  fail "identity-safe route rejected a reindexed endpoint"
-grep -q '^move-sink-input 300 103$' "$route_log" ||
-  fail "route mutation targeted a reused endpoint index"
-grep -q '^pw-metadata -n default -- 900 target.object 103 Spa:Id$' "$route_log" ||
-  fail "route persistence retained a stale endpoint index"
-
-: >"$route_log"
-printf '0\n' >"$route_read_state"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_READ_STATE="$route_read_state" \
-  AUDIO_CONTROL_ROUTE_DUPLICATE_STREAM_OBJECT=1 AUDIO_CONTROL_ROUTE_ORIGINAL_SINK=100 \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "ambiguous live stream identity accepted"
-fi
-[[ ! -s $route_log ]] || fail "ambiguous live stream identity changed state"
-
-routes=$(AUDIO_CONTROL_ROUTE_LIST=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-routes")
-jq -e '
-  .playback["300"] == {"target":"101","mode":"override"}
-  and .recording["400"] == {"target":"201","mode":"override"}
-' <<<"$routes" >/dev/null || fail "playback and recording route snapshot"
-for invalid_routes in \
-  '{"sink_inputs":{},"source_outputs":[]}' \
-  '{"sink_inputs":[{"index":300,"sink":101,"properties":{"object.id":"900"}},{"index":300,"sink":101,"properties":{"object.id":"902"}}],"source_outputs":[]}' \
-  '{"sink_inputs":[{"index":300,"sink":101,"properties":{"object.id":"900"}},{"index":302,"sink":101,"properties":{"object.id":"900"}}],"source_outputs":[]}' \
-  '{"sink_inputs":[{"index":300,"sink":101,"properties":{}}],"source_outputs":[]}'; do
-  if AUDIO_CONTROL_ROUTE_LIST=1 AUDIO_CONTROL_ROUTE_LIST_JSON="$invalid_routes" \
-      PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-stream-routes" \
-      >/dev/null 2>&1; then
-    fail "malformed stream route snapshot accepted"
-  fi
-done
-if AUDIO_CONTROL_ROUTE_LIST=1 AUDIO_CONTROL_ROUTE_LIST_OVERSIZED_METADATA=1 \
-    PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-stream-routes" \
-    >/dev/null 2>&1; then
-  fail "oversized persistent route metadata accepted"
-fi
-if AUDIO_CONTROL_ROUTE_LIST=1 AUDIO_CONTROL_ROUTE_LIST_INVALID_METADATA=1 \
-    PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-stream-routes" \
-    >/dev/null 2>&1; then
-  fail "invalid persistent route metadata accepted"
-fi
-echo "PASS: persistent application routing"
-rm -f -- "$route_read_state"
-
-output_default_log=$(mktemp)
-input_default_log=$(mktemp)
 shared_preferences=$(mktemp)
 shared_preferences_lock="${shared_preferences}.lock"
-shared_preferences_output_lock="${shared_preferences}.output.lock"
-shared_preferences_input_lock="${shared_preferences}.input.lock"
-trap 'rm -f "$route_log" "$output_default_log" "$input_default_log" "$shared_preferences" "$shared_preferences_lock" "$shared_preferences_output_lock" "$shared_preferences_input_lock"' EXIT
-
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers stale-speakers \
-    >/dev/null 2>&1; then
-  fail "stale current default output guard accepted"
-fi
-[[ ! -s $output_default_log && ! -s $shared_preferences ]] ||
-  fail "stale current default output guard changed state"
-
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers 999 \
-    >/dev/null 2>&1; then
-  fail "stale current default output object guard accepted"
-fi
-[[ ! -s $output_default_log && ! -s $shared_preferences ]] ||
-  fail "stale current default output object guard changed state"
-
-: >"$input_default_log"
-if AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-input-set-default" 52 new-microphone stale-microphone \
-    >/dev/null 2>&1; then
-  fail "stale current default input guard accepted"
-fi
-[[ ! -s $input_default_log && ! -s $shared_preferences ]] ||
-  fail "stale current default input guard changed state"
-
-if AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-input-set-default" 52 new-microphone old-microphone 999 \
-    >/dev/null 2>&1; then
-  fail "stale current default input object guard accepted"
-fi
-[[ ! -s $input_default_log && ! -s $shared_preferences ]] ||
-  fail "stale current default input object guard changed state"
-
-AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers 50
-
-expected_output_default_log=$(cat <<'EOF'
-wpctl set-default 51
-pactl set-default-sink new-speakers
-pactl move-sink-input 300 new-speakers
-EOF
-)
-[[ $(<"$output_default_log") == "$expected_output_default_log" ]] ||
-  fail "default output preserved pinned playback route"
-
-AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-input-set-default" 52 new-microphone old-microphone 60
-
-expected_input_default_log=$(cat <<'EOF'
-wpctl set-default 52
-pactl set-default-source new-microphone
-pactl move-source-output 400 new-microphone
-EOF
-)
-[[ $(<"$input_default_log") == "$expected_input_default_log" ]] ||
-  fail "default input preserved pinned recording route"
-jq -e '
-  .defaults == {"output":"new-speakers","input":"new-microphone"}
-' "$shared_preferences" >/dev/null || fail "verified default devices"
-
-: >"$output_default_log"
-AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_TARGET_REINDEX=output \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers ||
-  fail "reindexed default output target rejected"
-grep -q '^pactl move-sink-input 300 new-speakers$' "$output_default_log" ||
-  fail "reindexed default output follower was not moved safely"
-
-: >"$input_default_log"
-AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
-  AUDIO_CONTROL_DEFAULT_TARGET_REINDEX=input \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-input-set-default" 52 new-microphone old-microphone ||
-  fail "reindexed default input target rejected"
-grep -q '^pactl move-source-output 400 new-microphone$' "$input_default_log" ||
-  fail "reindexed default input follower was not moved safely"
-
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_TARGET_OBJECT=999 OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers >/dev/null 2>&1; then
-  fail "stale default output node id accepted"
-else
-  [[ $? == 3 ]] || fail "stale default output node id reported wrong exit code"
-fi
-[[ ! -s $output_default_log ]] || fail "stale default output changed hardware"
-
-replacement_preferences=$(mktemp)
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_TARGET_REPLACED_AFTER_SET=output \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$replacement_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers \
-  >/dev/null 2>&1; then
-  fail "same-name replacement completed a default output change"
-fi
-expected_output_replacement_log=$(cat <<'EOF'
-wpctl set-default 51
-pactl set-default-sink new-speakers
-wpctl set-default 50
-pactl set-default-sink old-speakers
-EOF
-)
-[[ $(<"$output_default_log") == "$expected_output_replacement_log" ]] ||
-  fail "same-name default output replacement was not rolled back"
-[[ ! -s $replacement_preferences ]] ||
-  fail "same-name default output replacement was persisted"
-rm -f -- "$replacement_preferences" "${replacement_preferences}.lock" \
-  "${replacement_preferences}.output.lock"
-
-replacement_preferences=$(mktemp)
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_OLD_REPLACED_AFTER_SET=output \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$replacement_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers \
-    >/dev/null 2>&1; then
-  fail "replacement old output completed an unverifiable rollback"
-else
-  [[ $? == 4 ]] || fail "replacement old output reported a complete rollback"
-fi
-[[ $(<"$output_default_log") == $'wpctl set-default 51\npactl set-default-sink new-speakers' ]] ||
-  fail "default output rollback targeted a same-name replacement"
-[[ ! -s $replacement_preferences ]] || fail "unrestorable default output was persisted"
-rm -f -- "$replacement_preferences" "${replacement_preferences}.lock" \
-  "${replacement_preferences}.output.lock"
-
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_DUPLICATE_TARGET=output \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers >/dev/null 2>&1; then
-  fail "ambiguous default output target accepted"
-fi
-[[ ! -s $output_default_log ]] || fail "ambiguous default output changed hardware"
-
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_DUPLICATE_STREAM=output \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers >/dev/null 2>&1; then
-  fail "ambiguous playback follower identity accepted"
-fi
-[[ ! -s $output_default_log ]] || fail "ambiguous playback follower changed hardware"
-
-: >"$input_default_log"
-if AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
-  AUDIO_CONTROL_DEFAULT_DUPLICATE_TARGET=input \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-input-set-default" 52 new-microphone old-microphone >/dev/null 2>&1; then
-  fail "ambiguous default input target accepted"
-fi
-[[ ! -s $input_default_log ]] || fail "ambiguous default input changed hardware"
-
-replacement_preferences=$(mktemp)
-: >"$input_default_log"
-if AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
-  AUDIO_CONTROL_DEFAULT_TARGET_REPLACED_AFTER_SET=input \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$replacement_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-input-set-default" 52 new-microphone old-microphone \
-  >/dev/null 2>&1; then
-  fail "same-name replacement completed a default input change"
-fi
-expected_input_replacement_log=$(cat <<'EOF'
-wpctl set-default 52
-pactl set-default-source new-microphone
-wpctl set-default 60
-pactl set-default-source old-microphone
-EOF
-)
-[[ $(<"$input_default_log") == "$expected_input_replacement_log" ]] ||
-  fail "same-name default input replacement was not rolled back"
-[[ ! -s $replacement_preferences ]] ||
-  fail "same-name default input replacement was persisted"
-rm -f -- "$replacement_preferences" "${replacement_preferences}.lock" \
-  "${replacement_preferences}.input.lock"
-
-replacement_preferences=$(mktemp)
-: >"$input_default_log"
-if AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
-  AUDIO_CONTROL_DEFAULT_OLD_REPLACED_AFTER_SET=input \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$replacement_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-input-set-default" 52 new-microphone old-microphone \
-    >/dev/null 2>&1; then
-  fail "replacement old input completed an unverifiable rollback"
-else
-  [[ $? == 4 ]] || fail "replacement old input reported a complete rollback"
-fi
-[[ $(<"$input_default_log") == $'wpctl set-default 52\npactl set-default-source new-microphone' ]] ||
-  fail "default input rollback targeted a same-name replacement"
-[[ ! -s $replacement_preferences ]] || fail "unrestorable default input was persisted"
-rm -f -- "$replacement_preferences" "${replacement_preferences}.lock" \
-  "${replacement_preferences}.input.lock"
-
-: >"$input_default_log"
-if AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
-  AUDIO_CONTROL_DEFAULT_DUPLICATE_STREAM=input \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-input-set-default" 52 new-microphone old-microphone >/dev/null 2>&1; then
-  fail "ambiguous recording follower identity accepted"
-fi
-[[ ! -s $input_default_log ]] || fail "ambiguous recording follower changed hardware"
-
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_READ_FAIL=output OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers >/dev/null 2>&1; then
-  fail "default output changed without a rollback baseline"
-fi
-[[ ! -s $output_default_log ]] || fail "unreadable current default changed hardware"
-
-: >"$output_default_log"
-OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" \
-  AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 50 old-speakers old-speakers 50 ||
-  fail "already-active default output rejected"
-[[ ! -s $output_default_log ]] || fail "already-active default output touched hardware"
-
-rollback_preferences=$(mktemp)
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_MOVE_FAIL_AFTER_EFFECT_TARGET=new-speakers \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$rollback_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers >/dev/null 2>&1; then
-  fail "partially moved default followers reported success"
-fi
-expected_output_rollback_log=$(cat <<'EOF'
-wpctl set-default 51
-pactl set-default-sink new-speakers
-pactl move-sink-input 300 new-speakers
-pactl move-sink-input 300 old-speakers
-wpctl set-default 50
-pactl set-default-sink old-speakers
-EOF
-)
-[[ $(<"$output_default_log") == "$expected_output_rollback_log" ]] ||
-  fail "default follower rollback after late move failure"
-[[ ! -s $rollback_preferences ]] || fail "rolled-back default output was persisted"
-
-: >"$output_default_log"
-AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_SET_FAIL_AFTER_EFFECT_TARGET=new-speakers \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$rollback_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers ||
-  fail "verified default rejected after late setter failure"
-jq -e '.defaults.output == "new-speakers"' "$rollback_preferences" >/dev/null ||
-  fail "verified late default change was not persisted"
-
-failed_preferences=$(mktemp)
-failed_preferences_output_lock="${failed_preferences}.output.lock"
-if AUDIO_CONTROL_DEFAULT_FAILURE=1 OMARCHY_AUDIO_PREFERENCES_FILE="$failed_preferences" \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 99 missing-speakers old-speakers >/dev/null 2>&1; then
-  fail "failed default output reported success"
-fi
-[[ ! -s $failed_preferences ]] || fail "failed default output was persisted"
-
 invalid_preferences=$(mktemp)
 invalid_preferences_lock="${invalid_preferences}.lock"
-invalid_preferences_output_lock="${invalid_preferences}.output.lock"
 printf '{invalid json\n' >"$invalid_preferences"
 invalid_preferences_before=$(<"$invalid_preferences")
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$invalid_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers >/dev/null 2>&1; then
-  fail "invalid shared preferences allowed a default output change"
-fi
-[[ ! -s $output_default_log ]] || fail "default output changed before preferences validation"
+trap 'rm -f "$shared_preferences" "$shared_preferences_lock" "$invalid_preferences" "$invalid_preferences_lock"' EXIT
 if OMARCHY_AUDIO_PREFERENCES_FILE="$invalid_preferences" \
   "$ROOT/scripts/audio-preferences" set-default output speakers >/dev/null 2>&1; then
   fail "invalid shared preferences were overwritten"
@@ -1456,6 +951,8 @@ fi
   fail "future-version audio preferences overwritten"
 
 OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" \
+  "$ROOT/scripts/audio-preferences" set-default input new-microphone
+OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" \
   "$ROOT/scripts/audio-preferences" set-default output headphones
 OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" \
   "$ROOT/scripts/audio-preferences" set-profile 00:11:22:33:44:55 a2dp-aac
@@ -1464,311 +961,16 @@ jq -e '
   and .defaults == {"output":"headphones","input":"new-microphone"}
   and .bluetoothProfiles == {"001122334455":"a2dp-aac"}
 ' "$shared_preferences" >/dev/null || fail "shared audio preferences"
-echo "PASS: verified default device routing"
-rm -f -- "$output_default_log" "$shared_preferences" "$shared_preferences_lock" \
-  "$shared_preferences_output_lock" "$shared_preferences_input_lock" \
-  "$failed_preferences" "$failed_preferences_output_lock" \
-  "$invalid_preferences" "$invalid_preferences_lock" "$invalid_preferences_output_lock" \
-  "$rollback_preferences" "${rollback_preferences}.lock" "${rollback_preferences}.output.lock" \
+echo "PASS: shared audio preferences"
+rm -f -- "$shared_preferences" "$shared_preferences_lock" \
+  "$invalid_preferences" "$invalid_preferences_lock" \
   "$multiple_preferences" "${multiple_preferences}.lock" \
   "$future_preferences" "${future_preferences}.lock"
 
-port_log=$(mktemp)
-trap 'rm -f "$route_log" "$input_default_log" "$port_log"' EXIT
-ports=$(AUDIO_CONTROL_PORT_LOG="$port_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-ports")
-jq -e '
-  length == 2
-  and .[0].direction == "output"
-  and .[0].ports == [
-    {"value":"analog-output-speaker","label":"Speakers"},
-    {"value":"analog-output-headphones","label":"Headphones"}
-  ]
-  and .[1].direction == "input"
-' <<<"$ports" >/dev/null || fail "multi-port endpoint discovery"
+rules_dir=$(mktemp -d)
+trap 'rm -rf "$rules_dir"' EXIT
 
-: >"$port_log"
-if AUDIO_CONTROL_PORT_LOG="$port_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-port-set" input loopback-source two >/dev/null 2>&1; then
-  fail "nonstandard monitor source accepted as an input port target"
-else
-  [[ $? == 3 ]] || fail "monitor source port reported the wrong exit code"
-fi
-[[ ! -s $port_log ]] || fail "monitor source port changed hardware"
-
-object_ports=$(AUDIO_CONTROL_PORT_LOG="$port_log" AUDIO_CONTROL_PORT_OBJECT_ACTIVE=1 \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-ports")
-jq -e '
-  .[0].activePort == "analog-output-speaker"
-  and .[1].activePort == "analog-input-internal-mic"
-' <<<"$object_ports" >/dev/null || fail "object-form active port normalization"
-
-: >"$port_log"
-AUDIO_CONTROL_PORT_LOG="$port_log" AUDIO_CONTROL_PORT_OBJECT_ACTIVE=1 \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-port-set" \
-  output speakers analog-output-speaker
-[[ ! -s $port_log ]] || fail "object-form active port no-op detection"
-
-AUDIO_CONTROL_PORT_LOG="$port_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-port-set" output speakers analog-output-headphones
-[[ $(<"$port_log") == "set-sink-port 10 analog-output-headphones" ]] ||
-  fail "audio port selection"
-if AUDIO_CONTROL_PORT_LOG="$port_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-port-set" output speakers hdmi-output >/dev/null 2>&1; then
-  fail "unavailable audio port accepted"
-else
-  [[ $? == 3 ]] || fail "unavailable audio port reported wrong exit code"
-fi
-
-: >"$port_log"
-if AUDIO_CONTROL_PORT_LOG="$port_log" \
-  AUDIO_CONTROL_PORT_SET_NO_EFFECT_TARGET=analog-output-headphones PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-port-set" output speakers analog-output-headphones >/dev/null 2>&1; then
-  fail "no-op audio port command reported success"
-fi
-[[ $(<"$port_log") == $'set-sink-port 10 analog-output-headphones\nset-sink-port 10 analog-output-speaker' ]] ||
-  fail "no-op audio port rollback"
-
-: >"$port_log"
-if AUDIO_CONTROL_PORT_LOG="$port_log" \
-  AUDIO_CONTROL_PORT_SET_FAIL_AFTER_EFFECT_TARGET=analog-output-headphones \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-port-set" output speakers analog-output-headphones >/dev/null 2>&1; then
-  fail "late-failing audio port change reported success"
-fi
-[[ $(<"$port_log") == $'set-sink-port 10 analog-output-headphones\nset-sink-port 10 analog-output-speaker' ]] ||
-  fail "late-failing audio port rollback"
-
-: >"$port_log"
-if AUDIO_CONTROL_PORT_LOG="$port_log" \
-  AUDIO_CONTROL_PORT_SET_WRONG_TARGET=analog-output-headphones \
-  AUDIO_CONTROL_PORT_WRONG_ACTIVE=unexpected-port \
-  AUDIO_CONTROL_PORT_SET_NO_EFFECT_TARGET=analog-output-speaker PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-port-set" output speakers analog-output-headphones >/dev/null 2>&1; then
-  fail "unrecoverable audio port mismatch reported success"
-else
-  [[ $? == 4 ]] || fail "unrecoverable audio port mismatch reported wrong exit code"
-fi
-
-for ambiguous_port_fixture in duplicate-endpoint duplicate-port missing-object; do
-  : >"$port_log"
-  case "$ambiguous_port_fixture" in
-    duplicate-endpoint) port_environment=AUDIO_CONTROL_PORT_DUPLICATE_ENDPOINT=1 ;;
-    duplicate-port) port_environment=AUDIO_CONTROL_PORT_DUPLICATE_PORT=1 ;;
-    missing-object) port_environment=AUDIO_CONTROL_PORT_MISSING_OBJECT=1 ;;
-  esac
-  if env "$port_environment" AUDIO_CONTROL_PORT_LOG="$port_log" \
-    PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-port-set" \
-      output speakers analog-output-headphones >/dev/null 2>&1; then
-    fail "$ambiguous_port_fixture audio port identity accepted"
-  else
-    [[ $? == 1 ]] || fail "$ambiguous_port_fixture audio port identity exit code"
-  fi
-  [[ ! -s $port_log ]] || fail "$ambiguous_port_fixture changed an audio port"
-done
-
-: >"$port_log"
-if AUDIO_CONTROL_PORT_LOG="$port_log" AUDIO_CONTROL_PORT_REINDEX_AFTER_SET=1 \
-  AUDIO_CONTROL_PORT_SET_NO_EFFECT_TARGET=analog-output-headphones \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-port-set" \
-    output speakers analog-output-headphones >/dev/null 2>&1; then
-  fail "reindexed no-op audio port command reported success"
-fi
-[[ $(<"$port_log") == $'set-sink-port 10 analog-output-headphones\nset-sink-port 12 analog-output-speaker' ]] ||
-  fail "reindexed audio endpoint was not rolled back by object identity"
-
-: >"$port_log"
-if AUDIO_CONTROL_PORT_LOG="$port_log" AUDIO_CONTROL_PORT_ORIGINAL_GONE_AFTER_SET=1 \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-port-set" \
-    output speakers analog-output-headphones >/dev/null 2>&1; then
-  fail "vanished audio endpoint port change reported success"
-else
-  [[ $? == 4 ]] || fail "vanished audio endpoint port change exit code"
-fi
-[[ $(<"$port_log") == 'set-sink-port 10 analog-output-headphones' ]] ||
-  fail "replacement endpoint received the vanished endpoint rollback"
-echo "PASS: audio port controls"
-
-policy_log=$(mktemp)
-policy_state=$(mktemp)
-trap 'rm -f "$route_log" "$input_default_log" "$port_log" "$policy_log" "$policy_state"' EXIT
-printf '{}\n' >"$policy_state"
-
-policy=$(AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings")
-jq -e '
-  .["node.features.audio.mono"] == false
-  and .["linking.pause-playback"] == true
-  and ((.["device.routes.default-sink-volume"] - 0.4) | fabs) < 0.000001
-  and .["node.stream.default-capture-volume"] == 1
-' <<<"$policy" >/dev/null || fail "audio policy snapshot"
-
-if AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  AUDIO_CONTROL_WPCTL_DUPLICATE_VALUE=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-policy-settings" >/dev/null 2>&1; then
-  fail "ambiguous audio policy output accepted"
-fi
-
-policy=$(AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings" \
-  set node.features.audio.mono true)
-jq -e '.["node.features.audio.mono"] == true' "$policy_state" >/dev/null ||
-  fail "boolean audio policy write"
-jq -e '.["node.features.audio.mono"] == true' <<<"$policy" >/dev/null ||
-  fail "boolean audio policy confirmation"
-
-policy=$(AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings" \
-  set device.routes.default-sink-volume 0.5)
-jq -e '((.["device.routes.default-sink-volume"] - 0.125) | fabs) < 0.000001' \
-  "$policy_state" >/dev/null || fail "cubic audio policy write"
-jq -e '((.["device.routes.default-sink-volume"] - 0.5) | fabs) < 0.000001' \
-  <<<"$policy" >/dev/null || fail "linear audio policy confirmation"
-
-if AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings" \
-  set unknown.audio.setting true >/dev/null 2>&1; then
-  fail "unknown audio policy accepted"
-fi
-if AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings" \
-  set device.routes.default-source-volume 1.5 >/dev/null 2>&1; then
-  fail "out-of-range audio policy volume accepted"
-fi
-if AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  AUDIO_CONTROL_POLICY_FAIL=linking.pause-playback PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-policy-settings" set linking.pause-playback false >/dev/null 2>&1; then
-  fail "failed audio policy write reported success"
-fi
-jq -e 'has("linking.pause-playback") | not' "$policy_state" >/dev/null ||
-  fail "failed audio policy write changed state"
-
-printf '{}\n' >"$policy_state"
-: >"$policy_log"
-if AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  AUDIO_CONTROL_POLICY_NO_EFFECT=linking.pause-playback PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-policy-settings" set linking.pause-playback false >/dev/null 2>&1; then
-  fail "no-op audio policy write reported success"
-fi
-jq -e 'has("linking.pause-playback") | not' "$policy_state" >/dev/null ||
-  fail "no-op audio policy write changed state"
-
-printf '{}\n' >"$policy_state"
-AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  AUDIO_CONTROL_POLICY_FAIL_AFTER_EFFECT=node.features.audio.mono PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-policy-settings" set node.features.audio.mono true >/dev/null ||
-  fail "verified policy rejected after late command failure"
-jq -e '.["node.features.audio.mono"] == true' "$policy_state" >/dev/null ||
-  fail "late policy change was not retained"
-
-printf '{}\n' >"$policy_state"
-if AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  AUDIO_CONTROL_POLICY_WRONG_VALUE=linking.pause-playback \
-  AUDIO_CONTROL_POLICY_WRONG_ON_VALUE=false AUDIO_CONTROL_POLICY_WRONG_RAW=null \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-policy-settings" set linking.pause-playback false >/dev/null 2>&1; then
-  fail "wrong audio policy value reported success"
-fi
-jq -e '.["linking.pause-playback"] == true' "$policy_state" >/dev/null ||
-  fail "wrong audio policy value was not rolled back"
-
-printf '{}\n' >"$policy_state"
-if AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  AUDIO_CONTROL_POLICY_WRONG_VALUE=linking.pause-playback \
-  AUDIO_CONTROL_POLICY_WRONG_ON_VALUE=false AUDIO_CONTROL_POLICY_WRONG_RAW=null \
-  AUDIO_CONTROL_POLICY_NO_EFFECT_VALUE='linking.pause-playback=true' \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-policy-settings" set linking.pause-playback false >/dev/null 2>&1; then
-  fail "unrecoverable audio policy mismatch reported success"
-else
-  [[ $? == 4 ]] || fail "unrecoverable audio policy mismatch reported wrong exit code"
-fi
-
-policy=$(AUDIO_CONTROL_POLICY_LOG="$policy_log" AUDIO_CONTROL_POLICY_STATE="$policy_state" \
-  AUDIO_CONTROL_POLICY_UNSUPPORTED=monitor.alsa.autodetect-hdmi-channels \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-policy-settings")
-jq -e 'has("monitor.alsa.autodetect-hdmi-channels") | not' <<<"$policy" >/dev/null ||
-  fail "unsupported audio policy exposed"
-echo "PASS: capability-aware audio safety policies"
-rm -f -- "$policy_log" "$policy_state"
-
-scenes_dir=$(mktemp -d)
-scenes_file="$scenes_dir/audio-scenes.json"
-trap 'rm -f "$route_log" "$input_default_log" "$port_log"; rm -rf "$microphone_test_dir" "$scenes_dir"' EXIT
-
-scene_one='{"name":"Desk","defaults":{"output":"speakers","input":"mic"},"devices":[{"name":"speakers","direction":"output","volume":0.5,"muted":false,"balance":0}],"ports":[],"profiles":[]}'
-scene_two='{"name":"Headset","defaults":{"output":"headphones","input":"headset-mic"},"devices":[],"ports":[],"profiles":[]}'
-if OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" save Desk <<<'' >/dev/null 2>&1; then
-  fail "empty audio scene accepted"
-fi
-if printf '%s\n' '[1,2]' | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" save Desk >/dev/null 2>&1; then
-  fail "non-object audio scene accepted"
-fi
-if printf '{}\n{}\n' | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" save Desk >/dev/null 2>&1; then
-  fail "multiple stdin scene documents accepted"
-fi
-if OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" save Desk '{} {}' >/dev/null 2>&1; then
-  fail "multiple argument scene documents accepted"
-fi
-printf '%s\n' "$scene_one" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" save Desk >/dev/null
-[[ -s $scenes_file ]] || fail "audio scene not saved"
-[[ $(stat -c '%a' "$scenes_file") == 600 ]] || fail "audio scene store permissions"
-jq -e '.scenes[0].name == "Desk" and .scenes[0].defaults.output == "speakers"' "$scenes_file" >/dev/null ||
-  fail "audio scene content"
-unsafe_scene='{"name":"Wrong name","devices":[{"name":"speakers","direction":"output","muted":true},{"name":"mic","direction":"input","muted":true}],"profiles":[{"card":"card.live","profile":"stereo"},{"card":"card.off","profile":"off"}]}'
-OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" save SafeName "$unsafe_scene" >/dev/null
-jq -e '
-  ([.scenes[] | select(.name == "SafeName")][0]) as $scene
-  | $scene.devices[0].muted == false
-    and $scene.devices[1].muted == true
-    and $scene.profiles == [{"card":"card.live","profile":"stereo"}]
-    and ([.scenes[].name] | index("Wrong name") | not)
-' "$scenes_file" >/dev/null || fail "audio scene storage safety normalization"
-OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" delete SafeName >/dev/null
-scene_replacement='{"name":"Desk","defaults":{"output":"line-out","input":"mic"},"devices":[],"ports":[],"profiles":[]}'
-printf '%s\n' "$scene_two" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" save Headset >/dev/null
-printf '%s\n' "$scene_replacement" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" save Desk >/dev/null
-jq -e '(.scenes | length) == 2 and .scenes[1].defaults.output == "line-out"' "$scenes_file" >/dev/null ||
-  fail "audio scene replacement"
-for _index in $(seq 1 30); do
-  printf '%s\n' "{\"name\":\"Scene $_index\"}" |
-    OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-    "$ROOT/scripts/audio-scenes" save "Scene $_index" >/dev/null
-done
-jq -e '(.scenes | length) <= 24' "$scenes_file" >/dev/null || fail "audio scene cap"
-OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" delete Headset >/dev/null
-jq -e '[.scenes[].name] | index("Headset") | not' "$scenes_file" >/dev/null ||
-  fail "audio scene deletion"
-printf '{}\n{}\n' >"$scenes_file"
-if OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" delete Desk >/dev/null 2>&1; then
-  fail "multiple-document scene store accepted"
-fi
-if printf '%s\n' "$scene_one" | OMARCHY_AUDIO_SCENES_FILE="$scenes_file" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-scenes" save Desk >/dev/null 2>&1; then
-  fail "multiple-document scene store was overwritten"
-fi
-printf '%s\n' '{"version":2,"scenes":[],"future":{"keep":true}}' >"$scenes_file"
-future_scenes_before=$(<"$scenes_file")
-if OMARCHY_AUDIO_SCENES_FILE="$scenes_file" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-scenes" delete Desk >/dev/null 2>&1; then
-  fail "future-version scene store accepted"
-fi
-[[ $(<"$scenes_file") == "$future_scenes_before" ]] ||
-  fail "future-version scene store overwritten"
-echo "PASS: named audio scene storage"
-
-rules_file="$scenes_dir/audio-rules.json"
+rules_file="$rules_dir/audio-rules.json"
 export OMARCHY_AUDIO_RULES_FILE="$rules_file"
 printf '%s\n' \
   '{"version":1,"appRules":[{"app":"Firefox","direction":"playback","target":"old-speakers"}],"devices":{"aliases":{},"favorites":[],"hidden":[]}}' \
@@ -1879,7 +1081,7 @@ fi
   fail "future-version audio rules overwritten"
 unset OMARCHY_AUDIO_RULES_FILE
 echo "PASS: application rules and device preference store"
-rm -rf -- "$scenes_dir"
+rm -rf -- "$rules_dir"
 
 output_group_dir=$(mktemp -d)
 output_group_rules="$output_group_dir/audio-rules.json"
@@ -2093,671 +1295,9 @@ rm -rf -- "$output_group_dir"
 unset -f run_output_group
 echo "PASS: named multi-output groups"
 
-microphone_test_dir=$(mktemp -d)
-microphone_test_log="$microphone_test_dir/commands.log"
-microphone_test_file="$microphone_test_dir/microphone-test.raw"
-trap 'rm -f "$route_log" "$input_default_log" "$port_log"; rm -rf "$microphone_test_dir"' EXIT
-
-microphone_pid_path="$microphone_test_file.pid"
-microphone_stop_path="$microphone_test_file.stop"
-microphone_lock_path="$microphone_test_file.lock"
-for unsafe_microphone_path in "$microphone_test_file" "$microphone_pid_path" \
-  "$microphone_stop_path" "$microphone_lock_path"; do
-  hardlink_target="$microphone_test_dir/hardlink-target"
-  touch "$hardlink_target"
-  ln -- "$hardlink_target" "$unsafe_microphone_path"
-  if AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-    AUDIO_CONTROL_MICROPHONE_TEST_PID_FILE="$microphone_pid_path" \
-    AUDIO_CONTROL_MICROPHONE_TEST_STOP_FILE="$microphone_stop_path" \
-    AUDIO_CONTROL_MICROPHONE_TEST_LOCK_FILE="$microphone_lock_path" \
-    "$ROOT/scripts/audio-microphone-test" status >/dev/null 2>&1; then
-    fail "hard-linked microphone control path accepted"
-  fi
-  rm -f -- "$unsafe_microphone_path" "$hardlink_target"
-done
-
-if AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_PID_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" status >/dev/null 2>&1; then
-  fail "overlapping microphone control paths accepted"
-fi
-
-microphone_test_status=$(AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" status)
-[[ $microphone_test_status == empty ]] || fail "empty microphone test status"
-
-microphone_test_status=$(AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
-  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_STATUS=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" record test-source)
-[[ $microphone_test_status == ready && -s $microphone_test_file ]] ||
-  fail "microphone test recording"
-[[ $(stat -c '%a' "$microphone_test_file") == 600 ]] ||
-  fail "microphone test recording permissions"
-grep -q -- '--target test-source' "$microphone_test_log" ||
-  fail "microphone test selected source"
-grep -q -- 'node.name.*omarchy_audio_test_record' "$microphone_test_log" ||
-  fail "microphone test private stream identity"
-
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" play
-grep -q '^pw-play .*--volume 0.8 ' "$microphone_test_log" ||
-  fail "microphone test playback"
-grep -q '^pw-play .*--raw ' "$microphone_test_log" ||
-  fail "microphone test raw playback format"
-
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" clear
-[[ ! -e $microphone_test_file ]] || fail "microphone test cleanup"
-
-truncate -s 3 "$microphone_test_file"
-[[ $(AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" status) == empty ]] ||
-  fail "odd-sized microphone clip accepted"
-if AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" play >/dev/null 2>&1; then
-  fail "odd-sized microphone clip played"
-fi
-truncate -s 480002 "$microphone_test_file"
-[[ $(AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" status) == empty ]] ||
-  fail "oversized microphone clip accepted"
-rm -f -- "$microphone_test_file"
-
-if AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" record $'bad\nsource' >/dev/null 2>&1; then
-  fail "control-bearing microphone identifier accepted"
-fi
-
-if AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
-  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_FAIL=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" record test-source >/dev/null 2>&1; then
-  fail "failed microphone test recording reported success"
-fi
-[[ ! -e $microphone_test_file ]] || fail "failed microphone test left a recording"
-
-if timeout 3 env AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
-  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_WAIT=1 \
-  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_TIMEOUT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" record test-source >/dev/null 2>&1; then
-  fail "hung microphone recorder reported success"
-else
-  [[ $? != 124 ]] || fail "hung microphone recorder was not bounded"
-fi
-[[ ! -e $microphone_test_file && ! -e $microphone_test_file.pid ]] ||
-  fail "timed-out microphone recorder left private state"
-
-: >"$microphone_test_log"
-microphone_test_output="$microphone_test_dir/record-output"
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
-  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_WAIT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" record test-source >"$microphone_test_output" &
-microphone_test_pid=$!
-for _attempt in {1..100}; do
-  [[ -s $microphone_test_file.pid ]] && break
-  kill -0 "$microphone_test_pid" 2>/dev/null || fail "microphone test stopped before early stop"
-  sleep 0.01
-done
-[[ -s $microphone_test_file.pid ]] || fail "microphone test early-stop setup"
-if AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
-  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_WAIT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" record test-source >/dev/null 2>&1; then
-  fail "concurrent microphone recording accepted"
-fi
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" stop
-microphone_test_exit=0
-wait "$microphone_test_pid" || microphone_test_exit=$?
-[[ $microphone_test_exit == 0 && $(<"$microphone_test_output") == ready ]] ||
-  fail "microphone test early-stop completion"
-[[ $(stat -c '%s' "$microphone_test_file") == 96000 ]] ||
-  fail "microphone test early-stop partial clip"
-[[ ! -e $microphone_test_file.pid && ! -e $microphone_test_file.stop ]] ||
-  fail "microphone test early-stop control cleanup"
-
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" play
-grep -q '^pw-play .*--raw ' "$microphone_test_log" ||
-  fail "partial microphone test playback"
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" clear
-
-: >"$microphone_test_log"
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
-  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_WAIT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" record test-source >/dev/null &
-microphone_test_pid=$!
-for _attempt in {1..100}; do
-  [[ -s $microphone_test_file.pid ]] && break
-  kill -0 "$microphone_test_pid" 2>/dev/null || fail "microphone test stopped before cancellation"
-  sleep 0.01
-done
-[[ -s $microphone_test_file.pid ]] || fail "microphone test cancellation setup"
-kill -TERM "$microphone_test_pid"
-microphone_test_exit=0
-wait "$microphone_test_pid" || microphone_test_exit=$?
-[[ $microphone_test_exit == 143 ]] || fail "microphone test cancellation status"
-[[ ! -e $microphone_test_file ]] || fail "cancelled microphone test left a recording"
-[[ ! -e $microphone_test_file.pid && ! -e $microphone_test_file.stop ]] ||
-  fail "cancelled microphone test left a control file"
-[[ -z $(find "$microphone_test_dir" -type f -name '.microphone-test.*.raw' -print -quit) ]] ||
-  fail "cancelled microphone test left a temporary file"
-
-# A hard kill skips the cleanup trap, so clear must reap the orphaned
-# recorder and remove its temporary file itself.
-: >"$microphone_test_log"
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  AUDIO_CONTROL_MICROPHONE_TEST_LOG="$microphone_test_log" \
-  AUDIO_CONTROL_MICROPHONE_TEST_RECORD_WAIT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-microphone-test" record test-source >/dev/null &
-microphone_test_pid=$!
-for _attempt in {1..100}; do
-  [[ -s $microphone_test_file.pid ]] && break
-  kill -0 "$microphone_test_pid" 2>/dev/null || fail "microphone test stopped before hard kill"
-  sleep 0.01
-done
-[[ -s $microphone_test_file.pid ]] || fail "microphone test hard-kill setup"
-read -r microphone_test_orphan _ <"$microphone_test_file.pid"
-kill -KILL "$microphone_test_pid"
-wait "$microphone_test_pid" 2>/dev/null || true
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" clear
-for _attempt in {1..50}; do
-  kill -0 "$microphone_test_orphan" 2>/dev/null || break
-  sleep 0.01
-done
-if kill -0 "$microphone_test_orphan" 2>/dev/null; then
-  fail "microphone test clear left the recorder running"
-fi
-[[ ! -e $microphone_test_file.pid && ! -e $microphone_test_file.stop ]] ||
-  fail "hard-killed microphone test left a control file"
-[[ -z $(find "$microphone_test_dir" -type f -name '.microphone-test.*.raw' -print -quit) ]] ||
-  fail "hard-killed microphone test left a temporary file"
-
-# A stale identity file must never terminate an unrelated process whose PID
-# was recycled after a crashed recorder.
-sleep 30 &
-microphone_test_innocent=$!
-printf '%s 0\n' "$microphone_test_innocent" >"$microphone_test_file.pid"
-AUDIO_CONTROL_MICROPHONE_TEST_FILE="$microphone_test_file" \
-  "$ROOT/scripts/audio-microphone-test" clear
-microphone_test_innocent_survived=false
-kill -0 "$microphone_test_innocent" 2>/dev/null && microphone_test_innocent_survived=true
-kill "$microphone_test_innocent" 2>/dev/null || true
-wait "$microphone_test_innocent" 2>/dev/null || true
-$microphone_test_innocent_survived || fail "stale microphone PID killed an unrelated process"
-[[ ! -e $microphone_test_file.pid ]] || fail "stale microphone identity not removed"
-echo "PASS: private microphone record and playback test"
-rm -rf -- "$microphone_test_dir"
-
-bluetooth_preference_log=$(mktemp)
-bluetooth_preference_state=$(mktemp)
-trap 'rm -f "$route_log" "$input_default_log" "$port_log" "$bluetooth_preference_log" "$bluetooth_preference_state"' EXIT
-bluetooth_preference=$(AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG="$bluetooth_preference_log" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_STATE="$bluetooth_preference_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-bluetooth-profile-preference")
-[[ $bluetooth_preference == quality ]] || fail "Bluetooth profile preference read"
-if AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG="$bluetooth_preference_log" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_STATE="$bluetooth_preference_state" \
-  AUDIO_CONTROL_WPCTL_DUPLICATE_VALUE=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-bluetooth-profile-preference" >/dev/null 2>&1; then
-  fail "ambiguous Bluetooth profile preference accepted"
-fi
-bluetooth_preference=$(AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG="$bluetooth_preference_log" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_STATE="$bluetooth_preference_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-bluetooth-profile-preference" latency)
-[[ $bluetooth_preference == latency ]] || fail "Bluetooth profile preference write"
-[[ $(<"$bluetooth_preference_log") == "settings --save bluetooth.profile-preference latency" ]] ||
-  fail "Bluetooth profile preference command"
-
-# Reapplying the live value is a read-only no-op.
-AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG="$bluetooth_preference_log" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_STATE="$bluetooth_preference_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-bluetooth-profile-preference" latency >/dev/null
-[[ $(wc -l <"$bluetooth_preference_log") == 1 ]] ||
-  fail "unchanged Bluetooth preference was rewritten"
-
-AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG="$bluetooth_preference_log" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_STATE="$bluetooth_preference_state" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_FAIL_AFTER_EFFECT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-bluetooth-profile-preference" quality >/dev/null ||
-  fail "verified Bluetooth preference rejected after late failure"
-[[ $(<"$bluetooth_preference_state") == quality ]] ||
-  fail "late Bluetooth preference change was not retained"
-
-if AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG="$bluetooth_preference_log" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_STATE="$bluetooth_preference_state" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_NO_EFFECT_VALUE=latency PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-bluetooth-profile-preference" latency >/dev/null 2>&1; then
-  fail "no-op Bluetooth preference write reported success"
-fi
-
-if AUDIO_CONTROL_BLUETOOTH_PREFERENCE_LOG="$bluetooth_preference_log" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_STATE="$bluetooth_preference_state" \
-  AUDIO_CONTROL_BLUETOOTH_PREFERENCE_WRONG_VALUE=latency \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-bluetooth-profile-preference" latency >/dev/null 2>&1; then
-  fail "wrong Bluetooth preference value reported success"
-fi
-[[ $(<"$bluetooth_preference_state") == quality ]] ||
-  fail "wrong Bluetooth preference value was not rolled back"
-echo "PASS: Bluetooth profile preference"
-
-bluetooth_autoswitch_log=$(mktemp)
-bluetooth_autoswitch_state=$(mktemp)
-trap 'rm -f "$route_log" "$input_default_log" "$port_log" "$bluetooth_preference_log" "$bluetooth_preference_state" "$bluetooth_autoswitch_log" "$bluetooth_autoswitch_state"' EXIT
-bluetooth_autoswitch=$(AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG="$bluetooth_autoswitch_log" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_STATE="$bluetooth_autoswitch_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-bluetooth-autoswitch")
-[[ $bluetooth_autoswitch == true ]] || fail "Bluetooth autoswitch read"
-if AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG="$bluetooth_autoswitch_log" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_STATE="$bluetooth_autoswitch_state" \
-  AUDIO_CONTROL_WPCTL_DUPLICATE_VALUE=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-bluetooth-autoswitch" >/dev/null 2>&1; then
-  fail "ambiguous Bluetooth autoswitch value accepted"
-fi
-bluetooth_autoswitch=$(AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG="$bluetooth_autoswitch_log" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_STATE="$bluetooth_autoswitch_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-bluetooth-autoswitch" off)
-[[ $bluetooth_autoswitch == false ]] || fail "Bluetooth autoswitch write"
-if AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG="$bluetooth_autoswitch_log" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_STATE="$bluetooth_autoswitch_state" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_FAIL=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-bluetooth-autoswitch" on >/dev/null 2>&1; then
-  fail "failed Bluetooth autoswitch write reported success"
-fi
-[[ $(<"$bluetooth_autoswitch_state") == false ]] ||
-  fail "failed Bluetooth autoswitch write changed state"
-
-AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG="$bluetooth_autoswitch_log" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_STATE="$bluetooth_autoswitch_state" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_FAIL_AFTER_EFFECT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-bluetooth-autoswitch" on >/dev/null ||
-  fail "verified Bluetooth autoswitch rejected after late failure"
-[[ $(<"$bluetooth_autoswitch_state") == true ]] ||
-  fail "late Bluetooth autoswitch change was not retained"
-
-if AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_LOG="$bluetooth_autoswitch_log" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_STATE="$bluetooth_autoswitch_state" \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_WRONG_VALUE=false \
-  AUDIO_CONTROL_BLUETOOTH_AUTOSWITCH_NO_EFFECT_VALUE=true PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-bluetooth-autoswitch" off >/dev/null 2>&1; then
-  fail "unrecoverable Bluetooth autoswitch mismatch reported success"
-else
-  [[ $? == 4 ]] || fail "unrecoverable Bluetooth autoswitch mismatch reported wrong exit code"
-fi
-echo "PASS: Bluetooth autoswitch failure handling"
-rm -f -- "$bluetooth_autoswitch_log" "$bluetooth_autoswitch_state"
-
-profiles=$(
-  AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-    PATH="$TEST_DIR/mocks:$PATH" \
-    "$ROOT/scripts/audio-profiles"
-)
-
-jq -e '
-  def values($label): .[] | select(.label == $label) | [.profiles[].value];
-  (values("USB Headset") == [
-    "output:analog-stereo+input:mono-fallback",
-    "output:analog-stereo",
-    "input:mono-fallback",
-    "off"
-  ])
-  and (values("Bluetooth Headphones") | index("a2dp-sink-aac") != null)
-  and (values("Bluetooth Headphones") | index("headset-head-unit-msbc") != null)
-  and (values("HDMI Receiver") | index("output:hdmi-surround") != null)
-  and (values("UCM Analog Codec") == [
-    "HiFi (Headphones, Mic1)",
-    "HiFi (Mic1, Speaker)",
-    "off"
-  ])
-' <<<"$profiles" >/dev/null || fail "safe profile filtering"
-echo "PASS: safe profile filtering"
-
-profile_log=$(mktemp)
-profile_state=$(mktemp)
-profile_identity_fixture=$(mktemp)
-profile_endpoint_read_state=$(mktemp)
-trap 'rm -f "$route_log" "$input_default_log" "$port_log" "$bluetooth_preference_log" "$bluetooth_preference_state" "$profile_log" "$profile_state" "$profile_identity_fixture" "$profile_endpoint_read_state"' EXIT
-printf 'old\n' >"$profile_state"
-
-for ambiguous_card_identity in duplicate-name duplicate-index duplicate-object invalid-index; do
-  case "$ambiguous_card_identity" in
-    duplicate-name) card_filter='.[1].name = .[0].name' ;;
-    duplicate-index) card_filter='.[1].index = .[0].index' ;;
-    duplicate-object) card_filter='map(.properties["object.id"] = ((.index + 100) | tostring)) | .[1].properties["object.id"] = .[0].properties["object.id"]' ;;
-    invalid-index) card_filter='.[0].index = "not-an-index"' ;;
-  esac
-  jq "$card_filter" "$TEST_DIR/fixtures/cards.json" >"$profile_identity_fixture"
-  if AUDIO_CONTROL_CARD_FIXTURE="$profile_identity_fixture" \
-    PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-profiles" >/dev/null 2>&1; then
-    fail "$ambiguous_card_identity card identity was listed"
-  fi
-  : >"$profile_log"
-  if AUDIO_CONTROL_CARD_FIXTURE="$profile_identity_fixture" \
-    AUDIO_CONTROL_PROFILE_LOG="$profile_log" AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-    PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-profile-set" \
-      alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback \
-      >/dev/null 2>&1; then
-    fail "$ambiguous_card_identity card identity accepted a profile change"
-  fi
-  [[ ! -s $profile_log ]] || fail "$ambiguous_card_identity card identity changed hardware"
-done
-rm -f -- "$profile_identity_fixture"
-
-if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-  AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
-  AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-profile-set" \
-    alsa_card.usb-example-headset output:iec958-ac3-surround-51 >/dev/null 2>&1; then
-  fail "unsafe profile accepted"
-else
-  [[ $? == 3 ]] || fail "unsafe profile reported wrong exit code"
-fi
-[[ ! -s $profile_log ]] || fail "unsafe profile changed hardware"
-
-# Re-applying the active profile must succeed without touching hardware.
-AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-  AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
-  AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-profile-set" \
-    alsa_card.usb-example-headset output:analog-stereo >/dev/null 2>&1 ||
-  fail "unchanged audio profile rejected"
-[[ ! -s $profile_log ]] || fail "unchanged audio profile touched hardware"
-
-bluetooth_profile_preferences=$(mktemp)
-AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-  AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
-  AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$bluetooth_profile_preferences" \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-profile-set" \
-    bluez_card.00_11_22_33_44_55 a2dp-sink-aac >/dev/null 2>&1 ||
-  fail "active Bluetooth profile preference not saved"
-jq -e '.bluetoothProfiles["001122334455"] == "a2dp-sink-aac"' \
-  "$bluetooth_profile_preferences" >/dev/null || fail "Bluetooth profile preference content"
-[[ ! -s $profile_log ]] || fail "active Bluetooth profile preference touched hardware"
-
-printf '%s\n' 'not json' >"$bluetooth_profile_preferences"
-if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-  AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
-  AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$bluetooth_profile_preferences" \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-profile-set" \
-    bluez_card.00_11_22_33_44_55 headset-head-unit-msbc >/dev/null 2>&1; then
-  fail "Bluetooth profile changed with an invalid preference store"
-fi
-[[ ! -s $profile_log ]] || fail "invalid Bluetooth preference store changed hardware"
-rm -f -- "$bluetooth_profile_preferences" "${bluetooth_profile_preferences}.lock"
-
-if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-  AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
-  AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-profile-set" \
-    bluez_card.absent_device a2dp-sink >/dev/null 2>&1; then
-  fail "absent audio card accepted"
-else
-  [[ $? == 3 ]] || fail "absent audio card reported wrong exit code"
-fi
-
-AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-  AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
-  AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-profile-set" \
-    alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback
-
-expected_profile_log=$(cat <<'EOF'
-set-sink-mute headset-output true
-set-source-mute headset-input true
-set-sink-input-mute 300 true
-set-card-profile alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback
-set-sink-mute headset-output true
-set-sink-volume headset-output 42% 21%
-set-sink-mute headset-output false
-set-source-mute headset-input true
-set-source-volume headset-input 36%
-set-source-mute headset-input true
-set-sink-input-mute 300 false
-EOF
-)
-[[ $(<"$profile_log") == "$expected_profile_log" ]] || fail "safe profile transition order"
-echo "PASS: safe profile transition"
-
-# Live state, not a transport exit code, decides whether preparation and
-# restoration succeeded.
-: >"$profile_log"
-printf 'old\n' >"$profile_state"
-AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-  AUDIO_CONTROL_PROFILE_LOG="$profile_log" AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-  AUDIO_CONTROL_PROFILE_FAIL_AFTER_EFFECT_COMMAND='set-sink-mute headset-output true' \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-profile-set" \
-    alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback >/dev/null ||
-  fail "verified endpoint mute rejected after late transport failure"
-
-: >"$profile_log"
-printf 'old\n' >"$profile_state"
-if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-  AUDIO_CONTROL_PROFILE_LOG="$profile_log" AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-  AUDIO_CONTROL_PROFILE_NO_EFFECT_COMMAND='set-sink-mute headset-output true' \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-profile-set" \
-    alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback >/dev/null 2>&1; then
-  fail "silent endpoint-mute no-op reported success"
-fi
-! grep -q '^set-card-profile ' "$profile_log" ||
-  fail "profile changed after an unverified preparation mute"
-
-for stream_churn in vanish reuse reindex; do
-  : >"$profile_log"
-  printf 'old\n' >"$profile_state"
-  case "$stream_churn" in
-    vanish) stream_environment=AUDIO_CONTROL_PROFILE_STREAM_VANISH=1 ;;
-    reuse) stream_environment=AUDIO_CONTROL_PROFILE_STREAM_REUSE=1 ;;
-    reindex) stream_environment=AUDIO_CONTROL_PROFILE_STREAM_REINDEX=1 ;;
-  esac
-  env "$stream_environment" AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-    AUDIO_CONTROL_PROFILE_LOG="$profile_log" AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-    PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-profile-set" \
-      alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback >/dev/null ||
-    fail "profile stream $stream_churn handling"
-  if [[ $stream_churn == reindex ]]; then
-    grep -q '^set-sink-input-mute 302 false$' "$profile_log" ||
-      fail "reindexed stream was not restored by object identity"
-  else
-    ! grep -q '^set-sink-input-mute 300 false$' "$profile_log" ||
-      fail "$stream_churn stream inherited a stale mute restoration"
-  fi
-done
-echo "PASS: identity-safe profile stream restoration"
-
-: >"$profile_log"
-printf 'old\n' >"$profile_state"
-AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-  AUDIO_CONTROL_PROFILE_LOG="$profile_log" AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-  AUDIO_CONTROL_PROFILE_SET_FAIL_AFTER_EFFECT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-profile-set" \
-    alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback >/dev/null ||
-  fail "verified profile rejected after late setter failure"
-
-: >"$profile_log"
-printf 'old\n' >"$profile_state"
-if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-  AUDIO_CONTROL_PROFILE_LOG="$profile_log" AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-  AUDIO_CONTROL_PROFILE_NO_EFFECT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-profile-set" \
-    alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback >/dev/null 2>&1; then
-  fail "no-op profile command reported success"
-fi
-[[ $(<"$profile_state") == old ]] || fail "no-op profile changed mock state"
-
-# If policy or a transport race lands on a third profile, the helper must
-# actively return to the original graph instead of merely reporting the
-# requested profile as unverified.
-: >"$profile_log"
-printf 'old\n' >"$profile_state"
-if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-  AUDIO_CONTROL_PROFILE_LOG="$profile_log" AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-  AUDIO_CONTROL_PROFILE_FINAL_ACTIVE=output:iec958-stereo \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-profile-set" \
-    alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback \
-    >/dev/null 2>&1; then
-  fail "wrong final profile reported success"
-else
-  [[ $? == 1 ]] || fail "restored wrong final profile reported wrong exit code"
-fi
-[[ $(<"$profile_state") == old ]] || fail "wrong final profile was not rolled back"
-[[ $(grep -c '^set-card-profile ' "$profile_log") == 2 ]] ||
-  fail "wrong final profile did not perform exactly one rollback"
-grep '^set-card-profile ' "$profile_log" | tail -n 1 |
-  grep -q '^set-card-profile alsa_card.usb-example-headset output:analog-stereo$' ||
-  fail "wrong final profile did not restore the original profile"
-grep -q '^set-sink-mute headset-output false$' "$profile_log" ||
-  fail "profile rollback did not restore output mute state"
-grep -q '^set-sink-input-mute 300 false$' "$profile_log" ||
-  fail "profile rollback did not restore stream mute state"
-echo "PASS: profile rollback from unintended final state"
-
-: >"$profile_log"
-printf 'old\n' >"$profile_state"
-if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-  AUDIO_CONTROL_PROFILE_LOG="$profile_log" AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-  AUDIO_CONTROL_PROFILE_FAIL_ONCE_COMMAND='set-sink-mute headset-output true' \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-profile-set" \
-    alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback >/dev/null 2>&1; then
-  fail "unsafe profile preparation reported success"
-else
-  [[ $? == 1 ]] || fail "restored profile preparation failure reported wrong exit code"
-fi
-grep -q '^set-sink-mute headset-output false$' "$profile_log" ||
-  fail "profile preparation failure did not restore output mute"
-
-: >"$profile_log"
-printf 'old\n' >"$profile_state"
-if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-  AUDIO_CONTROL_PROFILE_LOG="$profile_log" AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-  AUDIO_CONTROL_PROFILE_FAIL_ONCE_COMMAND='set-source-mute headset-input true' \
-  AUDIO_CONTROL_PROFILE_NO_EFFECT_COMMAND='set-sink-mute headset-output false' \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-profile-set" \
-    alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback >/dev/null 2>&1; then
-  fail "unrecoverable profile preparation reported success"
-else
-  [[ $? == 4 ]] || fail "unrecoverable profile preparation reported wrong exit code"
-fi
-
-: >"$profile_log"
-printf 'old\n' >"$profile_state"
-AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-  AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
-  AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-  AUDIO_CONTROL_MULTI_PROFILE=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-profile-set" \
-    alsa_card.pci-example-ucm 'HiFi (Mic1, Speaker)'
-
-expected_profile_log=$(cat <<'EOF'
-set-sink-mute speaker-output true
-set-source-mute mic-a true
-set-source-mute mic-b true
-set-card-profile alsa_card.pci-example-ucm HiFi (Mic1, Speaker)
-set-sink-mute speaker-output true
-set-sink-volume speaker-output 60% 45%
-set-sink-mute speaker-output false
-set-source-mute mic-b true
-set-source-mute mic-a true
-set-source-volume mic-b 70%
-set-source-mute mic-b true
-set-source-volume mic-a 30%
-set-source-mute mic-a false
-EOF
-)
-[[ $(<"$profile_log") == "$expected_profile_log" ]] ||
-  fail "per-endpoint profile state preservation"
-echo "PASS: per-endpoint profile state preservation"
-
-# When expected endpoints never reappear, the transitional muting must be
-# undone on the endpoints that survived the profile change.
-: >"$profile_log"
-printf 'old\n' >"$profile_state"
-profile_warning="$TEST_DIR/vanish-warning"
-if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-  AUDIO_CONTROL_PROFILE_LOG="$profile_log" \
-  AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-  AUDIO_CONTROL_PROFILE_VANISH_SINKS=1 \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-profile-set" \
-    alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback 2>"$profile_warning"; then
-  fail "incomplete endpoint transition reported success"
-else
-  [[ $? == 4 ]] || fail "incomplete endpoint transition reported wrong exit code"
-fi
-grep -q "did not settle" "$profile_warning" || fail "missing incomplete endpoint warning"
-grep -q '^set-sink-input-mute 300 false$' "$profile_log" ||
-  fail "sink input stayed muted after vanished endpoints"
-[[ $(grep -c '^set-source-mute headset-input true$' "$profile_log") -ge 2 ]] ||
-  fail "surviving source endpoint not unmuted after vanished endpoints"
-! grep -q '^set-sink-volume ' "$profile_log" ||
-  fail "volume restored onto a nonexistent sink"
-rm -f "$profile_warning"
-echo "PASS: vanished endpoint muting recovery"
-
-# Reusing a vanished endpoint's numeric index must not transfer its old mute
-# state to a different logical node.
-: >"$profile_log"
-printf 'old\n' >"$profile_state"
-if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-  AUDIO_CONTROL_PROFILE_LOG="$profile_log" AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-  AUDIO_CONTROL_PROFILE_VANISH_SINKS=1 AUDIO_CONTROL_PROFILE_SOURCE_REUSE=1 \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-profile-set" \
-    alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback >/dev/null 2>&1; then
-  fail "incomplete reused-index transition reported success"
-else
-  [[ $? == 4 ]] || fail "reused-index transition reported wrong exit code"
-fi
-! grep -q '^set-source-mute 200 ' "$profile_log" ||
-  fail "reused source index received the vanished endpoint state"
-grep -q '^set-source-mute replacement-input false$' "$profile_log" ||
-  fail "replacement source did not retain its own mute state"
-echo "PASS: profile endpoint index-reuse safety"
-
-# If a post-profile endpoint is replaced after the snapshot but before its
-# stored state is restored, no same-name successor may receive the old volume
-# or unmute operation.
-: >"$profile_log"
-: >"$profile_endpoint_read_state"
-printf 'old\n' >"$profile_state"
-if AUDIO_CONTROL_CARD_FIXTURE="$TEST_DIR/fixtures/cards.json" \
-  AUDIO_CONTROL_PROFILE_LOG="$profile_log" AUDIO_CONTROL_PROFILE_STATE="$profile_state" \
-  AUDIO_CONTROL_PROFILE_ENDPOINT_READ_STATE="$profile_endpoint_read_state" \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-profile-set" \
-    alsa_card.usb-example-headset output:analog-stereo+input:mono-fallback \
-    >/dev/null 2>&1; then
-  fail "replaced profile endpoint reported complete restoration"
-else
-  [[ $? == 4 ]] || fail "replaced profile endpoint reported wrong exit code"
-fi
-[[ $(grep -c '^set-sink-mute headset-output true$' "$profile_log") == 1 ]] ||
-  fail "same-name replacement received a stale mute operation"
-! grep -q '^set-sink-volume headset-output ' "$profile_log" ||
-  fail "same-name replacement inherited stale volume"
-! grep -q '^set-sink-mute headset-output false$' "$profile_log" ||
-  fail "same-name replacement inherited stale unmute state"
-echo "PASS: profile endpoint replacement safety"
-
 menu_tmp=$(mktemp -d)
 menu_file="$menu_tmp/omarchy-menu.jsonc"
-trap 'rm -f "$route_log" "$route_read_state" "$output_default_log" "$input_default_log" "$shared_preferences" "$shared_preferences_lock" "$shared_preferences_output_lock" "$shared_preferences_input_lock" "$port_log" "$policy_log" "$policy_state" "$bluetooth_preference_log" "$bluetooth_preference_state" "$bluetooth_autoswitch_log" "$bluetooth_autoswitch_state" "$profile_log" "$profile_state" "$profile_identity_fixture" "$profile_endpoint_read_state"; rm -rf "$microphone_test_dir" "$menu_tmp"' EXIT
+trap 'rm -rf "$menu_tmp"' EXIT
 cat >"$menu_file" <<'EOF'
 {
   // Existing customization
@@ -2841,10 +1381,12 @@ echo "PASS: menu integration"
 jq -e '
   .schemaVersion == 1
   and .id == "ssupt.audio-control"
-  and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
+  and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"))
   and .author == "ssupt"
   and (.kinds | index("bar-widget") != null)
   and (.kinds | index("panel") != null)
+  and (.kinds | index("service") != null)
+  and (.entryPoints.service | test("^(runtime/[a-f0-9]{64}/)?qml/core/Service\\.qml$"))
   and .omarchy.clonedFrom == "omarchy.audio"
 ' "$ROOT/manifest.json" >/dev/null || fail "manifest"
 echo "PASS: manifest"
