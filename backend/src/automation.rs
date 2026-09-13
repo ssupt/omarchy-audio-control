@@ -27,7 +27,16 @@ pub fn signature(graph: &Graph, rules: &Value) -> String {
         .nodes
         .values()
         .filter(|n| class(n).starts_with("Audio/") || class(n).starts_with("Stream/"))
-        .map(|n| json!([n.id, n.serial, n.name, class(n), app(n)]))
+        .map(|n| {
+            json!([
+                n.id,
+                n.serial,
+                n.name,
+                class(n),
+                app(n),
+                !n.state.is_empty()
+            ])
+        })
         .collect();
     json!([
         graph.generation,
@@ -53,22 +62,19 @@ pub fn routes(graph: &Graph, rules: &Value) -> Vec<(String, crate::routing::Set)
         let Some(direction) = crate::routing::stream_direction(stream) else {
             continue;
         };
-        let target_class = direction.endpoint_class();
-        let direction = direction.name();
         let app = app(stream);
         let Some(rule) = rules["appRules"]
             .as_array()
             .into_iter()
             .flatten()
-            .find(|r| r["app"] == app && r["direction"] == direction)
+            .find(|r| r["app"] == app && r["direction"] == direction.name())
         else {
             continue;
         };
         let mut targets = graph.nodes.values().filter(|n| {
-            class(n) == target_class
+            crate::routing::endpoint_direction(n) == Some(direction)
                 && rule["target"] == n.name
                 && !n.serial.is_empty()
-                && !n.name.ends_with(".monitor")
         });
         let Some(target) = targets.next() else {
             continue;
@@ -81,7 +87,7 @@ pub fn routes(graph: &Graph, rules: &Value) -> Vec<(String, crate::routing::Set)
             stream.id,
             stream.serial,
             app,
-            direction,
+            direction.name(),
             target.id,
             target.serial,
             target.name

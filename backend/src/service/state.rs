@@ -26,7 +26,14 @@ impl Service {
         let nodes: Vec<_> = graph
             .nodes
             .values()
-            .map(|node| json!([node.id, node.serial, node.properties]))
+            .map(|node| {
+                json!([
+                    node.id,
+                    node.serial,
+                    node.properties,
+                    !node.state.is_empty()
+                ])
+            })
             .collect();
         let fingerprint = json!([
             graph.generation,

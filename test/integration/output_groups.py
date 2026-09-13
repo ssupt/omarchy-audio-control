@@ -118,7 +118,7 @@ with tempfile.TemporaryDirectory(prefix='audio-groups-') as temporary, ExitStack
             ['create', 'Desk', json.dumps(['audio_test_left', 'audio_test_right'])]))
         group_name = 'omarchy_audio_group_'+group_id
         group = until(lambda: next((s for s in sinks() if s['name'] == group_name), None))
-        group_node = client.wait_state(lambda s: any(n['name'] == group_name for n in s['nodes']))
+        group_node = client.wait_state(lambda s: any(n['name'] == group_name and n['state'] for n in s['nodes']))
         group_node = next(n for n in group_node['nodes'] if n['name'] == group_name)
         assert client.request('default.set', dict(identity=dict(generation=state['generation'],
             id=group_node['id'], serial=group_node['serial'])))['outcome'] == 'applied'

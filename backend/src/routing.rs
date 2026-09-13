@@ -25,12 +25,6 @@ impl Direction {
             Self::Recording => "input",
         }
     }
-    pub fn endpoint_class(self) -> &'static str {
-        match self {
-            Self::Playback => "Audio/Sink",
-            Self::Recording => "Audio/Source",
-        }
-    }
     pub fn default_key(self) -> &'static str {
         match self {
             Self::Playback => "default.audio.sink",
@@ -84,7 +78,9 @@ fn internal(node: &Node) -> bool {
             .is_some_and(|v| v == "ssupt.audio-control")
 }
 pub fn stream_direction(node: &Node) -> Option<Direction> {
-    if internal(node)
+    // Registry properties are incomplete until the first Node info event.
+    if node.state.is_empty()
+        || internal(node)
         || node.properties.contains_key("pulse.module.id")
         || node.name.starts_with("output.omarchy_audio_group_")
         || node.name.starts_with("omarchy_audio_group_")
@@ -99,7 +95,8 @@ pub fn stream_direction(node: &Node) -> Option<Direction> {
 }
 pub fn endpoint_direction(node: &Node) -> Option<Direction> {
     let group_sink = class(node) == "Audio/Sink" && crate::storage::group_sink(&node.name);
-    if (internal(node) && !group_sink)
+    if node.state.is_empty()
+        || (internal(node) && !group_sink)
         || node.name.ends_with(".monitor")
         || node
             .properties
@@ -442,6 +439,7 @@ mod tests {
                     id,
                     name: name.into(),
                     serial: (id + 100).to_string(),
+                    state: "Idle".into(),
                     properties: [("media.class".into(), class.into())].into(),
                     ..Node::default()
                 },
@@ -513,6 +511,15 @@ mod tests {
         );
         graph.links.get_mut(&21).unwrap().input_node = 3;
         assert!(target(&graph, &graph.nodes[&1], Direction::Playback).is_err());
+        assert!(snapshot(&graph)["playback"].as_object().unwrap().is_empty());
+    }
+    #[test]
+    fn routing_waits_for_full_node_properties() {
+        let mut graph = graph();
+        graph.nodes.get_mut(&1).unwrap().state.clear();
+        graph.nodes.get_mut(&2).unwrap().state.clear();
+        assert!(stream_direction(&graph.nodes[&1]).is_none());
+        assert!(endpoint_direction(&graph.nodes[&2]).is_none());
         assert!(snapshot(&graph)["playback"].as_object().unwrap().is_empty());
     }
     #[test]

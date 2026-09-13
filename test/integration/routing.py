@@ -152,14 +152,11 @@ with tempfile.TemporaryDirectory(prefix='audio-routing-') as temporary, ExitStac
         assert linked('test_follow', 'audio_test_output') and linked('test_pinned', 'audio_test_output')
         print('PASS: default followers move; explicit routes stay pinned; default mode clears the pin; stale requests fail', flush=True)
 
-        static = start_stream('test_static', extra='target.object=audio_test_output state.restore-target=false')
+        static = launch(['pw-loopback',
+            '--capture-props=node.name=test_static_capture target.object=audio_test_input',
+            '--playback-props=node.name=test_static application.name=test_static target.object=audio_test_output'])
         until(lambda: linked('test_static', 'audio_test_output'))
         assert node('test_static')['properties'].get('target.object') == 'audio_test_output', node('test_static')
-        # pw-play supplies a legacy target.node=-1 override. Remove it so this
-        # case exercises the target declared in the node's own properties.
-        static_key = str(node('test_static')['id'])+':target.node'
-        run('pw-metadata', '-n', 'default', '-d', str(node('test_static')['id']), 'target.node')
-        client.wait_state(lambda s: static_key not in s['metadata']['default'])
         static_serial = node('test_static')['serial']
         assert client.state['routes']['playback'][static_serial]['mode'] == 'override', client.state['metadata']['default']
         assert select('audio_test_other_output')['outcome'] == 'applied'
