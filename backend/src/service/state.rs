@@ -37,7 +37,11 @@ impl Service {
         ])
         .to_string();
         let mut catalog = self.catalog.lock().unwrap();
+        let links = json!(graph.links.values().collect::<Vec<_>>());
         self.update_state(|state| {
+            if *catalog != fingerprint || state["links"] != links {
+                state["routes"] = crate::routing::snapshot(graph);
+            }
             if *catalog != fingerprint {
                 *catalog = fingerprint;
                 let revision = state["catalogRevision"]
@@ -57,7 +61,7 @@ impl Service {
             state["error"] = json!(graph.error);
             state["nodes"] = json!(graph.nodes.values().collect::<Vec<_>>());
             state["devices"] = json!(graph.devices.values().collect::<Vec<_>>());
-            state["links"] = json!(graph.links.values().collect::<Vec<_>>());
+            state["links"] = links;
             state["metadata"] = json!(graph.metadata);
             state["policies"] = super::policy::snapshot(graph);
         });

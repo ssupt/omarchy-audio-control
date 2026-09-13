@@ -36,11 +36,7 @@ impl Call {
     }
     pub fn validate(&self) -> Result<()> {
         let (min, max) = match self.helper.as_str() {
-            "audio-stream-routes" | "audio-resolve-output-sink" | "audio-sink-availability" => {
-                (0, 0)
-            }
-            "audio-output-set-default" | "audio-input-set-default" => (2, 4),
-            "audio-stream-route-set" => (3, 4),
+            "audio-resolve-output-sink" | "audio-sink-availability" => (0, 0),
             "audio-output-groups" => (1, 4),
             "audio-diagnostics" if self.args == ["snapshot"] => (1, 1),
             _ => return Err(Failure::new("method_not_found", "Unknown audio adapter")),
@@ -59,10 +55,7 @@ impl Call {
     pub fn mutating(&self) -> bool {
         !matches!(
             self.helper.as_str(),
-            "audio-stream-routes"
-                | "audio-resolve-output-sink"
-                | "audio-sink-availability"
-                | "audio-diagnostics"
+            "audio-resolve-output-sink" | "audio-sink-availability" | "audio-diagnostics"
         )
     }
 }
@@ -204,16 +197,20 @@ mod tests {
     #[test]
     fn only_fixed_programs_are_accepted() {
         for helper in [
-            "../audio-input-set-default",
+            "../audio-output-groups",
             "/bin/sh",
-            "audio-input-set-default;id",
+            "audio-output-groups;id",
             "audio-rust-backend",
         ] {
             assert!(Call::new(helper, vec![]).validate().is_err());
         }
-        assert!(Call::new("audio-stream-routes", vec![]).validate().is_ok());
         assert!(
-            Call::new("audio-stream-routes", vec!["extra".into()])
+            Call::new("audio-sink-availability", vec![])
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            Call::new("audio-sink-availability", vec!["extra".into()])
                 .validate()
                 .is_err()
         );

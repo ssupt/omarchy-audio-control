@@ -31,7 +31,6 @@ Panel {
     onTriggered: {
       root.resolveVolumeSink()
       if (!sinkAvailabilityProc.running) sinkAvailabilityProc.running = true
-      root.refreshStreamRoutes()
     }
   }
   readonly property var nodes: Pipewire.nodes ? Pipewire.nodes.values : []
@@ -275,17 +274,12 @@ Panel {
   property var displayAudioStreams: []
   property var displayRecordingStreams: []
 
-  // Per-application routing is separate from the preferred default sink.
-  // WirePlumber persists explicit targets by application identity and restores
-  // them when a stream is recreated; returning to the default option clears
-  // that target. pactl and Quickshell expose the same PipeWire object.serial
-  // values, so this live-state map remains exact even when several applications
-  // share a display name.
-  property var streamRoutes: ({})
-  property var recordingStreamRoutes: ({})
+  // The service publishes live links and explicit/default routing metadata.
+  readonly property var streamRoutes: audioService && audioService.routes.playback || ({})
+  readonly property var recordingStreamRoutes: audioService && audioService.routes.recording || ({})
   property int streamOutputMenuCount: 0
   readonly property bool streamOutputMenuOpen: streamOutputMenuCount > 0
-  property string streamRouteReadError: ""
+  readonly property string streamRouteReadError: audioService && audioService.routes.error || ""
   property string streamRouteSetError: ""
   readonly property string streamRouteError: streamRouteSetError !== ""
     ? streamRouteSetError : streamRouteReadError
@@ -298,11 +292,11 @@ Panel {
     ? defaultDeviceError : (streamRouteError !== "" ? streamRouteError
       : (outputGroups.error !== "" ? outputGroups.error : rulesStore.error))
   property var pendingStreamRoute: null
-  readonly property bool routeMutationBusy: !audioService || !audioService.ready || audioService.busy || defaultSinkProc.running
-    || defaultSourceProc.running || streamRouteSetProc.running
+  property bool defaultSetPending: false
+  readonly property bool routeMutationBusy: !audioService || !audioService.ready || audioService.busy || defaultSetPending
     || pendingStreamRoute !== null || rulesStore.busy || outputGroups.busy
   readonly property bool directDeviceMutationBusy: !audioService || !audioService.ready || audioService.transactionBusy || sceneController.busy
-    || defaultSinkProc.running || defaultSourceProc.running
+    || defaultSetPending
   onDirectDeviceMutationBusyChanged: if (!directDeviceMutationBusy)
     enforceOutputVolumeLimit()
   readonly property bool sceneMutationBusy: sceneController.busy || routeMutationBusy
@@ -744,9 +738,6 @@ Panel {
       displayAudioStreams = nextStreams
     if (serialSignature(displayRecordingStreams) !== serialSignature(nextRecording))
       displayRecordingStreams = nextRecording
-    if (displayAudioStreams.length === 0) streamRoutes = ({})
-    if (displayRecordingStreams.length === 0) recordingStreamRoutes = ({})
-    refreshStreamRoutes()
     clampCursor()
   }
 
@@ -761,37 +752,7 @@ Panel {
     displayAudioSources = []
     displayAudioStreams = []
     displayRecordingStreams = []
-    streamRoutes = ({})
-    recordingStreamRoutes = ({})
-    streamRouteReadError = ""
     streamRouteSetError = ""
-    pendingStreamRoute = null
-  }
-
-  function refreshStreamRoutes() {
-    if (!opened || (displayAudioStreams.length === 0 && displayRecordingStreams.length === 0)
-        || streamRoutesProc.running) return
-    streamRoutesProc.running = true
-  }
-
-  function updateStreamRoutes(raw) {
-    var response = Model.parseAudioStreamRoutes(raw)
-    if (!response.valid) {
-      streamRouteReadError = "Could not read application routes"
-      return
-    }
-    var playback = response.playback
-    var recording = response.recording
-    if (pendingStreamRoute) {
-      var pendingRoutes = pendingStreamRoute.direction === "recording" ? recording : playback
-      pendingRoutes[pendingStreamRoute.stream] = {
-        target: pendingStreamRoute.target,
-        mode: pendingStreamRoute.mode
-      }
-    }
-    streamRoutes = playback
-    recordingStreamRoutes = recording
-    streamRouteReadError = ""
   }
 
   function streamSerial(node) {
@@ -802,6 +763,8 @@ Panel {
   function streamRoute(node) {
     var serial = streamSerial(node)
     if (serial === "") return null
+    if (pendingStreamRoute && pendingStreamRoute.stream === serial)
+      return { target: pendingStreamRoute.target, mode: pendingStreamRoute.mode }
     var route = Model.mapValue(streamRoutes, serial, null)
     return route && typeof route === "object" ? route : null
   }
@@ -809,6 +772,8 @@ Panel {
   function recordingStreamRoute(node) {
     var serial = streamSerial(node)
     if (serial === "") return null
+    if (pendingStreamRoute && pendingStreamRoute.stream === serial)
+      return { target: pendingStreamRoute.target, mode: pendingStreamRoute.mode }
     var route = Model.mapValue(recordingStreamRoutes, serial, null)
     return route && typeof route === "object" ? route : null
   }
@@ -819,13 +784,17 @@ Panel {
     if (streamSerialValue === "" || route.sink === "" || route.mode === ""
         || sceneController.busy || routeMutationBusy) return
 
-    var routes = direction === "recording" ? recordingStreamRoutes : streamRoutes
-    var next = ({})
-    for (var key in routes)
-      if (Model.hasOwn(routes, key)) next[key] = routes[key]
-    next[streamSerialValue] = { target: route.sink, mode: route.mode }
-    if (direction === "recording") recordingStreamRoutes = next
-    else streamRoutes = next
+    var identity = audioService.identityForNode(node)
+    var targets = direction === "recording" ? candidateSources : candidateSinks
+    var target = null
+    for (var i = 0; i < targets.length; i++) {
+      if (Model.nodeSerial(targets[i]) === route.sink) {
+        if (target) return
+        target = targets[i]
+      }
+    }
+    var targetIdentity = audioService.identityForNode(target)
+    if (!identity || !targetIdentity) return
     streamRouteSetError = ""
     pendingStreamRoute = {
       direction: direction,
@@ -833,13 +802,10 @@ Panel {
       target: route.sink,
       mode: route.mode
     }
-    streamRouteSetProc.command = runtime.scriptCommand("audio-stream-route-set", [
-      direction,
-      streamSerialValue,
-      route.sink,
-      route.mode
-    ])
-    streamRouteSetProc.running = true
+    audioService.request("route.set", { identity: identity, target: targetIdentity, mode: route.mode }, function(result, failure) {
+      root.pendingStreamRoute = null
+      root.streamRouteSetError = failure ? failure.message : result && result.outcome === "persistence_failed" ? result.message : ""
+    }, { timeout: 45000 })
   }
 
 
@@ -968,40 +934,25 @@ Panel {
   }
 
 
-  function setDefaultSink(node) {
-    var objectId = Model.nodeObjectId(node)
-    var name = Model.nodeName(node)
-    if (!mutableAudioNode(node) || objectId === "" || name === ""
-        || sceneController.busy || routeMutationBusy) return false
-    var previousSinkName = Model.nodeName(sink)
-    var previousSinkObjectId = Model.nodeObjectId(sink)
-    defaultOutputError = ""
-    defaultSinkProc.command = runtime.scriptCommand("audio-output-set-default", [
-      objectId,
-      name,
-      previousSinkName,
-      previousSinkObjectId
-    ])
-    defaultSinkProc.running = true
+  function setDefaultDevice(node, previous, direction) {
+    if (!mutableAudioNode(node) || sceneController.busy || routeMutationBusy) return false
+    var identity = audioService.identityForNode(node)
+    var previousIdentity = audioService.identityForNode(previous)
+    if (!identity || (previous && !previousIdentity)) return false
+    if (direction === "output") defaultOutputError = ""
+    else defaultInputError = ""
+    defaultSetPending = true
+    audioService.request("default.set", { identity: identity, previous: previousIdentity }, function(result, failure) {
+      root.defaultSetPending = false
+      var message = failure ? failure.message : result && result.outcome === "persistence_failed" ? result.message : ""
+      if (direction === "output") root.defaultOutputError = message
+      else root.defaultInputError = message
+    }, { timeout: 45000 })
     return true
   }
 
-  function setDefaultSource(node) {
-    var objectId = Model.nodeObjectId(node)
-    var name = Model.nodeName(node)
-    if (!mutableAudioNode(node) || objectId === "" || name === ""
-        || sceneController.busy || routeMutationBusy) return
-    var previousSourceName = Model.nodeName(source)
-    var previousSourceObjectId = Model.nodeObjectId(source)
-    defaultInputError = ""
-    defaultSourceProc.command = runtime.scriptCommand("audio-input-set-default", [
-      objectId,
-      name,
-      previousSourceName,
-      previousSourceObjectId
-    ])
-    defaultSourceProc.running = true
-  }
+  function setDefaultSink(node) { return setDefaultDevice(node, sink, "output") }
+  function setDefaultSource(node) { return setDefaultDevice(node, source, "input") }
 
   function sinkAvailable(node) {
     var name = Model.nodeName(node)
@@ -1215,62 +1166,6 @@ Panel {
     }
   }
 
-  AudioCommand {
-    service: root.audioService
-    id: defaultSinkProc
-    onExited: function(exitCode) {
-      root.defaultOutputError = exitCode === 0 ? ""
-        : (exitCode === 2 ? "Default output changed, but its preference could not be saved"
-          : (exitCode === 4 ? "Default output change could not be fully restored"
-            : "Could not change the default audio output"))
-    }
-  }
-
-  AudioCommand {
-    service: root.audioService
-    id: defaultSourceProc
-    onExited: function(exitCode) {
-      root.defaultInputError = exitCode === 0 ? ""
-        : (exitCode === 2 ? "Default input changed, but its preference could not be saved"
-          : (exitCode === 4 ? "Default input change could not be fully restored"
-            : "Could not change the default audio input"))
-    }
-  }
-
-  AudioCommand {
-    service: root.audioService
-    id: streamRoutesProc
-    property string response: ""
-    command: runtime.scriptCommand("audio-stream-routes")
-    stdout: AudioReply {
-      waitForEnd: true
-      onStreamFinished: streamRoutesProc.response = String(text || "")
-    }
-    onExited: function(exitCode) {
-      if (exitCode === 0) root.updateStreamRoutes(response)
-      response = ""
-      if (exitCode !== 0 && root.opened
-          && (root.displayAudioStreams.length > 0 || root.displayRecordingStreams.length > 0))
-        root.streamRouteReadError = "Could not read application routes"
-    }
-  }
-
-  AudioCommand {
-    service: root.audioService
-    id: streamRouteSetProc
-    onExited: function(exitCode) {
-      if (exitCode === 4)
-        root.streamRouteSetError = "Application route changed and its previous state could not be fully restored"
-      else if (exitCode === 2) root.streamRouteSetError = "Application route changed, but its saved rule could not be updated"
-      else if (exitCode !== 0) root.streamRouteSetError = "Could not change the application route"
-      else root.streamRouteSetError = ""
-      root.pendingStreamRoute = null
-
-      // A failed enforcement would otherwise stay cached as satisfied.
-      streamRouteRefreshTimer.restart()
-    }
-  }
-
   Timer {
     id: audioModelRefreshTimer
     interval: 75
@@ -1278,13 +1173,6 @@ Panel {
     onTriggered: root.refreshDisplayAudioModels()
   }
 
-
-  Timer {
-    id: streamRouteRefreshTimer
-    interval: 150
-    repeat: false
-    onTriggered: root.refreshStreamRoutes()
-  }
 
   Timer {
     interval: 1500
@@ -1874,8 +1762,8 @@ Panel {
                   : root.streamLabel(streamDelegate.node)
                 iconSource: root.streamIconSource(streamDelegate.node)
                 routeAvailable: root.streamSerial(streamDelegate.node) !== ""
-                routeSetBusy: streamRouteSetProc.running
-                  || defaultSinkProc.running || defaultSourceProc.running
+                routeSetBusy: root.pendingStreamRoute !== null
+                  || defaultSetPending
                   || root.pendingStreamRoute !== null || rulesStore.busy
                 mutationBlocked: sceneController.busy
                 hasCursor: root.cursorActive
@@ -1947,8 +1835,8 @@ Panel {
                   : root.streamLabel(recordingStreamDelegate.node)
                 iconSource: root.streamIconSource(recordingStreamDelegate.node)
                 routeAvailable: root.streamSerial(recordingStreamDelegate.node) !== ""
-                routeSetBusy: streamRouteSetProc.running
-                  || defaultSinkProc.running || defaultSourceProc.running
+                routeSetBusy: root.pendingStreamRoute !== null
+                  || defaultSetPending
                   || root.pendingStreamRoute !== null || rulesStore.busy
                 mutationBlocked: sceneController.busy
                 hasCursor: root.cursorActive

@@ -1,7 +1,5 @@
 //! Whole-scene orchestration. The caller holds both the service transaction
 //! barrier and the companion-compatible lock until verification completes.
-use crate::adapter::{Adapter, Call};
-use crate::files::FileLock;
 use crate::native::{self, AudioPatch, Graph, Handle, Identity, Node};
 use crate::protocol::{Failure, Result};
 use crate::storage::normalize_scene;
@@ -142,8 +140,6 @@ pub fn capture(native: &Handle, name: &str, overdrive: bool) -> Result<Value> {
 
 pub async fn apply(
     native: &Handle,
-    adapter: &Adapter,
-    lock: &FileLock,
     storage: Option<&crate::storage::Storage>,
     raw: &Value,
     overdrive: bool,
@@ -226,16 +222,22 @@ pub async fn apply(
                     result["skipped"].as_array_mut().unwrap().push(json!(name));
                     continue;
                 };
-                let args = vec![node.id.to_string(), name.into()];
-                let helper = if text(step, "direction") == "input" {
-                    "audio-input-set-default"
-                } else {
-                    "audio-output-set-default"
-                };
-                adapter
-                    .run(&Call::new(helper, args), Some(lock))
-                    .await
-                    .map(|output| output.exit_code)
+                crate::defaults::select(
+                    native,
+                    storage,
+                    crate::defaults::Set {
+                        identity: identity(&graph, node),
+                        previous: None,
+                    },
+                )
+                .await
+                .map(|value| {
+                    if value["outcome"] == "persistence_failed" {
+                        2
+                    } else {
+                        0
+                    }
+                })
             };
             match change {
                 Ok(0) => result["applied"] = json!(result["applied"].as_u64().unwrap() + 1),

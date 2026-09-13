@@ -132,23 +132,18 @@ impl Service {
                     }
                 }
                 let started = std::time::Instant::now();
-                for (key, args) in routes {
+                for (key, params) in routes {
                     if *users.borrow() == 0 || started.elapsed().as_secs() > 60 {
                         break;
                     }
                     if !attempted.insert(key) {
                         continue;
                     }
-                    let result = service
-                        .adapter
-                        .run(&Call::new("audio-stream-route-set", args), Some(&lock))
-                        .await;
-                    if result.is_err() || result.as_ref().is_ok_and(|o| o.exit_code != 0) {
+                    if let Err(error) = crate::routing::set(native, &params).await {
                         service.update_state(|s| {
                             s["automationError"] = json!("An application rule could not be applied")
                         });
-                        // An unknown adapter outcome stops the batch.
-                        if result.is_err() || result.as_ref().is_ok_and(|o| o.exit_code == 4) {
+                        if error.outcome == "unknown" {
                             break;
                         }
                     }

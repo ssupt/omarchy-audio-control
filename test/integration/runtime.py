@@ -50,17 +50,12 @@ with tempfile.TemporaryDirectory(prefix='audio-integration-') as temporary:
     (helpers / 'audio-diagnostics').write_text('''printf 'sample\\n' >>"$AUDIO_INTEGRATION_LOG.diagnostics"
 printf '%s\\n' '{"version":1,"graph":{"rate":48000},"services":[],"devices":[],"routes":[],"warnings":[]}'
 ''')
-    (helpers / 'audio-input-set-default').write_text('''set -eu
+    (helpers / 'audio-output-groups').write_text('''set -eu
 source "$(dirname "$0")/.audio-common"
 audio_acquire_mutation_lock
 printf 'start %s\\n' "$1" >>"$AUDIO_INTEGRATION_LOG"
 sleep .2
 printf 'finish %s\\n' "$1" >>"$AUDIO_INTEGRATION_LOG"
-''')
-    (helpers / 'audio-stream-route-set').write_text('''set -eu
-source "$(dirname "$0")/.audio-common"
-audio_acquire_mutation_lock
-printf 'routed\\n' >>"$AUDIO_INTEGRATION_LOG.routes"
 ''')
     binaries = work / 'bin'
     binaries.mkdir()
@@ -184,18 +179,6 @@ assert len(sys.stdin.buffer.read()) > 0
         a.wait_state(lambda s: s.get('microphone',{}).get('state') == 'playing')
         a.wait_state(lambda s: s.get('microphone',{}).get('state') == 'ready')
         assert (work/'operations.capture').read_text().splitlines() == ['record','play']
-        # An old release or companion can keep the shared lock beyond its
-        # acquisition deadline. Rules must retry before admission, then apply
-        # once, without waiting for another topology change.
-        with (work/'omarchy-audio-mutation.lock').open('r+') as lock:
-            fcntl.flock(lock,fcntl.LOCK_EX)
-            b.request('rules.set_app',dict(app='audio test client',direction='playback',target='audio_test_output'))
-            time.sleep(5.5)
-            assert not (work/'operations.routes').exists()
-            fcntl.flock(lock,fcntl.LOCK_UN)
-        until(lambda: (work/'operations.routes').exists())
-        assert (work/'operations.routes').read_text().splitlines() == ['routed']
-        b.request('rules.delete_app',dict(app='audio test client',direction='playback'))
         b.request('microphone.stop',dict(owner='test-window',discard=True))
         a.wait_state(lambda s: s.get('microphone',{}).get('state') == 'idle')
         assert b.response(b.send('microphone.start',dict(owner='test-window',record=False)))['error']['code'] == 'no_clip'
@@ -210,18 +193,18 @@ assert len(sys.stdin.buffer.read()) > 0
         assert b.response(pending)['error']['code'] == 'cancelled'
         assert (work/'operations.capture').read_text().splitlines() == ['record','play']
         # Two clients serialize through the complete native + helper lock boundary.
-        one = a.send('adapter.run',dict(helper='audio-input-set-default',generation=identity['generation'],args=['one','profile']))
+        one = a.send('adapter.run',dict(helper='audio-output-groups',generation=identity['generation'],args=['one','profile']))
         until(lambda: (work/'operations').exists())
         health = a.send('health')
         assert a.response(health)['result']['status'] == 'ok'
         assert one not in a.replies, 'A long command blocked health/cancellation on the same connection'
-        two = b.send('adapter.run',dict(helper='audio-input-set-default',generation=identity['generation'],args=['two','profile']))
+        two = b.send('adapter.run',dict(helper='audio-output-groups',generation=identity['generation'],args=['two','profile']))
         assert a.response(one)['result']['exitCode'] == 0
         assert b.response(two)['result']['exitCode'] == 0
         assert (work/'operations').read_text().splitlines() == ['start one','finish one','start two','finish two']
         # Admitted operations are not cancelled by a lost requesting connection.
         c = Client(path)
-        c.send('adapter.run',dict(helper='audio-input-set-default',generation=identity['generation'],args=['disconnected','profile']))
+        c.send('adapter.run',dict(helper='audio-output-groups',generation=identity['generation'],args=['disconnected','profile']))
         until(lambda: 'start disconnected' in (work/'operations').read_text())
         c.close()
         until(lambda: 'finish disconnected' in (work/'operations').read_text())
@@ -283,6 +266,9 @@ assert len(sys.stdin.buffer.read()) > 0
                 b.request('node.level', dict(identity=dict(generation=a.state['generation'],
                     id=playback['id'], serial=playback['serial']), volume=1.25))
                 b.request('settings.set', dict(key='outputOverdrive', value=False))
+                subprocess.run(['pw-metadata', '-n', 'default', '0', 'default.audio.sink', '{"name":"audio_test_output"}', 'Spa:String:JSON'], env=env, check=True, stdout=log)
+                subprocess.run(['pw-metadata', '-n', 'default', '0', 'default.audio.source', '{"name":"audio_test_input"}', 'Spa:String:JSON'], env=env, check=True, stdout=log)
+                subprocess.run(['pw-link', 'audio_test_playback:monitor_FL', 'audio_test_output:playback_FL'], env=env, check=True)
                 for directory in ('Ui','Commons'):
                     (work/directory).symlink_to(shell_root/directory,target_is_directory=True)
             shutil.copy(ROOT/'test/fixtures/ui-controls.qml', work/'ui-controls.qml')
@@ -401,7 +387,7 @@ ShellRoot {
             assert (work/'operations.diagnostics').read_text().splitlines() == ['sample', 'sample'], output
             if full_ui:
                 assert 'RUNTIME_UI_SUCCESS' in output, output
-                print('PASS: volume limits, boost reset, deferred tabs, shared scenes, pointer cancellation and native policies')
+                print('PASS: volume limits, boost reset, deferred tabs, shared scenes, pointer cancellation, native policies, defaults and routes')
                 print('PASS: actual Service.qml and both QML entry points on a private headless compositor')
             # Disabling/removing the QML service closes its relay. The private
             # daemon must retire without an installed systemd service.

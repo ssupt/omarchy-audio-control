@@ -1199,43 +1199,6 @@ function parseStreamOutputOption(value) {
   return { mode: mode, sink: sink }
 }
 
-function parseAudioStreamRoutes(raw) {
-  var parsed
-  var text = boundedSerializedInput(raw, 2097152)
-  try {
-    if (text === null) throw new Error("Audio route response is too large")
-    parsed = JSON.parse(text)
-  } catch (e) {
-    return { valid: false, playback: {}, recording: {} }
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
-      || !parsed.playback || typeof parsed.playback !== "object" || Array.isArray(parsed.playback)
-      || !parsed.recording || typeof parsed.recording !== "object" || Array.isArray(parsed.recording))
-    return { valid: false, playback: {}, recording: {} }
-
-  function normalize(routes) {
-    var result = {}
-    var inspected = 0
-    for (var serial in routes) {
-      if (inspected++ >= 512) break
-      if (!hasOwn(routes, serial) || !/^\d{1,20}$/.test(serial)) continue
-      var route = routes[serial]
-      if (!route || typeof route !== "object" || Array.isArray(route)) continue
-      var target = String(route.target === undefined || route.target === null ? "" : route.target)
-      var mode = String(route.mode || "")
-      if (!/^\d{1,20}$/.test(target) || (mode !== "default" && mode !== "override")) continue
-      setMapValue(result, serial, { target: target, mode: mode })
-    }
-    return result
-  }
-
-  return {
-    valid: true,
-    playback: normalize(parsed.playback),
-    recording: normalize(parsed.recording)
-  }
-}
-
 function nodeLabel(node) {
   try {
     if (!node) return "Unknown"
@@ -1688,7 +1651,6 @@ if (typeof module !== "undefined") {
     recordingInputOptions: recordingInputOptions,
     streamRouteDestinationCount: streamRouteDestinationCount,
     parseStreamOutputOption: parseStreamOutputOption,
-    parseAudioStreamRoutes: parseAudioStreamRoutes,
     nodeLabel: nodeLabel,
     isHeadphones: isHeadphones,
     sinkGlyph: sinkGlyph,

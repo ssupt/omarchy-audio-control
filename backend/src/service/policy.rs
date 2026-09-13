@@ -111,6 +111,7 @@ impl Service {
                 Ok(Change {
                     store,
                     id,
+                    subject: 0,
                     key: params.key.clone(),
                     before: metadata::value(&graph, store, &params.key).cloned(),
                     after: Some(after.clone()),
@@ -120,6 +121,8 @@ impl Service {
         let batch = Batch {
             generation: params.generation,
             changes,
+            nodes: vec![],
+            checks: vec![],
         };
         if batch.confirmed(&graph) {
             return Ok(json!({"outcome":"applied"}));

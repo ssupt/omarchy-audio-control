@@ -118,9 +118,11 @@ with tempfile.TemporaryDirectory(prefix='audio-groups-') as temporary, ExitStack
             ['create', 'Desk', json.dumps(['audio_test_left', 'audio_test_right'])]))
         group_name = 'omarchy_audio_group_'+group_id
         group = until(lambda: next((s for s in sinks() if s['name'] == group_name), None))
-        run('pactl', 'set-default-sink', group_name)
+        group_node = client.wait_state(lambda s: any(n['name'] == group_name for n in s['nodes']))
+        group_node = next(n for n in group_node['nodes'] if n['name'] == group_name)
+        assert client.request('default.set', dict(identity=dict(generation=state['generation'],
+            id=group_node['id'], serial=group_node['serial'])))['outcome'] == 'applied'
         until(lambda: run('pactl', 'get-default-sink').strip() == group_name)
-        until(lambda: change('audio-output-set-default', [str(group['properties']['object.id']), group_name]))
         zero = cleanup.enter_context(open('/dev/zero', 'rb'))
         player = launch(['pw-play', '--raw', '--rate=48000', '--channels=2', '--format=s16',
             '--properties=application.name="Group Test Player" node.name=audio_test_player', '-'], stdin=zero)

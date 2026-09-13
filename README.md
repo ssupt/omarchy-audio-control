@@ -85,19 +85,20 @@ Use the same helper with `remove` before removing the plugin.
 ## Architecture
 
 Both panels share one Rust service for PipeWire state, volume changes, saved
-settings, device profiles and ports, WirePlumber policies, scenes, routing
+settings, device profiles and ports, default devices, application routes,
+WirePlumber policies, scenes, routing
 automation, microphone jobs and diagnostic snapshots.
 The service serializes changes and checks device identities so queued commands
 cannot target a replacement device after a disconnect. It starts with the plugin
 and exits after its clients leave and accepted work finishes.
 
-**The Bash migration is incomplete.** Default-device changes,
-application routing, output groups and diagnostic collection still use helper
-adapters. Rust coordinates those operations. Desktop actions such as speaker
+**The Bash migration is incomplete.** Output groups and diagnostic collection
+still use helper adapters coordinated by Rust. Desktop actions such as speaker
 tests, support-report copying and recovery also use helpers.
 
-Graph and settings updates use events. Profile and port discovery and selection,
-and WirePlumber policies use the existing PipeWire connection. Visible diagnostic
+Graph and settings updates use events. Device settings, default selection,
+application routing and WirePlumber policies use the existing PipeWire connection.
+Visible diagnostic
 views share cached samples. The
 [benchmark harness](test/integration/benchmark.py) measures CPU,
 memory and helper launches; the Rust preview reduced polling CPU in local tests,

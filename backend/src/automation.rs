@@ -47,21 +47,14 @@ pub fn group_signature(graph: &Graph, rules: &Value) -> String {
         .collect();
     json!([graph.generation, sinks, rules["outputGroups"]]).to_string()
 }
-pub fn routes(graph: &Graph, rules: &Value) -> Vec<(String, Vec<String>)> {
+pub fn routes(graph: &Graph, rules: &Value) -> Vec<(String, crate::routing::Set)> {
     let mut result = Vec::new();
     for stream in graph.nodes.values().filter(|n| !n.serial.is_empty()) {
-        let (direction, target_class) = match class(stream) {
-            "Stream/Output/Audio" => ("playback", "Audio/Sink"),
-            "Stream/Input/Audio" => ("recording", "Audio/Source"),
-            _ => continue,
-        };
-        if stream
-            .properties
-            .get("application.id")
-            .is_some_and(|id| id == "ssupt.audio-control")
-        {
+        let Some(direction) = crate::routing::stream_direction(stream) else {
             continue;
-        }
+        };
+        let target_class = direction.endpoint_class();
+        let direction = direction.name();
         let app = app(stream);
         let Some(rule) = rules["appRules"]
             .as_array()
@@ -96,12 +89,11 @@ pub fn routes(graph: &Graph, rules: &Value) -> Vec<(String, Vec<String>)> {
         .to_string();
         result.push((
             key,
-            vec![
-                direction.into(),
-                stream.serial.clone(),
-                target.serial.clone(),
-                "override".into(),
-            ],
+            crate::routing::Set {
+                identity: crate::routing::identity(graph, stream),
+                target: crate::routing::identity(graph, target),
+                mode: crate::routing::Mode::Override,
+            },
         ));
     }
     result

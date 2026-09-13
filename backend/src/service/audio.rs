@@ -185,15 +185,13 @@ impl Service {
             .as_ref()
             .ok_or_else(|| Failure::new("disconnected", "Native audio is unavailable"))?;
         let _transaction = self.transaction().await?;
-        let lock = FileLock::mutation().await?;
+        let _lock = FileLock::mutation().await?;
         self.set_busy(true);
         let _busy = Busy(self);
         let overdrive = self.state.borrow()["stores"]["settings"]["outputOverdrive"] == true;
         let result = if request.method == "scene.apply" {
             crate::scenes::apply(
                 native,
-                &self.adapter,
-                &lock,
                 self.storage.as_ref(),
                 &request.params::<Apply>()?.scene,
                 overdrive,

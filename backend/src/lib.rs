@@ -14,3 +14,6 @@ pub mod storage;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const SERVICE_NAME: &str = "omarchy-audio-service";
+
+pub mod defaults;
+pub mod routing;

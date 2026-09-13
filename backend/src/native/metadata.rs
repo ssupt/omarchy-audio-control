@@ -1,5 +1,7 @@
 //! Checked metadata writes on the existing PipeWire thread.
-use super::{Completion, Graph, Handle, Message, MetadataValue, Proxies};
+use super::{
+    Completion, Graph, Handle, Identity, Message, MetadataValue, Proxies, validate_identity,
+};
 use crate::protocol::{Failure, Result};
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -8,6 +10,7 @@ use tokio::sync::oneshot;
 pub struct Change {
     pub store: &'static str,
     pub id: u32,
+    pub subject: u32,
     pub key: String,
     pub before: Option<MetadataValue>,
     pub after: Option<MetadataValue>,
@@ -17,6 +20,9 @@ pub struct Change {
 pub struct Batch {
     pub generation: String,
     pub changes: Vec<Change>,
+    pub nodes: Vec<Identity>,
+    /// Compare at admission only; the operation may change these values.
+    pub checks: Vec<Change>,
 }
 
 pub(super) struct Command {
@@ -25,7 +31,16 @@ pub(super) struct Command {
 }
 
 pub fn value<'a>(graph: &'a Graph, store: &str, key: &str) -> Option<&'a MetadataValue> {
-    graph.metadata.get(store)?.get(&format!("0:{key}"))
+    subject_value(graph, store, 0, key)
+}
+
+pub fn subject_value<'a>(
+    graph: &'a Graph,
+    store: &str,
+    subject: u32,
+    key: &str,
+) -> Option<&'a MetadataValue> {
+    graph.metadata.get(store)?.get(&format!("{subject}:{key}"))
 }
 
 impl Batch {
@@ -36,6 +51,7 @@ impl Batch {
             || self
                 .changes
                 .iter()
+                .chain(&self.checks)
                 .any(|c| graph.metadata_ids.get(c.store) != Some(&c.id))
         {
             return Err(Failure::new(
@@ -43,15 +59,38 @@ impl Batch {
                 "Audio settings changed; refresh before retrying",
             ));
         }
+        for identity in &self.nodes {
+            // A stream can close while its operation is queued. Never write
+            // metadata for a vanished subject or an ID reused by another node.
+            if graph.nodes.contains_key(&identity.id)
+                || !self
+                    .changes
+                    .iter()
+                    .any(|c| c.subject == identity.id && c.subject != 0)
+            {
+                validate_identity(graph, identity)?;
+            }
+        }
         Ok(())
+    }
+
+    fn active(change: &Change, graph: &Graph) -> bool {
+        change.subject == 0 || graph.nodes.contains_key(&change.subject)
     }
 
     pub(super) fn apply(&self, graph: &Graph, proxies: &Proxies) -> Result<()> {
         self.validate(graph)?;
         // Check every precondition before starting the batch. A companion's
         // newer value must not be overwritten by an operation waiting in the queue.
-        for change in &self.changes {
-            if value(graph, change.store, &change.key) != change.before.as_ref() {
+        for change in self
+            .changes
+            .iter()
+            .chain(&self.checks)
+            .filter(|c| Self::active(c, graph))
+        {
+            if subject_value(graph, change.store, change.subject, &change.key)
+                != change.before.as_ref()
+            {
                 return Err(Failure::new(
                     "conflict",
                     "Audio setting changed before the operation started",
@@ -61,9 +100,12 @@ impl Batch {
                 return Err(Failure::new("stale_graph", "Audio settings disappeared"));
             }
         }
-        for change in &self.changes {
+        for change in self.changes.iter().filter(|c| Self::active(c, graph)) {
+            if change.before == change.after {
+                continue;
+            }
             proxies.metadata[&change.id].metadata.set_property(
-                0,
+                change.subject,
                 &change.key,
                 change.after.as_ref().map(|v| v.type_.as_str()),
                 change.after.as_ref().map(|v| v.value.as_str()),
@@ -77,14 +119,21 @@ impl Batch {
             && self
                 .changes
                 .iter()
-                .all(|c| value(graph, c.store, &c.key) == c.after.as_ref())
+                .filter(|c| Self::active(c, graph))
+                .all(|c| subject_value(graph, c.store, c.subject, &c.key) == c.after.as_ref())
     }
 
     pub fn rollback(&self, graph: &Graph) -> Result<Self> {
         self.validate(graph)?;
         let mut rollback = self.clone();
+        for check in &mut rollback.checks {
+            check.before = subject_value(graph, check.store, check.subject, &check.key).cloned();
+            check.after = check.before.clone();
+        }
+        rollback.changes.retain(|c| Self::active(c, graph));
+        rollback.nodes.retain(|n| graph.nodes.contains_key(&n.id));
         for change in &mut rollback.changes {
-            let current = value(graph, change.store, &change.key).cloned();
+            let current = subject_value(graph, change.store, change.subject, &change.key).cloned();
             if current != change.before && current != change.after {
                 return Err(Failure::unknown(
                     "Another client changed the audio setting; rollback was skipped",
@@ -176,9 +225,12 @@ mod tests {
             .insert("0:test".into(), after.clone());
         let batch = Batch {
             generation: "session".into(),
+            nodes: vec![],
+            checks: vec![],
             changes: vec![Change {
                 store: "sm-settings",
                 id: 10,
+                subject: 0,
                 key: "test".into(),
                 before: Some(before.clone()),
                 after: Some(after),
@@ -204,5 +256,90 @@ mod tests {
         graph.metadata_ids.insert("sm-settings".into(), 11);
         assert_eq!(batch.validate(&graph).unwrap_err().code, "stale_graph");
         assert!(!batch.confirmed(&graph));
+    }
+    #[test]
+    fn node_identity_guards_reject_reuse_and_skip_vanished_stream_subjects() {
+        let mut graph = Graph {
+            connected: true,
+            ready: true,
+            generation: "test".into(),
+            ..Graph::default()
+        };
+        graph.metadata_ids.insert("default".into(), 10);
+        graph.nodes.insert(
+            20,
+            super::super::Node {
+                id: 20,
+                serial: "100".into(),
+                ..Default::default()
+            },
+        );
+        let batch = Batch {
+            generation: "test".into(),
+            nodes: vec![Identity {
+                generation: "test".into(),
+                id: 20,
+                serial: "100".into(),
+            }],
+            checks: vec![],
+            changes: vec![Change {
+                store: "default",
+                id: 10,
+                subject: 20,
+                key: "target.object".into(),
+                before: None,
+                after: None,
+            }],
+        };
+        assert!(batch.confirmed(&graph));
+        graph.nodes.get_mut(&20).unwrap().serial = "101".into();
+        assert_eq!(
+            batch.apply(&graph, &Proxies::default()).unwrap_err().code,
+            "stale_node"
+        );
+        assert!(batch.rollback(&graph).is_err());
+        graph.nodes.remove(&20);
+        assert!(batch.apply(&graph, &Proxies::default()).is_ok());
+        assert!(batch.rollback(&graph).unwrap().changes.is_empty());
+    }
+    #[test]
+    fn admission_checks_reject_a_new_default_without_writing_metadata() {
+        let mut graph = Graph {
+            connected: true,
+            ready: true,
+            generation: "test".into(),
+            ..Graph::default()
+        };
+        graph.metadata_ids.insert("default".into(), 10);
+        let value = MetadataValue {
+            subject: 0,
+            key: "default.audio.sink".into(),
+            value: "old".into(),
+            type_: "Spa:String:JSON".into(),
+        };
+        let batch = Batch {
+            generation: "test".into(),
+            nodes: vec![],
+            changes: vec![],
+            checks: vec![Change {
+                store: "default",
+                id: 10,
+                subject: 0,
+                key: value.key.clone(),
+                before: Some(value.clone()),
+                after: None,
+            }],
+        };
+        graph.metadata.entry("default".into()).or_default().insert(
+            "0:default.audio.sink".into(),
+            MetadataValue {
+                value: "external".into(),
+                ..value
+            },
+        );
+        assert_eq!(
+            batch.apply(&graph, &Proxies::default()).unwrap_err().code,
+            "conflict"
+        );
     }
 }

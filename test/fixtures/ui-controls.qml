@@ -260,8 +260,32 @@ Item {
         if (root.advanced.audioMutationBusy) return
         if (!root.check(!!root.advanced.profileSetError && !root.advanced.profileSetPending,
             "rejected profile selection left the control blocked or hid its error")) return
+        var output = root.panel.candidateSinks.find(function(n) { return n.name === "audio_test_output" })
+        if (!root.check(!!output && root.panel.setDefaultSink(output), "default selection did not start")) return
+        if (!root.check(root.panel.defaultSetPending && !root.panel.setDefaultSink(output), "default selection did not block duplicates")) return
+        root.phase++
+        break
+      case 21:
+        if (root.panel.defaultSetPending || root.panel.routeMutationBusy) return
+        if (!root.check(!root.panel.defaultOutputError, "native default selection failed")) return
+        var output = root.panel.candidateSinks.find(function(n) { return n.name === "audio_test_output" })
+        var serial = root.panel.audioService.identityForNode(output).serial
+        root.panel.setStreamRoute(root.panel.candidateStreams.find(function(n) { return n.name === "audio_test_playback" }), "override:"+serial, "playback")
+        if (!root.check(root.panel.pendingStreamRoute !== null, "application route did not guard its pending request")) return
+        root.phase++
+        break
+      case 22:
+        if (root.panel.routeMutationBusy) return
+        if (!root.check(!root.panel.streamRouteSetError && root.panel.streamRoute(root.panel.candidateStreams.find(function(n) { return n.name === "audio_test_playback" })).mode === "override", "native application pin did not reach the panel")) return
+        var output = root.panel.candidateSinks.find(function(n) { return n.name === "audio_test_output" })
+        root.panel.setStreamRoute(root.panel.candidateStreams.find(function(n) { return n.name === "audio_test_playback" }), "default:"+root.panel.audioService.identityForNode(output).serial, "playback")
+        root.phase++
+        break
+      case 23:
+        if (root.panel.routeMutationBusy) return
+        if (!root.check(!root.panel.streamRouteSetError && root.panel.streamRoute(root.panel.candidateStreams.find(function(n) { return n.name === "audio_test_playback" })).mode === "default", "application default mode did not reach the panel")) return
         root.done = true
-        console.log("RUNTIME_UI_SUCCESS volume, tabs, shared scenes, canceled pointer drag, native policies, ports and profiles")
+        console.log("RUNTIME_UI_SUCCESS volume, tabs, shared scenes, canceled pointer drag, native policies, ports, profiles, defaults and application routes")
       }
     }
   }

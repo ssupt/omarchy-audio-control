@@ -144,7 +144,6 @@ rm -rf -- "$runtime_safety_dir"
 for helper_call in \
   'audio-resolve-output-sink extra' \
   'audio-sink-availability extra' \
-  'audio-stream-routes extra' \
   'audio-speaker-test output extra' \
   'audio-recovery extra' \
   'prepare-advanced-window extra' \
@@ -709,22 +708,7 @@ const prototypeAvailability = model.parseSinkAvailability('__proto__\t0\nconstru
 assert.equal(model.mapValue(prototypeAvailability, '__proto__', true), false)
 assert.equal(model.mapValue(prototypeAvailability, 'constructor', true), false)
 assert.equal(model.parseSinkAvailability('duplicate\t1\nduplicate\t0\n').duplicate, false)
-assert.deepEqual(model.parseAudioStreamRoutes(JSON.stringify({
-  playback: { 300: { target: 101, mode: 'override' }, bad: { target: 9, mode: 'override' } },
-  recording: { 400: { target: '201', mode: 'default' }, 401: { target: 'x', mode: 'default' } }
-})), {
-  valid: true,
-  playback: { 300: { target: '101', mode: 'override' } },
-  recording: { 400: { target: '201', mode: 'default' } }
-})
-assert.deepEqual(model.parseAudioStreamRoutes('not json'), {
-  valid: false, playback: {}, recording: {}
-})
 assert.deepEqual(model.parseStreamOutputOption('override:' + '1'.repeat(21)), { mode: '', sink: '' })
-assert.deepEqual(model.parseAudioStreamRoutes(JSON.stringify({
-  playback: { ['1'.repeat(21)]: { target: 1, mode: 'override' } },
-  recording: { 1: { target: '2'.repeat(21), mode: 'default' } }
-})), { valid: true, playback: {}, recording: {} })
 const diagnostics = model.parseAudioDiagnostics(JSON.stringify({
   version: 1,
   healthy: true,
@@ -932,501 +916,13 @@ fi
 echo "PASS: native diagnostics and guarded recovery"
 rm -rf -- "$diagnostic_tmp"
 
-route_log=$(mktemp)
-route_read_state=$(mktemp)
-trap 'rm -f "$route_log" "$route_read_state"' EXIT
-
-AUDIO_CONTROL_ROUTE_LOG="$route_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override
-
-expected_route_log=$(cat <<'EOF'
-move-sink-input 300 101
-pw-metadata -n default -- 900 target.object 101 Spa:Id
-pw-metadata -n default -- 900 target.node 1001 Spa:Id
-EOF
-)
-[[ $(<"$route_log") == "$expected_route_log" ]] || fail "persistent stream target"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_STREAM_OWNER_MODULE=1 \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "module-owned playback stream accepted a manual route"
-fi
-[[ ! -s $route_log ]] || fail "module-owned playback stream was moved"
-
-: >"$route_log"
-AUDIO_CONTROL_ROUTE_LOG="$route_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 default
-
-expected_route_log=$(cat <<'EOF'
-move-sink-input 300 101
-pw-metadata -n default -- 900 target.object -1 Spa:Id
-pw-metadata -n default -- 900 target.node -1 Spa:Id
-EOF
-)
-[[ $(<"$route_log") == "$expected_route_log" ]] || fail "default-following stream target"
-
-: >"$route_log"
-AUDIO_CONTROL_ROUTE_LOG="$route_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" recording 400 201 override
-
-expected_route_log=$(cat <<'EOF'
-move-source-output 400 201
-pw-metadata -n default -- 901 target.object 201 Spa:Id
-pw-metadata -n default -- 901 target.node 2001 Spa:Id
-EOF
-)
-[[ $(<"$route_log") == "$expected_route_log" ]] || fail "persistent recording target"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_METADATA_READ_FAIL=1 \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "stream route accepted unreadable persistence metadata"
-fi
-[[ ! -s $route_log ]] || fail "stream moved before persistence metadata validation"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_DUPLICATE_METADATA_VALUE=1 \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "stream route accepted ambiguous persistence metadata"
-fi
-[[ ! -s $route_log ]] || fail "stream moved after ambiguous persistence metadata"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT=123456789012345678901 \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_NODE=123456789012345678901 \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "stream route accepted unbounded persistence metadata"
-fi
-[[ ! -s $route_log ]] || fail "stream moved after malformed persistence metadata"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT=-2 AUDIO_CONTROL_ROUTE_PREVIOUS_NODE=-2 \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "stream route accepted an invalid negative metadata target"
-fi
-[[ ! -s $route_log ]] || fail "stream moved after invalid negative metadata"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_ORIGINAL_SINK=100 \
-  AUDIO_CONTROL_ROUTE_DUPLICATE_ORIGINAL_OBJECT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "stream route accepted an ambiguous rollback endpoint"
-fi
-[[ ! -s $route_log ]] || fail "stream moved without a unique rollback endpoint"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_ORIGINAL_SINK=100 \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT=100 AUDIO_CONTROL_ROUTE_PREVIOUS_NODE=1000 \
-  AUDIO_CONTROL_ROUTE_METADATA_WRITE_FAIL=target.node PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "partially persisted stream route reported success"
-fi
-expected_route_log=$(cat <<'EOF'
-move-sink-input 300 101
-pw-metadata -n default -- 900 target.object 101 Spa:Id
-pw-metadata -n default -- 900 target.node 1001 Spa:Id
-move-sink-input 300 100
-pw-metadata -n default -- 900 target.object 100 Spa:Id
-pw-metadata -n default -- 900 target.node 1000 Spa:Id
-EOF
-)
-[[ $(<"$route_log") == "$expected_route_log" ]] || fail "partial stream route rollback"
-
-# Command status is not authoritative: accept a fully verified change even
-# when Pulse reports a late transport failure.
-: >"$route_log"
-AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_ORIGINAL_SINK=100 \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT=100 AUDIO_CONTROL_ROUTE_PREVIOUS_NODE=1000 \
-  AUDIO_CONTROL_ROUTE_MOVE_FAIL_AFTER_EFFECT_TARGET=101 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override ||
-  fail "verified route rejected after late move failure"
-
-: >"$route_log"
-AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_ORIGINAL_SINK=100 \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT=100 AUDIO_CONTROL_ROUTE_PREVIOUS_NODE=1000 \
-  AUDIO_CONTROL_ROUTE_METADATA_WRITE_FAIL=target.node \
-  AUDIO_CONTROL_ROUTE_METADATA_FAIL_AFTER_EFFECT=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override ||
-  fail "verified route rejected after late metadata failure"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_ORIGINAL_SINK=100 \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT=100 AUDIO_CONTROL_ROUTE_PREVIOUS_NODE=1000 \
-  AUDIO_CONTROL_ROUTE_MOVE_NO_EFFECT_TARGET=101 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "stream route accepted a no-op move"
-fi
-[[ $(<"$route_log") == "move-sink-input 300 101" ]] ||
-  fail "no-op stream move wrote persistence metadata"
-
-: >"$route_log"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 999 override >/dev/null 2>&1; then
-  fail "stream route accepted an absent target"
-fi
-[[ ! -s $route_log ]] || fail "absent stream target changed live state"
-
-: >"$route_log"
-printf '0\n' >"$route_read_state"
-AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_READ_STATE="$route_read_state" \
-  AUDIO_CONTROL_ROUTE_STREAM_INDEX_REUSE=1 AUDIO_CONTROL_ROUTE_ORIGINAL_SINK=100 \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT=100 AUDIO_CONTROL_ROUTE_PREVIOUS_NODE=1000 \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override ||
-  fail "identity-safe route rejected a reindexed stream"
-grep -q '^move-sink-input 302 101$' "$route_log" ||
-  fail "route mutation targeted a reused stream index"
-! grep -q '^move-sink-input 300 ' "$route_log" ||
-  fail "route mutation touched the replacement stream"
-
-: >"$route_log"
-printf '0\n' >"$route_read_state"
-AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_READ_STATE="$route_read_state" \
-  AUDIO_CONTROL_ROUTE_TARGET_REINDEX=1 AUDIO_CONTROL_ROUTE_ORIGINAL_SINK=100 \
-  AUDIO_CONTROL_ROUTE_PREVIOUS_OBJECT=100 AUDIO_CONTROL_ROUTE_PREVIOUS_NODE=1000 \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override ||
-  fail "identity-safe route rejected a reindexed endpoint"
-grep -q '^move-sink-input 300 103$' "$route_log" ||
-  fail "route mutation targeted a reused endpoint index"
-grep -q '^pw-metadata -n default -- 900 target.object 103 Spa:Id$' "$route_log" ||
-  fail "route persistence retained a stale endpoint index"
-
-: >"$route_log"
-printf '0\n' >"$route_read_state"
-if AUDIO_CONTROL_ROUTE_LOG="$route_log" AUDIO_CONTROL_ROUTE_READ_STATE="$route_read_state" \
-  AUDIO_CONTROL_ROUTE_DUPLICATE_STREAM_OBJECT=1 AUDIO_CONTROL_ROUTE_ORIGINAL_SINK=100 \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-route-set" playback 300 101 override >/dev/null 2>&1; then
-  fail "ambiguous live stream identity accepted"
-fi
-[[ ! -s $route_log ]] || fail "ambiguous live stream identity changed state"
-
-routes=$(AUDIO_CONTROL_ROUTE_LIST=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-stream-routes")
-jq -e '
-  .playback["300"] == {"target":"101","mode":"override"}
-  and .recording["400"] == {"target":"201","mode":"override"}
-' <<<"$routes" >/dev/null || fail "playback and recording route snapshot"
-for invalid_routes in \
-  '{"sink_inputs":{},"source_outputs":[]}' \
-  '{"sink_inputs":[{"index":300,"sink":101,"properties":{"object.id":"900"}},{"index":300,"sink":101,"properties":{"object.id":"902"}}],"source_outputs":[]}' \
-  '{"sink_inputs":[{"index":300,"sink":101,"properties":{"object.id":"900"}},{"index":302,"sink":101,"properties":{"object.id":"900"}}],"source_outputs":[]}' \
-  '{"sink_inputs":[{"index":300,"sink":101,"properties":{}}],"source_outputs":[]}'; do
-  if AUDIO_CONTROL_ROUTE_LIST=1 AUDIO_CONTROL_ROUTE_LIST_JSON="$invalid_routes" \
-      PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-stream-routes" \
-      >/dev/null 2>&1; then
-    fail "malformed stream route snapshot accepted"
-  fi
-done
-if AUDIO_CONTROL_ROUTE_LIST=1 AUDIO_CONTROL_ROUTE_LIST_OVERSIZED_METADATA=1 \
-    PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-stream-routes" \
-    >/dev/null 2>&1; then
-  fail "oversized persistent route metadata accepted"
-fi
-if AUDIO_CONTROL_ROUTE_LIST=1 AUDIO_CONTROL_ROUTE_LIST_INVALID_METADATA=1 \
-    PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-stream-routes" \
-    >/dev/null 2>&1; then
-  fail "invalid persistent route metadata accepted"
-fi
-echo "PASS: persistent application routing"
-rm -f -- "$route_read_state"
-
-output_default_log=$(mktemp)
-input_default_log=$(mktemp)
 shared_preferences=$(mktemp)
 shared_preferences_lock="${shared_preferences}.lock"
-shared_preferences_output_lock="${shared_preferences}.output.lock"
-shared_preferences_input_lock="${shared_preferences}.input.lock"
-trap 'rm -f "$route_log" "$output_default_log" "$input_default_log" "$shared_preferences" "$shared_preferences_lock" "$shared_preferences_output_lock" "$shared_preferences_input_lock"' EXIT
-
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers stale-speakers \
-    >/dev/null 2>&1; then
-  fail "stale current default output guard accepted"
-fi
-[[ ! -s $output_default_log && ! -s $shared_preferences ]] ||
-  fail "stale current default output guard changed state"
-
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers 999 \
-    >/dev/null 2>&1; then
-  fail "stale current default output object guard accepted"
-fi
-[[ ! -s $output_default_log && ! -s $shared_preferences ]] ||
-  fail "stale current default output object guard changed state"
-
-: >"$input_default_log"
-if AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-input-set-default" 52 new-microphone stale-microphone \
-    >/dev/null 2>&1; then
-  fail "stale current default input guard accepted"
-fi
-[[ ! -s $input_default_log && ! -s $shared_preferences ]] ||
-  fail "stale current default input guard changed state"
-
-if AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-input-set-default" 52 new-microphone old-microphone 999 \
-    >/dev/null 2>&1; then
-  fail "stale current default input object guard accepted"
-fi
-[[ ! -s $input_default_log && ! -s $shared_preferences ]] ||
-  fail "stale current default input object guard changed state"
-
-AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers 50
-
-expected_output_default_log=$(cat <<'EOF'
-wpctl set-default 51
-pactl set-default-sink new-speakers
-pactl move-sink-input 300 new-speakers
-EOF
-)
-[[ $(<"$output_default_log") == "$expected_output_default_log" ]] ||
-  fail "default output preserved pinned playback route"
-
-AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-input-set-default" 52 new-microphone old-microphone 60
-
-expected_input_default_log=$(cat <<'EOF'
-wpctl set-default 52
-pactl set-default-source new-microphone
-pactl move-source-output 400 new-microphone
-EOF
-)
-[[ $(<"$input_default_log") == "$expected_input_default_log" ]] ||
-  fail "default input preserved pinned recording route"
-jq -e '
-  .defaults == {"output":"new-speakers","input":"new-microphone"}
-' "$shared_preferences" >/dev/null || fail "verified default devices"
-
-: >"$output_default_log"
-AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_TARGET_REINDEX=output \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers ||
-  fail "reindexed default output target rejected"
-grep -q '^pactl move-sink-input 300 new-speakers$' "$output_default_log" ||
-  fail "reindexed default output follower was not moved safely"
-
-: >"$input_default_log"
-AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
-  AUDIO_CONTROL_DEFAULT_TARGET_REINDEX=input \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-input-set-default" 52 new-microphone old-microphone ||
-  fail "reindexed default input target rejected"
-grep -q '^pactl move-source-output 400 new-microphone$' "$input_default_log" ||
-  fail "reindexed default input follower was not moved safely"
-
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_TARGET_OBJECT=999 OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers >/dev/null 2>&1; then
-  fail "stale default output node id accepted"
-else
-  [[ $? == 3 ]] || fail "stale default output node id reported wrong exit code"
-fi
-[[ ! -s $output_default_log ]] || fail "stale default output changed hardware"
-
-replacement_preferences=$(mktemp)
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_TARGET_REPLACED_AFTER_SET=output \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$replacement_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers \
-  >/dev/null 2>&1; then
-  fail "same-name replacement completed a default output change"
-fi
-expected_output_replacement_log=$(cat <<'EOF'
-wpctl set-default 51
-pactl set-default-sink new-speakers
-wpctl set-default 50
-pactl set-default-sink old-speakers
-EOF
-)
-[[ $(<"$output_default_log") == "$expected_output_replacement_log" ]] ||
-  fail "same-name default output replacement was not rolled back"
-[[ ! -s $replacement_preferences ]] ||
-  fail "same-name default output replacement was persisted"
-rm -f -- "$replacement_preferences" "${replacement_preferences}.lock" \
-  "${replacement_preferences}.output.lock"
-
-replacement_preferences=$(mktemp)
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_OLD_REPLACED_AFTER_SET=output \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$replacement_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers \
-    >/dev/null 2>&1; then
-  fail "replacement old output completed an unverifiable rollback"
-else
-  [[ $? == 4 ]] || fail "replacement old output reported a complete rollback"
-fi
-[[ $(<"$output_default_log") == $'wpctl set-default 51\npactl set-default-sink new-speakers' ]] ||
-  fail "default output rollback targeted a same-name replacement"
-[[ ! -s $replacement_preferences ]] || fail "unrestorable default output was persisted"
-rm -f -- "$replacement_preferences" "${replacement_preferences}.lock" \
-  "${replacement_preferences}.output.lock"
-
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_DUPLICATE_TARGET=output \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers >/dev/null 2>&1; then
-  fail "ambiguous default output target accepted"
-fi
-[[ ! -s $output_default_log ]] || fail "ambiguous default output changed hardware"
-
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_DUPLICATE_STREAM=output \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers >/dev/null 2>&1; then
-  fail "ambiguous playback follower identity accepted"
-fi
-[[ ! -s $output_default_log ]] || fail "ambiguous playback follower changed hardware"
-
-: >"$input_default_log"
-if AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
-  AUDIO_CONTROL_DEFAULT_DUPLICATE_TARGET=input \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-input-set-default" 52 new-microphone old-microphone >/dev/null 2>&1; then
-  fail "ambiguous default input target accepted"
-fi
-[[ ! -s $input_default_log ]] || fail "ambiguous default input changed hardware"
-
-replacement_preferences=$(mktemp)
-: >"$input_default_log"
-if AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
-  AUDIO_CONTROL_DEFAULT_TARGET_REPLACED_AFTER_SET=input \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$replacement_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-input-set-default" 52 new-microphone old-microphone \
-  >/dev/null 2>&1; then
-  fail "same-name replacement completed a default input change"
-fi
-expected_input_replacement_log=$(cat <<'EOF'
-wpctl set-default 52
-pactl set-default-source new-microphone
-wpctl set-default 60
-pactl set-default-source old-microphone
-EOF
-)
-[[ $(<"$input_default_log") == "$expected_input_replacement_log" ]] ||
-  fail "same-name default input replacement was not rolled back"
-[[ ! -s $replacement_preferences ]] ||
-  fail "same-name default input replacement was persisted"
-rm -f -- "$replacement_preferences" "${replacement_preferences}.lock" \
-  "${replacement_preferences}.input.lock"
-
-replacement_preferences=$(mktemp)
-: >"$input_default_log"
-if AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
-  AUDIO_CONTROL_DEFAULT_OLD_REPLACED_AFTER_SET=input \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$replacement_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-input-set-default" 52 new-microphone old-microphone \
-    >/dev/null 2>&1; then
-  fail "replacement old input completed an unverifiable rollback"
-else
-  [[ $? == 4 ]] || fail "replacement old input reported a complete rollback"
-fi
-[[ $(<"$input_default_log") == $'wpctl set-default 52\npactl set-default-source new-microphone' ]] ||
-  fail "default input rollback targeted a same-name replacement"
-[[ ! -s $replacement_preferences ]] || fail "unrestorable default input was persisted"
-rm -f -- "$replacement_preferences" "${replacement_preferences}.lock" \
-  "${replacement_preferences}.input.lock"
-
-: >"$input_default_log"
-if AUDIO_CONTROL_INPUT_DEFAULT_LOG="$input_default_log" \
-  AUDIO_CONTROL_DEFAULT_DUPLICATE_STREAM=input \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-input-set-default" 52 new-microphone old-microphone >/dev/null 2>&1; then
-  fail "ambiguous recording follower identity accepted"
-fi
-[[ ! -s $input_default_log ]] || fail "ambiguous recording follower changed hardware"
-
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_READ_FAIL=output OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers >/dev/null 2>&1; then
-  fail "default output changed without a rollback baseline"
-fi
-[[ ! -s $output_default_log ]] || fail "unreadable current default changed hardware"
-
-: >"$output_default_log"
-OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" \
-  AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 50 old-speakers old-speakers 50 ||
-  fail "already-active default output rejected"
-[[ ! -s $output_default_log ]] || fail "already-active default output touched hardware"
-
-rollback_preferences=$(mktemp)
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_MOVE_FAIL_AFTER_EFFECT_TARGET=new-speakers \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$rollback_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers >/dev/null 2>&1; then
-  fail "partially moved default followers reported success"
-fi
-expected_output_rollback_log=$(cat <<'EOF'
-wpctl set-default 51
-pactl set-default-sink new-speakers
-pactl move-sink-input 300 new-speakers
-pactl move-sink-input 300 old-speakers
-wpctl set-default 50
-pactl set-default-sink old-speakers
-EOF
-)
-[[ $(<"$output_default_log") == "$expected_output_rollback_log" ]] ||
-  fail "default follower rollback after late move failure"
-[[ ! -s $rollback_preferences ]] || fail "rolled-back default output was persisted"
-
-: >"$output_default_log"
-AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  AUDIO_CONTROL_DEFAULT_SET_FAIL_AFTER_EFFECT_TARGET=new-speakers \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$rollback_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers ||
-  fail "verified default rejected after late setter failure"
-jq -e '.defaults.output == "new-speakers"' "$rollback_preferences" >/dev/null ||
-  fail "verified late default change was not persisted"
-
-failed_preferences=$(mktemp)
-failed_preferences_output_lock="${failed_preferences}.output.lock"
-if AUDIO_CONTROL_DEFAULT_FAILURE=1 OMARCHY_AUDIO_PREFERENCES_FILE="$failed_preferences" \
-  PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 99 missing-speakers old-speakers >/dev/null 2>&1; then
-  fail "failed default output reported success"
-fi
-[[ ! -s $failed_preferences ]] || fail "failed default output was persisted"
-
 invalid_preferences=$(mktemp)
 invalid_preferences_lock="${invalid_preferences}.lock"
-invalid_preferences_output_lock="${invalid_preferences}.output.lock"
 printf '{invalid json\n' >"$invalid_preferences"
 invalid_preferences_before=$(<"$invalid_preferences")
-: >"$output_default_log"
-if AUDIO_CONTROL_OUTPUT_DEFAULT_LOG="$output_default_log" \
-  OMARCHY_AUDIO_PREFERENCES_FILE="$invalid_preferences" PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-output-set-default" 51 new-speakers old-speakers >/dev/null 2>&1; then
-  fail "invalid shared preferences allowed a default output change"
-fi
-[[ ! -s $output_default_log ]] || fail "default output changed before preferences validation"
+trap 'rm -f "$shared_preferences" "$shared_preferences_lock" "$invalid_preferences" "$invalid_preferences_lock"' EXIT
 if OMARCHY_AUDIO_PREFERENCES_FILE="$invalid_preferences" \
   "$ROOT/scripts/audio-preferences" set-default output speakers >/dev/null 2>&1; then
   fail "invalid shared preferences were overwritten"
@@ -1455,6 +951,8 @@ fi
   fail "future-version audio preferences overwritten"
 
 OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" \
+  "$ROOT/scripts/audio-preferences" set-default input new-microphone
+OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" \
   "$ROOT/scripts/audio-preferences" set-default output headphones
 OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" \
   "$ROOT/scripts/audio-preferences" set-profile 00:11:22:33:44:55 a2dp-aac
@@ -1463,17 +961,14 @@ jq -e '
   and .defaults == {"output":"headphones","input":"new-microphone"}
   and .bluetoothProfiles == {"001122334455":"a2dp-aac"}
 ' "$shared_preferences" >/dev/null || fail "shared audio preferences"
-echo "PASS: verified default device routing"
-rm -f -- "$output_default_log" "$shared_preferences" "$shared_preferences_lock" \
-  "$shared_preferences_output_lock" "$shared_preferences_input_lock" \
-  "$failed_preferences" "$failed_preferences_output_lock" \
-  "$invalid_preferences" "$invalid_preferences_lock" "$invalid_preferences_output_lock" \
-  "$rollback_preferences" "${rollback_preferences}.lock" "${rollback_preferences}.output.lock" \
+echo "PASS: shared audio preferences"
+rm -f -- "$shared_preferences" "$shared_preferences_lock" \
+  "$invalid_preferences" "$invalid_preferences_lock" \
   "$multiple_preferences" "${multiple_preferences}.lock" \
   "$future_preferences" "${future_preferences}.lock"
 
 rules_dir=$(mktemp -d)
-trap 'rm -f "$route_log" "$input_default_log"; rm -rf "$rules_dir"' EXIT
+trap 'rm -rf "$rules_dir"' EXIT
 
 rules_file="$rules_dir/audio-rules.json"
 export OMARCHY_AUDIO_RULES_FILE="$rules_file"
@@ -1802,7 +1297,7 @@ echo "PASS: named multi-output groups"
 
 menu_tmp=$(mktemp -d)
 menu_file="$menu_tmp/omarchy-menu.jsonc"
-trap 'rm -f "$route_log" "$route_read_state" "$output_default_log" "$input_default_log" "$shared_preferences" "$shared_preferences_lock" "$shared_preferences_output_lock" "$shared_preferences_input_lock"; rm -rf "$menu_tmp"' EXIT
+trap 'rm -rf "$menu_tmp"' EXIT
 cat >"$menu_file" <<'EOF'
 {
   // Existing customization
