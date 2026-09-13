@@ -1,0 +1,3 @@
+# Review the editable QML sources; these copies are built by packaging/build-release.py.
+runtime/** linguist-generated
+backend-release.json linguist-generated

@@ -57,6 +57,9 @@ audio_open_lock_path() {
     echo "The audio lock directory is not safe" >&2
     return 1
   }
+  # Pin the open to the directory whose permissions we check. The lock file
+  # itself must still be a private regular file with one link, never a symlink.
+  lock_path="$lock_dir/$(basename -- "$lock_path")" || return 1
   directory_mode=$(stat -Lc '%a' -- "$lock_dir" 2>/dev/null) || return 1
   directory_permissions=${directory_mode: -3}
   directory_sticky=0
@@ -113,13 +116,22 @@ audio_open_lock() {
 }
 
 audio_acquire_mutation_lock() {
+  # The Rust coordinator holds this same lock for the complete transaction,
+  # including every scene step. Its child inherits the open file description.
+  # Validate that descriptor against the normal lock path before reusing it.
+  if [[ ${AUDIO_CONTROL_COORDINATOR_LOCK:-} == 197 ]]; then
+    audio_prepare_private_runtime || return 1
+    local inherited_path="$AUDIO_CONTROL_PRIVATE_RUNTIME_DIR/omarchy-audio-mutation.lock"
+    local inherited_identity inherited_file
+    [[ ! -L $inherited_path && -f $inherited_path && -O $inherited_path ]] || return 1
+    inherited_identity=$(stat -Lc '%d:%i:%u:%h' -- "$inherited_path") || return 1
+    inherited_file=$(stat -Lc '%d:%i:%u:%h' -- "/proc/$$/fd/197") || return 1
+    [[ $inherited_identity == "$inherited_file" && $inherited_identity == *":$UID:1" ]] || return 1
+    flock -w 5 197
+    return $?
+  fi
   audio_open_lock omarchy-audio-mutation 9 \
     "${1:-Another audio change is still finishing; try again}"
-}
-
-audio_acquire_settings_lock() {
-  audio_open_lock omarchy-audio-settings 8 \
-    "${1:-Another audio setting change is still finishing; try again}"
 }
 
 # Capture command output without allowing a malfunctioning audio service to

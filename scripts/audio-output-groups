@@ -287,15 +287,26 @@ unload_group() {
     return 1
   }
 
-  group_in_use "$sink" "$sink_index"
-  use_status=$?
-  if (( use_status != 0 )); then
-    if (( use_status == 3 )); then
-      echo "Switch applications and the default output away from this group first" >&2
-      return 3
+  if [[ -n ${3:-} ]]; then
+    # Recheck a degraded group's members after resolving ownership: a quick
+    # reconnect must not tear down a group that is already complete again.
+    members_are_live "$3"
+    case $? in
+      0) return 0 ;;
+      3) ;;
+      *) return 1 ;;
+    esac
+  else
+    group_in_use "$sink" "$sink_index"
+    use_status=$?
+    if (( use_status != 0 )); then
+      if (( use_status == 3 )); then
+        echo "Switch applications and the default output away from this group first" >&2
+        return 3
+      fi
+      echo "Output group use could not be inspected safely" >&2
+      return 1
     fi
-    echo "Output group use could not be inspected safely" >&2
-    return 1
   fi
 
   timeout 3 pactl unload-module "$module_index" >/dev/null 2>&1 || {
@@ -491,11 +502,9 @@ reconcile_groups() {
     if (( status == 0 )); then
       load_group "$id" "$sink" "$members" || failed=true
     elif (( status == 3 )); then
-      # An unused degraded group is safer absent: it cannot be selected by a
-      # client that bypasses the plugin, and reconnecting every member will
-      # recreate it on the next reconciliation. Never interrupt a current
-      # default or a group with active streams.
-      unload_group "$id" "$sink"
+      # Removing an incomplete group lets WirePlumber select a live fallback.
+      # Keep its definition and configured target so reconnect can restore it.
+      unload_group "$id" "$sink" "$members"
       status=$?
       (( status == 0 || status == 3 )) || failed=true
     else
