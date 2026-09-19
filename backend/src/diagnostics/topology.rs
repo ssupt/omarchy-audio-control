@@ -60,6 +60,9 @@ pub(super) fn routes(graph: &Graph) -> Vec<Value> {
                             .iter()
                             .find_map(|key| node.properties.get(*key))
                             .map(String::as_str)
+                            .filter(|label| {
+                                stream || node.name.is_empty() || !label.contains(&node.name)
+                            })
                             .unwrap_or(if stream {
                                 "Audio application"
                             } else {

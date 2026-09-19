@@ -47,16 +47,6 @@ with tempfile.TemporaryDirectory(prefix='audio-integration-') as temporary:
     helpers = work / 'helpers'
     helpers.mkdir()
     shutil.copy(ROOT / 'scripts/.audio-common', helpers / '.audio-common')
-    (helpers / 'audio-diagnostics').write_text('''printf 'sample\\n' >>"$AUDIO_INTEGRATION_LOG.diagnostics"
-printf '%s\\n' '{"version":1,"graph":{"rate":48000},"services":[],"devices":[],"routes":[],"warnings":[]}'
-''')
-    (helpers / 'audio-output-groups').write_text('''set -eu
-source "$(dirname "$0")/.audio-common"
-audio_acquire_mutation_lock
-printf 'start %s\\n' "$1" >>"$AUDIO_INTEGRATION_LOG"
-sleep .2
-printf 'finish %s\\n' "$1" >>"$AUDIO_INTEGRATION_LOG"
-''')
     binaries = work / 'bin'
     binaries.mkdir()
     (binaries / 'pw-record').write_text("""#!/usr/bin/env python3
@@ -192,22 +182,25 @@ assert len(sys.stdin.buffer.read()) > 0
             fcntl.flock(lock,fcntl.LOCK_UN)
         assert b.response(pending)['error']['code'] == 'cancelled'
         assert (work/'operations.capture').read_text().splitlines() == ['record','play']
-        # Two clients serialize through the complete native + helper lock boundary.
-        one = a.send('adapter.run',dict(helper='audio-output-groups',generation=identity['generation'],args=['one','profile']))
-        until(lambda: (work/'operations').exists())
-        health = a.send('health')
-        assert a.response(health)['result']['status'] == 'ok'
-        assert one not in a.replies, 'A long command blocked health/cancellation on the same connection'
-        two = b.send('adapter.run',dict(helper='audio-output-groups',generation=identity['generation'],args=['two','profile']))
-        assert a.response(one)['result']['exitCode'] == 0
-        assert b.response(two)['result']['exitCode'] == 0
-        assert (work/'operations').read_text().splitlines() == ['start one','finish one','start two','finish two']
-        # Admitted operations are not cancelled by a lost requesting connection.
-        c = Client(path)
-        c.send('adapter.run',dict(helper='audio-output-groups',generation=identity['generation'],args=['disconnected','profile']))
-        until(lambda: 'start disconnected' in (work/'operations').read_text())
-        c.close()
-        until(lambda: 'finish disconnected' in (work/'operations').read_text())
+        # Native writes share the companion lock and continue after client loss.
+        with (work/'omarchy-audio-mutation.lock').open('r+') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            one = a.send('node.level', dict(identity=identity, volume=.23))
+            a.wait_state(lambda s: s.get('busy') and s.get('operation') == 'node.audio')
+            assert a.request('health')['status'] == 'ok'
+            assert one not in a.replies, 'A waiting command blocked health on the same connection'
+            two = b.send('node.level', dict(identity=identity, volume=.71))
+            assert b.request('health')['status'] == 'ok'
+            assert two not in b.replies, 'Native mutation queue bypassed the companion lock'
+            c = Client(path)
+            c.send('node.level', dict(identity=identity, volume=.37))
+            c.request('health')
+            c.close()
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        assert a.response(one)['result']['outcome'] == 'applied'
+        assert b.response(two)['result']['outcome'] == 'applied'
+        a.wait_state(lambda s: not s.get('busy') and any(n['id'] == node['id'] and
+            abs(max(n['audio']['volumes'])-.37) < .015 for n in s['nodes']))
         # A PipeWire restart changes the identity generation even when IDs repeat.
         previous = identity['generation']
         stop(pw)
@@ -323,7 +316,7 @@ ShellRoot {
         var component = Qt.createComponent(DIAGNOSTICS_URL)
         if (component.status !== Component.Ready) { console.log("RUNTIME_FAILURE", component.errorString()); Qt.quit(); return }
         var properties = {service: root.client, sessionActive: true,
-          diagnosticsPath: "/must-not-launch-snapshot", speakerTestPath: "/unused", recoveryPath: "/unused"}
+          speakerTestPath: "/unused", recoveryPath: "/unused"}
         root.diagnosticsA = component.createObject(root, properties)
         root.diagnosticsB = component.createObject(root, properties)
         if (!root.diagnosticsA || !root.diagnosticsB) { console.log("RUNTIME_FAILURE diagnostics creation"); Qt.quit(); return }
@@ -337,7 +330,7 @@ ShellRoot {
       if ((!root.uiProbe || root.uiProbe.done) && root.aliasDone && !root.finishing && root.diagnosticsA.loaded && root.diagnosticsB.loaded
           && !root.diagnosticsA.refreshing && !root.diagnosticsB.refreshing) {
         if (root.diagnosticsA.error || root.diagnosticsB.error
-            || root.diagnosticsA.snapshot.graph.rate !== 48000 || root.diagnosticsB.snapshot.graph.rate !== 48000) {
+            || !root.diagnosticsA.snapshot.graph.available || !root.diagnosticsB.snapshot.graph.available) {
           if (!root.sharedVerified) {
             console.log("RUNTIME_FAILURE shared diagnostics", root.diagnosticsA.error, root.diagnosticsB.error)
             Qt.quit(); return
@@ -384,7 +377,6 @@ ShellRoot {
             run = subprocess.run(['dbus-run-session','--','quickshell','--no-color','--path',str(qml)], env=qmlenv, capture_output=True,text=True,timeout=28)
             output = run.stdout + run.stderr
             assert run.returncode == 0 and 'RUNTIME_SUCCESS' in output and 'RUNTIME_FAILURE' not in output and 'ReferenceError:' not in output and 'TypeError:' not in output and 'Binding loop' not in output, output
-            assert (work/'operations.diagnostics').read_text().splitlines() == ['sample', 'sample'], output
             if full_ui:
                 assert 'RUNTIME_UI_SUCCESS' in output, output
                 print('PASS: volume limits, boost reset, deferred tabs, shared scenes, pointer cancellation, native policies, defaults and routes')

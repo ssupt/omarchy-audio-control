@@ -331,13 +331,18 @@ impl Server<'_> {
         }
         self.guard()?;
         // The returned module handle is valid only on this uninterrupted connection.
-        let modules = self.pulse.modules()?;
+        let modules = self
+            .pulse
+            .modules()
+            .map_err(|_| Failure::unknown("Could not verify ownership of the new output group"))?;
         if modules
             .iter()
             .any(|m| m.index == module && module_owned(m.argument.as_deref().unwrap_or(""), group))
         {
             self.pulse.unload(module)?;
-            self.absent(group, module)?;
+            self.absent(group, module).map_err(|_| {
+                Failure::unknown("Could not verify cleanup of the new output group")
+            })?;
         } else if modules.iter().any(|m| m.index == module) {
             return Err(Failure::unknown(
                 "Could not verify ownership of the new output group",
@@ -352,13 +357,6 @@ impl Server<'_> {
         let Some(sink) = self.owned(group)? else {
             return Ok(());
         };
-        if degraded {
-            if self.members_present(group)? {
-                return Err(conflict());
-            }
-        } else if self.pulse.in_use(&sink)? {
-            return Err(conflict());
-        }
         // Recheck identity immediately before unloading, including the sink serial.
         let current = self.owned(group)?.ok_or_else(conflict)?;
         if current.index != sink.index
@@ -367,10 +365,18 @@ impl Server<'_> {
         {
             return Err(conflict());
         }
+        if degraded {
+            if self.members_present(group)? {
+                return Err(conflict());
+            }
+        } else if self.pulse.in_use(&current)? {
+            return Err(conflict());
+        }
         self.guard()?;
         let module = sink.owner_module.ok_or_else(conflict)?;
         self.pulse.unload(module)?;
         self.absent(group, module)
+            .map_err(|_| Failure::unknown("Could not verify output group removal"))
     }
     fn absent(&mut self, group: &Group, module: u32) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(1);

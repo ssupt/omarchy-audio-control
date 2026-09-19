@@ -91,8 +91,8 @@ companion shares `audio-preferences.json`.
 
 ## Development
 
-Builds require Rust/Cargo **1.85 or newer**, libclang, pkg-config and PipeWire
-headers. Build a candidate outside the live plugin directory:
+Builds require Rust/Cargo **1.85 or newer**, libclang, pkg-config, and PipeWire
+and libpulse headers. Build a candidate outside the live plugin directory:
 
 ```bash
 ./test/all
