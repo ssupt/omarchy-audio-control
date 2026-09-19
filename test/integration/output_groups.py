@@ -165,8 +165,11 @@ with tempfile.TemporaryDirectory(prefix='audio-groups-') as temporary, ExitStack
             lock.unlink()
         print('PASS: typed group validation, member updates and create/update/delete persistence rollback', flush=True)
 
-        group_node = client.wait_state(lambda s: any(n['name'] == group_name and n['state'] for n in s['nodes']))
-        group_node = next(n for n in group_node['nodes'] if n['name'] == group_name)
+        current_group = next(s for s in sinks() if s['name'] == group_name)
+        current_serial = str(current_group['properties']['object.serial'])
+        group_node = client.wait_state(lambda s: any(n['name'] == group_name and n['state']
+            and n['serial'] == current_serial for n in s['nodes']))
+        group_node = next(n for n in group_node['nodes'] if n['name'] == group_name and n['serial'] == current_serial)
         assert client.request('default.set', dict(identity=dict(generation=state['generation'],
             id=group_node['id'], serial=group_node['serial'])))['outcome'] == 'applied'
         until(lambda: run('pactl', 'get-default-sink').strip() == group_name)

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
+    fmt::Write,
     io::Read,
     time::{Duration, Instant},
 };
@@ -124,7 +125,10 @@ pub fn apply(native: &native::Handle, storage: &Storage, change: Change) -> Resu
             }
             let mut bytes = [0; 8];
             std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-            let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let mut id = String::with_capacity(16);
+            for byte in bytes {
+                let _ = write!(id, "{byte:02x}");
+            }
             let new = Group::new(id, params.name, params.members)?;
             if groups.iter().any(|g| g.id == new.id) || server.owned(&new)?.is_some() {
                 return Err(conflict());
