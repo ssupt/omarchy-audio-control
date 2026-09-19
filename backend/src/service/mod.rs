@@ -3,6 +3,7 @@ mod adapters;
 mod audio;
 mod automation;
 mod diagnostics;
+mod groups;
 mod microphone;
 mod policy;
 mod routing;
@@ -159,7 +160,7 @@ impl Service {
                         "store.read", "settings.set", "preferences.default", "preferences.profile",
                         "rules.set_app", "rules.delete_app", "devices.alias", "devices.flag",
                         "scenes.save", "scenes.delete", "adapter.run", "scene.apply", "scene.capture",
-                        "microphone.start", "microphone.stop", "diagnostics.refresh", "policy.set", "port.set", "profile.set", "default.set", "route.set"
+                        "microphone.start", "microphone.stop", "diagnostics.refresh", "diagnostics.copy", "groups.create", "groups.update", "groups.delete", "policy.set", "port.set", "profile.set", "default.set", "route.set"
                     ],
                     "maxFrameBytes": MAX_FRAME_BYTES, "maxSnapshotBytes": MAX_SNAPSHOT_BYTES
                 }))
@@ -180,6 +181,10 @@ impl Service {
             "port.set" => self.port_request(request).await,
             "policy.set" => self.policy_request(request).await,
             "diagnostics.refresh" => self.refresh_diagnostics(request).await,
+            "diagnostics.copy" => self.copy_diagnostics(request).await,
+            "groups.create" | "groups.update" | "groups.delete" => {
+                self.group_request(request).await
+            }
             "scene.apply" | "scene.capture" => self.scene_request(request).await,
             "adapter.run" => self.adapter_request(request).await,
             "store.read"

@@ -64,7 +64,14 @@ fn main() {
         source.extend_from_slice(bytes.len().to_string().as_bytes());
         source.push(0);
         source.extend_from_slice(&bytes);
-        if let Some(helper_name) = name.strip_prefix("scripts/") {
+        if let Some(helper_name) = name.strip_prefix("scripts/").filter(|name| {
+            [
+                ".audio-common",
+                "audio-resolve-output-sink",
+                "audio-sink-availability",
+            ]
+            .contains(name)
+        }) {
             helpers.push_str(&format!(
                 "({:?}, include_bytes!({:?})),\n",
                 helper_name,

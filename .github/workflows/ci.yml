@@ -41,7 +41,7 @@ jobs:
       - name: Install native build and test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpipewire-0.3-dev libclang-dev pkg-config pipewire-bin jq nodejs python3
+          sudo apt-get install -y libpipewire-0.3-dev libpulse-dev libclang-dev pkg-config pipewire-bin jq nodejs python3
           rustup toolchain install "${{ matrix.rust }}" --profile minimal --component rustfmt --component clippy
           rustup default "${{ matrix.rust }}"
 
@@ -64,7 +64,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Install runtime and build tools
-        run: pacman -Syu --noconfirm base-devel git rust clang pipewire pipewire-audio pipewire-pulse wireplumber dbus quickshell weston nodejs jq python
+        run: pacman -Syu --noconfirm base-devel git rust clang libpulse pipewire pipewire-audio pipewire-pulse wireplumber dbus quickshell weston nodejs jq python
       - name: Check out plugin
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check out Omarchy UI contract
@@ -120,7 +120,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpipewire-0.3-dev libclang-dev pkg-config jq
+          sudo apt-get install -y libpipewire-0.3-dev libpulse-dev libclang-dev pkg-config jq
           rustup toolchain install 1.85.0 --profile minimal
           rustup default 1.85.0
       - name: Assemble and check the candidate

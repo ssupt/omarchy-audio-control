@@ -1,6 +1,5 @@
 //! Subscription-owned reconciliation. Lock retries never replay uncertain helpers.
 use super::{Busy, Service};
-use crate::adapter::Call;
 use crate::files::FileLock;
 use serde_json::json;
 use std::sync::Arc;
@@ -65,15 +64,19 @@ impl Service {
                     routes.iter().map(|(key, _)| key.clone()).collect();
                 attempted.retain(|key| keys.contains(key));
                 let reconcile = next_groups != groups
-                    && rules["outputGroups"]
+                    && (rules["outputGroups"]
                         .as_array()
-                        .is_some_and(|g| !g.is_empty());
+                        .is_some_and(|g| !g.is_empty())
+                        || graph
+                            .nodes
+                            .values()
+                            .any(|n| crate::storage::group_sink(&n.name)));
                 if !reconcile && routes.iter().all(|(key, _)| attempted.contains(key)) {
                     signature = next_signature;
                     groups = next_groups;
                     continue;
                 }
-                let lock = match FileLock::mutation().await {
+                let _lock = match FileLock::mutation().await {
                     Ok(lock) => lock,
                     Err(error) => {
                         // An older release may still own a scene. Nothing was
@@ -110,26 +113,26 @@ impl Service {
                 signature = crate::automation::signature(&graph, rules);
                 let next_groups = crate::automation::group_signature(&graph, rules);
                 let reconcile = next_groups != groups
-                    && rules["outputGroups"]
+                    && (rules["outputGroups"]
                         .as_array()
-                        .is_some_and(|g| !g.is_empty());
+                        .is_some_and(|g| !g.is_empty())
+                        || graph
+                            .nodes
+                            .values()
+                            .any(|n| crate::storage::group_sink(&n.name)));
                 let routes = crate::automation::routes(&graph, rules);
                 groups = next_groups;
                 service.set_busy(true);
                 let _busy = Busy(&service);
-                if reconcile {
-                    let result = service
-                        .adapter
-                        .run(
-                            &Call::new("audio-output-groups", vec!["reconcile".into()]),
-                            Some(&lock),
-                        )
-                        .await;
-                    if result.is_err() || result.as_ref().is_ok_and(|o| o.exit_code != 0) {
-                        service.update_state(|s| {
-                            s["automationError"] = json!("Some output groups could not be restored")
-                        });
-                    }
+                if reconcile
+                    && service
+                        .change_groups(crate::groups::Change::Reconcile)
+                        .await
+                        .is_err()
+                {
+                    service.update_state(|s| {
+                        s["automationError"] = json!("Some output groups could not be restored")
+                    });
                 }
                 let started = std::time::Instant::now();
                 for (key, params) in routes {

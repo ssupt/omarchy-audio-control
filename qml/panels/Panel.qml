@@ -53,7 +53,6 @@ Panel {
   AudioOutputGroupsController {
     service: root.audioService
     id: outputGroups
-    scriptPath: runtime.script("audio-output-groups")
     // A degraded group that is still the default must first move its
     // following streams to a surviving member. Reconciliation can safely
     // unload the virtual sink after that transactional default change ends.

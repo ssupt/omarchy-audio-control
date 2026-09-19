@@ -1,7 +1,6 @@
 //! On-demand diagnostic samples shared across windows, outside audio transactions.
 use super::{NoParams, Service};
-use crate::adapter::Call;
-use crate::protocol::{self, Failure, Request, Result};
+use crate::protocol::{Failure, Request, Result};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
@@ -27,23 +26,13 @@ impl Service {
             }
             state["diagnostics"]["refreshing"] = json!(true);
         });
-        let snapshot = self
-            .adapter
-            .run(
-                &Call::new("audio-diagnostics", vec!["snapshot".into()]),
-                None,
-            )
-            .await
-            .map_err(|_| Failure::new("diagnostics_failed", "Could not collect audio diagnostics"))
-            .and_then(|output| {
-                if output.exit_code != 0 {
-                    return Err(Failure::new(
-                        "diagnostics_failed",
-                        "Could not collect audio diagnostics",
-                    ));
-                }
-                parse_snapshot(&output.stdout)
-            });
+        let snapshot = match &self.native {
+            Some(native) => crate::diagnostics::collect(native).await,
+            None => Err(Failure::new(
+                "diagnostics_failed",
+                "The audio graph is unavailable",
+            )),
+        };
         let result = snapshot.as_ref().map(|_| ()).map_err(Clone::clone);
         self.update_state(|state| {
             let report = &mut state["diagnostics"];
@@ -70,35 +59,11 @@ impl Service {
         // large device/route lists out of single-frame command replies.
         result.map(|()| json!({"cached": false}))
     }
-}
-
-fn parse_snapshot(raw: &str) -> Result<Value> {
-    let invalid = || Failure::new("invalid_diagnostics", "Could not read audio diagnostics");
-    let mut snapshot: Value = serde_json::from_str(raw).map_err(|_| invalid())?;
-    if !snapshot.is_object()
-        || snapshot["version"] != 1
-        || !snapshot["graph"].is_object()
-        || ["services", "devices", "routes", "warnings"]
-            .iter()
-            .any(|key| !snapshot[key].is_array())
-    {
-        return Err(invalid());
+    pub(super) async fn copy_diagnostics(&self, request: &Request) -> Result<Value> {
+        request.params::<NoParams>()?;
+        self.refresh_diagnostics(request).await?;
+        let snapshot = self.state.borrow()["diagnostics"]["snapshot"].clone();
+        crate::diagnostics::copy(&snapshot).await?;
+        Ok(json!({"copied":true}))
     }
-    // Embedded helpers no longer have a checkout-relative manifest. Report
-    // the version compiled with this service, including while an update drains.
-    let manifest: Value = serde_json::from_str(include_str!("../../../packaging/manifest.json"))
-        .map_err(|_| invalid())?;
-    if !snapshot["versions"].is_object() {
-        snapshot["versions"] = json!({});
-    }
-    snapshot["versions"]["plugin"] = manifest["version"].clone();
-    // Reserve most of the shared snapshot budget for the live graph. Reject a
-    // pathological report without breaking the control subscription.
-    if protocol::encode(&snapshot)?.len() > protocol::MAX_SNAPSHOT_BYTES / 4 {
-        return Err(Failure::new(
-            "diagnostics_too_large",
-            "The diagnostics report is too large to display",
-        ));
-    }
-    Ok(snapshot)
 }

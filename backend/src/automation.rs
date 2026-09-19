@@ -51,8 +51,8 @@ pub fn group_signature(graph: &Graph, rules: &Value) -> String {
     let sinks: Vec<_> = graph
         .nodes
         .values()
-        .filter(|n| class(n) == "Audio/Sink" && storage::group_member(&n.name))
-        .map(|n| json!([n.id, n.serial, n.name]))
+        .filter(|n| class(n) == "Audio/Sink")
+        .map(|n| json!([n.id, n.serial, n.name, !n.state.is_empty()]))
         .collect();
     json!([graph.generation, sinks, rules["outputGroups"]]).to_string()
 }

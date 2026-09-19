@@ -9,7 +9,6 @@ import "../core/Model.js" as Model
 Item {
   id: root
 
-  required property string diagnosticsPath
   required property string speakerTestPath
   required property string recoveryPath
   property var service: null
@@ -33,7 +32,7 @@ Item {
   readonly property var serviceDiagnostics: service && service.ready && service.state.diagnostics
     ? service.state.diagnostics : ({})
   readonly property bool refreshing: refreshPending || serviceDiagnostics.refreshing === true
-  readonly property bool copying: copyProc.running
+  property bool copying: false
   readonly property bool speakerTesting: speakerProc.running || speakerStopping
   readonly property bool recovering: recoveryProc.running || recoveryPending
   readonly property bool busy: refreshing || copying || recovering
@@ -81,7 +80,7 @@ Item {
   }
 
   function refresh() {
-    if (refreshPending || copyProc.running || speakerTesting || recovering) return
+    if (refreshPending || copying || speakerTesting || recovering) return
     if (!service || !service.ready) {
       loaded = true
       error = "Audio service is not connected"
@@ -100,11 +99,16 @@ Item {
   }
 
   function copySupportReport() {
-    if (copyProc.running || refreshing || speakerTesting || recovering
+    if (copying || refreshing || speakerTesting || recovering
         || !snapshot.capabilities.supportReport
         || !snapshot.capabilities.clipboard) return
-    copyProc.command = ["/bin/bash", diagnosticsPath, "copy-report"]
-    copyProc.running = true
+    if (!service || !service.ready) return
+    copying = true
+    service.request("diagnostics.copy", {}, function(_result, failure) {
+      root.copying = false
+      root.showStatus(failure ? "Could not copy the support report"
+        : "Copied the support report", !!failure)
+    }, { mutating: false, timeout: 35000 })
   }
 
   function toggleSpeakerTest() {
@@ -151,15 +155,6 @@ Item {
       } else if (root.sessionActive) {
         root.refresh()
       }
-    }
-  }
-
-  Process {
-    id: copyProc
-    onExited: function(exitCode) {
-      root.showStatus(exitCode === 0
-        ? "Copied the privacy-conscious support report"
-        : "Could not copy the support report", exitCode !== 0)
     }
   }
 

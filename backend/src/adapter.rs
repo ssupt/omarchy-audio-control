@@ -1,7 +1,6 @@
 //! Temporary compatibility boundary for domains whose hardware/rollback parity
 //! is still covered by the existing helper suite. No client supplies a program
 //! or shell fragment; only this fixed allowlist can launch a packaged helper.
-use crate::files::FileLock;
 use crate::protocol::{Failure, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -37,8 +36,6 @@ impl Call {
     pub fn validate(&self) -> Result<()> {
         let (min, max) = match self.helper.as_str() {
             "audio-resolve-output-sink" | "audio-sink-availability" => (0, 0),
-            "audio-output-groups" => (1, 4),
-            "audio-diagnostics" if self.args == ["snapshot"] => (1, 1),
             _ => return Err(Failure::new("method_not_found", "Unknown audio adapter")),
         };
         if !(min..=max).contains(&self.args.len())
@@ -51,12 +48,6 @@ impl Call {
         }
         // Helpers retain their strict domain-specific argument validation.
         Ok(())
-    }
-    pub fn mutating(&self) -> bool {
-        !matches!(
-            self.helper.as_str(),
-            "audio-resolve-output-sink" | "audio-sink-availability" | "audio-diagnostics"
-        )
     }
 }
 
@@ -101,14 +92,8 @@ impl Adapter {
             _embedded: embedded,
         })
     }
-    pub async fn run(&self, call: &Call, lock: Option<&FileLock>) -> Result<Output> {
+    pub async fn run(&self, call: &Call) -> Result<Output> {
         call.validate()?;
-        if call.mutating() && lock.is_none() {
-            return Err(Failure::new(
-                "internal_error",
-                "Mutation has no transaction owner",
-            ));
-        }
         let mut command = Command::new("/bin/bash");
         command
             .arg(self.directory.join(&call.helper))
@@ -118,33 +103,12 @@ impl Adapter {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .process_group(0);
-        if let Some(lock) = lock {
-            let descriptor = lock.descriptor();
-            command.env("AUDIO_CONTROL_COORDINATOR_LOCK", "197");
-            // SAFETY: dup2 is async-signal-safe. The parent keeps the descriptor
-            // owned until this child and its process group have finished.
-            unsafe {
-                command.pre_exec(move || {
-                    if libc::dup2(descriptor, 197) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    if libc::fcntl(197, libc::F_SETFD, 0) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        }
         let mut child = command.spawn()?;
         let pid = child
             .id()
             .ok_or_else(|| Failure::new("internal_error", "Missing child identity"))?
             as i32;
-        let output_limit = if call.helper == "audio-diagnostics" {
-            crate::protocol::MAX_SNAPSHOT_BYTES
-        } else {
-            32768
-        };
+        let output_limit = 32768;
         let mut stdout = child.stdout.take().unwrap().take(output_limit as u64 + 1);
         let mut stderr = child.stderr.take().unwrap().take(32769);
         let work = async {

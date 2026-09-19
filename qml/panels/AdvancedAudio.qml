@@ -39,7 +39,6 @@ Item {
   AudioOutputGroupsController {
     service: root.service
     id: outputGroupController
-    scriptPath: runtime.script("audio-output-groups")
     onOperationFinished: function(action, _groupId, success, exitCode) {
       if (success) {
         if (action === "create") {
@@ -62,7 +61,6 @@ Item {
   AudioDiagnosticsController {
     id: diagnostics
     service: root.service
-    diagnosticsPath: runtime.script("audio-diagnostics")
     speakerTestPath: runtime.script("audio-speaker-test")
     recoveryPath: runtime.script("audio-recovery")
     sessionActive: window.visible && root.activeTab === 5 && !root.recoveryConfirmOpen

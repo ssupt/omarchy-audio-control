@@ -84,6 +84,7 @@ pub struct MetadataValue {
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Graph {
+    pub version: String,
     pub generation: String,
     pub revision: u64,
     pub connected: bool,
@@ -387,6 +388,7 @@ fn session(
     let initial = Rc::new(Cell::new(core.sync(0)?.raw()));
     let sync_round = Rc::new(Cell::new(0));
     let _core_listener = {
+        let info_graph = graph.clone();
         let graph = graph.clone();
         let tx = tx.clone();
         let pending = pending.clone();
@@ -398,6 +400,7 @@ fn session(
         core.upgrade()
             .unwrap()
             .add_listener_local()
+            .info(move |info| info_graph.borrow_mut().version = info.version().to_owned())
             .done(move |id, seq| {
                 if id != pw::core::PW_ID_CORE {
                     return;
