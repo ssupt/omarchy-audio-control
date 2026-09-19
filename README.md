@@ -2,15 +2,8 @@
 
 An audio mixer for Omarchy with device settings, application routing, output
 groups, microphone tests and saved setups. It replaces the built-in audio widget
-and uses Omarchy's bar, shortcuts and theme.
-
-The 0.9 development version moves audio coordination into a shared Rust service.
-The interface uses Quickshell/QML; PipeWire and WirePlumber handle audio and
-session policy.
-
-> **Development preview:** the default branch still ships 0.8.0. The standard
-> install command below installs that version. The Rust update is tracked in
-> [PR #15](https://github.com/ssupt/omarchy-audio-control/pull/15).
+and uses Omarchy's bar, shortcuts and theme. A Rust service coordinates
+PipeWire and WirePlumber; the interface uses Quickshell/QML.
 
 ## Screenshots
 
@@ -56,8 +49,7 @@ can also stay pinned to a microphone.
 ## Install
 
 Requires **Omarchy Quattro on x86_64 Linux**, PipeWire and WirePlumber, with
-Omarchy's usual audio and desktop tools. Packaged Rust builds include the backend
-executable and need no compiler or separately enabled service.
+Omarchy's usual audio and desktop tools. You need no Rust toolchain to install it.
 
 Install the published version:
 
@@ -82,32 +74,10 @@ To add **Setup > Audio** to the menu, run:
 
 Use the same helper with `remove` before removing the plugin.
 
-## Architecture
-
-Both panels share one Rust service for PipeWire state, volume changes, saved
-settings, device profiles and ports, default devices, application routes,
-WirePlumber policies, scenes, routing
-automation, microphone jobs and diagnostic snapshots.
-The service serializes changes and checks device identities so queued commands
-cannot target a replacement device after a disconnect. It starts with the plugin
-and exits after its clients leave and accepted work finishes.
-
-**The Bash migration is incomplete.** Output groups and diagnostic collection
-still use helper adapters coordinated by Rust. Desktop actions such as speaker
-tests, support-report copying and recovery also use helpers.
-
-Graph and settings updates use events. Device settings, default selection,
-application routing and WirePlumber policies use the existing PipeWire connection.
-Visible diagnostic
-views share cached samples. The
-[benchmark harness](test/integration/benchmark.py) measures CPU,
-memory and helper launches; the Rust preview reduced polling CPU in local tests,
-but used more memory than 0.8.0.
-
 ## Settings
 
 Existing files and schemas are preserved under `~/.config/omarchy` (or
-`$XDG_CONFIG_HOME/omarchy`). Symlinked configuration directories are supported.
+`$XDG_CONFIG_HOME/omarchy`).
 
 | File | Contents |
 | --- | --- |
@@ -130,21 +100,6 @@ python3 packaging/build-release.py --output /tmp/omarchy-audio-release
 python3 packaging/build-release.py --check /tmp/omarchy-audio-release
 omarchy-plugin-validate /tmp/omarchy-audio-release
 ```
-
-Edit `backend/src/`, `qml/`, `scripts/` and `packaging/manifest.json`. QML files
-are grouped by feature. The builder produces the executable, backend metadata,
-root manifest and `runtime/<buildId>/qml/` copies. Those generated copies give
-Quickshell a new import path on updates; ship the complete bundle together.
-Editing source QML alone does not update a packaged UI.
-
-[CI](.github/workflows/ci.yml) runs Rust and helper checks, private PipeWire/QML
-tests and package lifecycle tests. QML tests require Quickshell, Weston and the
-Omarchy shell. Automated recording tests use synthetic audio.
-
-Local hardware checks confirm USB microphone feedback and basic hotplug, codec
-switching, slider release, group fallback/reconnect and timed microphone clips. [PR #15](https://github.com/ssupt/omarchy-audio-control/pull/15)
-tracks the remaining physical checks before public rollout.
-Detailed development notes stay outside this repository.
 
 [MIT license](LICENSE), matching Omarchy's original audio widget.
 More plugins: [omarchy-plugins](https://github.com/ssupt/omarchy-plugins).
