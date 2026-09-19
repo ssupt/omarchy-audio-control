@@ -279,6 +279,40 @@ with tempfile.TemporaryDirectory(prefix='audio-groups-') as temporary, ExitStack
         until(lambda: all(s['name'] != orphan_name for s in sinks()))
         assert json.loads(rules_path.read_text())['outputGroups'] == []
         print('PASS: foreign name collisions remain untouched; owned orphan groups are reconciled', flush=True)
+        # A speaker-tuning sink has its own identity but controls the hardware
+        # downstream. Hide the pinned hardware even while the tuning is idle.
+        tuning = launch(['pw-loopback', '--capture-props=media.class=Audio/Sink '
+            'node.name=omarchy_speaker_tuning node.virtual=true device.class=filter',
+            '--playback-props=node.name=omarchy_speaker_tuning_output '
+            'target.object=audio_test_left node.passive=true node.dont-fallback=true node.linger=true'])
+        state = client.wait_state(lambda s: s.get('outputs', {}).get('availability', {}).get('audio_test_left') is False
+            and any(n['name'] == 'omarchy_speaker_tuning' and n['state'] for n in s['nodes']))
+        tuning_node = next(n for n in state['nodes'] if n['name'] == 'omarchy_speaker_tuning')
+        assert client.request('default.set', dict(identity=dict(generation=state['generation'],
+            id=tuning_node['id'], serial=tuning_node['serial'])))['outcome'] == 'applied'
+        player = launch(['pw-play', '--raw', '--rate=48000', '--channels=2', '--format=s16',
+            '--properties=application.name="Tuning Test Player" node.name=audio_test_tuning_player', '-'], stdin=zero)
+        left = next(n for n in state['nodes'] if n['name'] == 'audio_test_left')
+        client.wait_state(lambda s: (s['outputs'].get('volume') or {}).get('source', {}).get('id') == tuning_node['id']
+            and s['outputs']['volume']['target']['id'] == left['id'])
+        gain_before = next(s for s in sinks() if s['name'] == 'omarchy_speaker_tuning')['volume']
+        target = client.state['outputs']['volume']['target']
+        client.request('node.level', dict(identity=target, volume=.31))
+        client.wait_state(lambda s:any(n['id'] == left['id'] and abs(max(n['audio']['volumes'])-.31)<.01 for n in s['nodes']))
+        assert next(s for s in sinks() if s['name'] == 'omarchy_speaker_tuning')['volume'] == gain_before
+        run('pactl', 'set-default-sink', 'audio_test_right')
+        right_id = next(n['id'] for n in client.state['nodes'] if n['name'] == 'audio_test_right')
+        client.wait_state(lambda s:(s['outputs'].get('volume') or {}).get('source', {}).get('id') == right_id
+            and s['outputs']['volume']['target']['id'] == right_id)
+        assert client.state['outputs']['availability']['audio_test_left'] is False
+        stop(player)
+        stop(tuning)
+        client.wait_state(lambda s:s['outputs']['availability'].get('audio_test_left') is True)
+        assert 'adapter.run' not in client.request('hello')['capabilities']
+        for helper in ('audio-resolve-output-sink', 'audio-sink-availability'):
+            reply = client.response(client.send('adapter.run', dict(helper=helper, args=[])))
+            assert reply['error']['code'] == 'method_not_found', reply
+        print('PASS: native tuning visibility, physical volume, default changes and helper retirement', flush=True)
     except Exception:
         log.flush()
         log.seek(0)

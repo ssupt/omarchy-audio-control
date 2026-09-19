@@ -95,8 +95,9 @@ pub fn stream_direction(node: &Node) -> Option<Direction> {
 }
 pub fn endpoint_direction(node: &Node) -> Option<Direction> {
     let group_sink = class(node) == "Audio/Sink" && crate::storage::group_sink(&node.name);
+    let tuning = class(node) == "Audio/Sink" && node.name == "omarchy_speaker_tuning";
     if node.state.is_empty()
-        || (internal(node) && !group_sink)
+        || (internal(node) && !group_sink && !tuning)
         || node.name.ends_with(".monitor")
         || node
             .properties

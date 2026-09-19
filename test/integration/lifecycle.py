@@ -82,16 +82,10 @@ with tempfile.TemporaryDirectory(prefix='audio-lifecycle-') as temporary:
     plugin.mkdir()
     executable = plugin/'omarchy-audio-service'
     shutil.copy2(BINARY, executable)
-    commands = work/'commands'
-    commands.mkdir()
-    availability = commands/'omarchy-audio-sink-availability'
-    availability.write_text('#!/bin/bash\nprintf "test-output\\t1\\n"\n')
-    availability.chmod(0o755)
     env = dict(os.environ, XDG_RUNTIME_DIR=temporary, PIPEWIRE_RUNTIME_DIR=temporary,
                PIPEWIRE_REMOTE='absent-test-server', PULSE_SERVER='unix:'+str(work/'absent-pulse'),
                XDG_CONFIG_HOME=str(work/'config'), XDG_STATE_HOME=str(work/'state'),
-               XDG_CACHE_HOME=str(work/'cache'), AUDIO_CONTROL_PRIVATE_RUNTIME_DIR=temporary,
-               PATH=str(commands)+os.pathsep+os.environ['PATH'])
+               XDG_CACHE_HOME=str(work/'cache'), AUDIO_CONTROL_PRIVATE_RUNTIME_DIR=temporary)
     for key in ('OMARCHY_AUDIO_HELPERS_DIR', 'OMARCHY_AUDIO_CONTROL_FILE', 'OMARCHY_AUDIO_PREFERENCES_FILE',
                 'OMARCHY_AUDIO_RULES_FILE', 'OMARCHY_AUDIO_SCENES_FILE', 'LISTEN_PID', 'LISTEN_FDS'):
         env.pop(key, None)
@@ -171,10 +165,10 @@ with tempfile.TemporaryDirectory(prefix='audio-lifecycle-') as temporary:
         e = Relay(executable, env); relays.append(e)
         assert e.info['epoch'] == d.info['epoch']
         shutil.rmtree(plugin)
-        # The checkout can disappear during removal/update. Embedded helpers
-        # and already accepted work remain available to the draining daemon.
-        result = e.request('adapter.run', dict(helper='audio-sink-availability', args=[]))
-        assert result['exitCode'] == 0, result
+        # A draining daemon must still serve native requests after removal.
+        assert e.request('health')['status'] == 'ok'
+        e.request('devices.alias', dict(node='removed-checkout', label='Still available'))
+        assert json.loads((config/'audio-rules.json').read_text())['devices']['aliases']['removed-checkout'] == 'Still available'
         e.close()
         socket_path = work/'omarchy-audio-control'/('backend-'+e.info['buildId'][:24]+'.sock')
         until(lambda: not socket_path.exists(), timeout=36)

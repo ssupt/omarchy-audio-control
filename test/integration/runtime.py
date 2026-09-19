@@ -44,9 +44,6 @@ def stop(process):
 
 with tempfile.TemporaryDirectory(prefix='audio-integration-') as temporary:
     work = Path(temporary)
-    helpers = work / 'helpers'
-    helpers.mkdir()
-    shutil.copy(ROOT / 'scripts/.audio-common', helpers / '.audio-common')
     binaries = work / 'bin'
     binaries.mkdir()
     (binaries / 'pw-record').write_text("""#!/usr/bin/env python3
@@ -67,7 +64,7 @@ assert len(sys.stdin.buffer.read()) > 0
                PIPEWIRE_REMOTE='audio-test', XDG_CONFIG_HOME=str(work / 'config'),
                PULSE_SERVER='unix:'+str(work/'audio-test-pulse'),
                XDG_STATE_HOME=str(work / 'state'), XDG_CACHE_HOME=str(work / 'cache'),
-               AUDIO_CONTROL_PRIVATE_RUNTIME_DIR=temporary, OMARCHY_AUDIO_HELPERS_DIR=str(helpers),
+               AUDIO_CONTROL_PRIVATE_RUNTIME_DIR=temporary,
                AUDIO_INTEGRATION_LOG=str(work / 'operations'), PATH=str(binaries)+os.pathsep+os.environ['PATH'])
     # Remove inherited per-store overrides so tests cannot touch user documents.
     for key in ('OMARCHY_AUDIO_CONTROL_FILE', 'OMARCHY_AUDIO_PREFERENCES_FILE', 'OMARCHY_AUDIO_RULES_FILE', 'OMARCHY_AUDIO_SCENES_FILE'):

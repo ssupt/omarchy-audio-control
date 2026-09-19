@@ -1,4 +1,4 @@
-//! Subscription-owned reconciliation. Lock retries never replay uncertain helpers.
+//! Subscription-owned reconciliation. Lock retries never replay uncertain changes.
 use super::{Busy, Service};
 use crate::files::FileLock;
 use serde_json::json;
@@ -80,7 +80,7 @@ impl Service {
                     Ok(lock) => lock,
                     Err(error) => {
                         // An older release may still own a scene. Nothing was
-                        // admitted: retry the lock, never an uncertain helper.
+                        // admitted: retry the lock, never an uncertain change.
                         if error.code == "busy" {
                             retry = Some(
                                 tokio::time::Instant::now() + std::time::Duration::from_secs(1),
@@ -100,7 +100,7 @@ impl Service {
                 }
                 // A different release/companion could have changed saved rules
                 // while we waited for the cross-process lock. Read and resolve
-                // again under ownership before admitting any helper.
+                // again under ownership before admitting a change.
                 if service.reload_stores().await.is_err() {
                     continue;
                 }

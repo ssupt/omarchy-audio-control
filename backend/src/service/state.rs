@@ -48,6 +48,7 @@ impl Service {
         self.update_state(|state| {
             if *catalog != fingerprint || state["links"] != links {
                 state["routes"] = crate::routing::snapshot(graph);
+                state["outputs"] = crate::outputs::snapshot(graph);
             }
             if *catalog != fingerprint {
                 *catalog = fingerprint;

@@ -55,7 +55,6 @@ fn main() {
     println!("cargo:rerun-if-changed={}", scripts.display());
     files.sort();
     let mut source = Vec::new();
-    let mut helpers = String::from("pub const HELPERS: &[(&str, &[u8])] = &[\n");
     for name in files {
         println!("cargo:rerun-if-changed={}", root.join(&name).display());
         let bytes = fs::read(root.join(&name)).unwrap();
@@ -64,27 +63,7 @@ fn main() {
         source.extend_from_slice(bytes.len().to_string().as_bytes());
         source.push(0);
         source.extend_from_slice(&bytes);
-        if let Some(helper_name) = name.strip_prefix("scripts/").filter(|name| {
-            [
-                ".audio-common",
-                "audio-resolve-output-sink",
-                "audio-sink-availability",
-            ]
-            .contains(name)
-        }) {
-            helpers.push_str(&format!(
-                "({:?}, include_bytes!({:?})),\n",
-                helper_name,
-                root.join(&name).to_str().unwrap()
-            ));
-        }
     }
-    helpers.push_str("];\n");
-    fs::write(
-        Path::new(&env::var("OUT_DIR").unwrap()).join("helpers.rs"),
-        helpers,
-    )
-    .unwrap();
     let mut digest = Command::new("sha256sum")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

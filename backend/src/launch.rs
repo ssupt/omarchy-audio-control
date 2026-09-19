@@ -121,7 +121,6 @@ pub async fn relay() -> io::Result<()> {
         Ok(socket) => socket,
         Err(_) => {
             // No shell, downloaded code, installation hooks or user units.
-            // The executable contains the matching compatibility adapters.
             let mut command = Command::new(std::env::current_exe()?);
             command
                 .arg("--plugin-daemon")

@@ -1,5 +1,4 @@
 //! Shared coordinator: lifecycle, operation admission and protocol dispatch.
-mod adapters;
 mod audio;
 mod automation;
 mod diagnostics;
@@ -9,7 +8,6 @@ mod policy;
 mod routing;
 mod state;
 
-use crate::adapter::Adapter;
 use crate::native;
 use crate::protocol::{Failure, MAX_FRAME_BYTES, MAX_SNAPSHOT_BYTES, Request, Result};
 use crate::storage::Storage;
@@ -29,7 +27,6 @@ pub struct Service {
     native: Option<native::Handle>,
     mutation: Arc<tokio::sync::Mutex<()>>,
     storage: Option<Storage>,
-    adapter: Adapter,
     operations: Arc<tokio::sync::Semaphore>,
     users: watch::Sender<usize>,
     microphone: tokio::sync::Mutex<microphone::Session>,
@@ -83,7 +80,6 @@ impl Service {
             native,
             mutation: Arc::new(tokio::sync::Mutex::new(())),
             storage,
-            adapter: Adapter::from_environment().map_err(std::io::Error::other)?,
             operations: Arc::new(tokio::sync::Semaphore::new(MAX_OPERATIONS as usize)),
             users: watch::channel(0).0,
             microphone: tokio::sync::Mutex::new(microphone::Session::default()),
@@ -159,7 +155,7 @@ impl Service {
                         "health", "state.subscribe", "node.audio", "node.level",
                         "store.read", "settings.set", "preferences.default", "preferences.profile",
                         "rules.set_app", "rules.delete_app", "devices.alias", "devices.flag",
-                        "scenes.save", "scenes.delete", "adapter.run", "scene.apply", "scene.capture",
+                        "scenes.save", "scenes.delete", "scene.apply", "scene.capture",
                         "microphone.start", "microphone.stop", "diagnostics.refresh", "diagnostics.copy", "groups.create", "groups.update", "groups.delete", "policy.set", "port.set", "profile.set", "default.set", "route.set"
                     ],
                     "maxFrameBytes": MAX_FRAME_BYTES, "maxSnapshotBytes": MAX_SNAPSHOT_BYTES
@@ -186,7 +182,6 @@ impl Service {
                 self.group_request(request).await
             }
             "scene.apply" | "scene.capture" => self.scene_request(request).await,
-            "adapter.run" => self.adapter_request(request).await,
             "store.read"
             | "settings.set"
             | "preferences.default"

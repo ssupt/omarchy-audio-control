@@ -96,6 +96,11 @@ function classifyAudioNodes(nodes) {
           result.sinks.push(node)
         continue
       }
+      if (nodeName(node) === "omarchy_speaker_tuning" && node.isSink === true
+          && (node.ready !== true || nodeProps(node)["media.class"] === "Audio/Sink")) {
+        if (result.sinks.length < 512) result.sinks.push(node)
+        continue
+      }
       if (node.isStream) {
         if (isInternalAudioNode(nodeName(node), nodeProps(node))) continue
         if (isPlaybackStream(node) && result.playbackStreams.length < 512)
@@ -981,26 +986,27 @@ function outputVolumeName(volume, muted) {
   return "Whisper"
 }
 
-function parseSinkAvailability(raw) {
-  var next = {}
-  var text = boundedSerializedInput(raw, 1048576)
-  if (text === null) return next
-  var lines = text.split("\n")
-  for (var i = 0; i < lines.length && i < 1024 && Object.keys(next).length < 256; i++) {
-    var line = lines[i]
-    if (!line) continue
-    var parts = line.split("\t")
-    var name = sanitizeIdentifier(parts[0], 160)
-    if (parts.length >= 2 && name !== "" && (parts[1] === "0" || parts[1] === "1")) {
-      var available = parts[1] === "1"
-      // Duplicate endpoint names are not safe routing identities. Preserve a
-      // repeated agreement, but make contradictory records unavailable rather
-      // than trusting whichever upstream line happened to arrive last.
-      if (hasOwn(next, name) && next[name] !== available) next[name] = false
-      else if (!hasOwn(next, name)) setMapValue(next, name, available)
-    }
+// Use the service's source and target identities, not a name from a previous
+// default or a replaced device. Quickshell may observe graph changes first.
+function outputVolumeNode(nodes, selected, outputs) {
+  var resolved = outputs && outputs.volume
+  if (!resolved || !selected || !resolved.source || !resolved.target) return selected
+  var source = resolved.source
+  var target = resolved.target
+  if (source.generation !== target.generation || nodeObjectId(selected) !== String(source.id)
+      || nodeSerial(selected) !== source.serial) return selected
+  if (!nodes || nodes.length > 4096) return selected
+  var values = listSnapshot(nodes)
+  var match = null
+  for (var i = 0; i < values.length; i++) {
+    var node = values[i]
+    if (nodeObjectId(node) !== String(target.id) || nodeSerial(node) !== target.serial) continue
+    try {
+      if (match || node.ready !== true || !node.isSink || !node.audio) return selected
+      match = node
+    } catch (_error) { return selected }
   }
-  return next
+  return match || selected
 }
 
 function audioProfileLabel(profile, bluetooth) {
@@ -1636,7 +1642,7 @@ if (typeof module !== "undefined") {
     applyBalance: applyBalance,
     audioMeterLevel: audioMeterLevel,
     outputVolumeName: outputVolumeName,
-    parseSinkAvailability: parseSinkAvailability,
+    outputVolumeNode: outputVolumeNode,
     audioProfileLabel: audioProfileLabel,
     audioProfileOptions: audioProfileOptions,
     audioCardsByBluetooth: audioCardsByBluetooth,

@@ -31,9 +31,7 @@ if sys.argv[1]=='restart' and os.environ.get('AUDIO_STAGE_FAIL_RESTART')=='1' an
     libexec = stage / '.local/libexec/omarchy-audio-control'
     first = (libexec / 'current').resolve()
     assert (first/'omarchy-audio-service').read_bytes() == binary.read_bytes()
-    assert (first/'helpers/.audio-common').is_file()
-    assert not (first/'helpers/audio-output-groups').exists()
-    assert not (first/'helpers/audio-diagnostics').exists()
+    assert not (first/'helpers').exists()
     assert (first/'omarchy-audio-service').stat().st_mode & 0o777 == 0o755
     config = stage / '.config/omarchy/audio-control.json'
     config.write_text('{"version":1,"outputOverdrive":false}')
@@ -41,7 +39,7 @@ if sys.argv[1]=='restart' and os.environ.get('AUDIO_STAGE_FAIL_RESTART')=='1' an
     run('install','--binary',str(binary))
     second = (libexec/'current').resolve()
     assert second != first and first.exists(), 'Upgrade did not retain the previous release'
-    assert (second/'helpers/.audio-common').read_bytes() == (first/'helpers/.audio-common').read_bytes()
+    assert not (second/'helpers').exists()
     assert subprocess.check_output([str(second/'omarchy-audio-service'),'--version']).strip()
     assert 'restart omarchy-audio-control.service' in pathlib.Path(env['AUDIO_STAGE_LOG']).read_text()
     unit = stage/'.config/systemd/user/omarchy-audio-control.service'

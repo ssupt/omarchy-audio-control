@@ -230,6 +230,37 @@ pub fn ready(graph: &Graph) -> bool {
     graph.ready && graph.devices.values().all(|d| d.catalog_ready)
 }
 
+// No ports, or an unknown availability, stays selectable as in PipeWire Pulse.
+pub fn output_available(graph: &Graph, node: &Node) -> bool {
+    let Some(device) = node
+        .properties
+        .get("device.id")
+        .and_then(|id| id.parse::<u32>().ok())
+        .and_then(|id| graph.devices.get(&id))
+    else {
+        return true;
+    };
+    let Some(profile_device) = node
+        .properties
+        .get("card.profile.device")
+        .and_then(|id| id.parse::<i32>().ok())
+    else {
+        return true;
+    };
+    if !device.catalog_ready {
+        return true;
+    }
+    let mut ports = device
+        .catalog
+        .ports
+        .values()
+        .filter(|p| {
+            p.direction == spa::sys::SPA_DIRECTION_OUTPUT && p.devices.contains(&profile_device)
+        })
+        .peekable();
+    ports.peek().is_none() || ports.any(|p| p.available)
+}
+
 pub(super) struct Endpoint<'a> {
     pub device: &'a Device,
     pub profile_device: i32,
@@ -657,5 +688,105 @@ mod tests {
         let catalog = Arc::make_mut(&mut graph.devices.get_mut(&42).unwrap().catalog);
         catalog.ports.get_mut(&1).unwrap().name = "mic".into();
         assert_eq!(snapshot(&graph).1, json!([]));
+    }
+    #[test]
+    fn output_availability_uses_all_matching_ports_including_unknown() {
+        let mut catalog = Catalog::default();
+        for (i, direction, device, availability) in [
+            (
+                0,
+                spa::sys::SPA_DIRECTION_OUTPUT,
+                4,
+                spa::sys::SPA_PARAM_AVAILABILITY_no,
+            ),
+            (
+                1,
+                spa::sys::SPA_DIRECTION_INPUT,
+                4,
+                spa::sys::SPA_PARAM_AVAILABILITY_yes,
+            ),
+            (
+                2,
+                spa::sys::SPA_DIRECTION_OUTPUT,
+                9,
+                spa::sys::SPA_PARAM_AVAILABILITY_yes,
+            ),
+        ] {
+            catalog.read(
+                spa::sys::SPA_PARAM_EnumRoute,
+                i,
+                &Object {
+                    type_: spa::sys::SPA_TYPE_OBJECT_ParamRoute,
+                    id: spa::sys::SPA_PARAM_EnumRoute,
+                    properties: vec![
+                        Property::new(spa::sys::SPA_PARAM_ROUTE_index, Value::Int(i as i32)),
+                        Property::new(
+                            spa::sys::SPA_PARAM_ROUTE_name,
+                            Value::String(format!("port-{i}")),
+                        ),
+                        Property::new(
+                            spa::sys::SPA_PARAM_ROUTE_direction,
+                            Value::Id(spa::utils::Id(direction)),
+                        ),
+                        Property::new(
+                            spa::sys::SPA_PARAM_ROUTE_available,
+                            Value::Id(spa::utils::Id(availability)),
+                        ),
+                        Property::new(
+                            spa::sys::SPA_PARAM_ROUTE_devices,
+                            Value::ValueArray(ValueArray::Int(vec![device])),
+                        ),
+                    ],
+                },
+            );
+        }
+        let mut graph = graph(catalog);
+        let mut node = Node {
+            properties: BTreeMap::from([
+                ("device.id".into(), "42".into()),
+                ("card.profile.device".into(), "4".into()),
+            ]),
+            ..Node::default()
+        };
+        assert!(!output_available(&graph, &node));
+        node.properties
+            .insert("card.profile.device".into(), "8".into());
+        assert!(output_available(&graph, &node));
+        node.properties
+            .insert("card.profile.device".into(), "4".into());
+        let catalog = Arc::make_mut(&mut graph.devices.get_mut(&42).unwrap().catalog);
+        let mut unknown = Object {
+            type_: spa::sys::SPA_TYPE_OBJECT_ParamRoute,
+            id: spa::sys::SPA_PARAM_EnumRoute,
+            properties: vec![
+                Property::new(spa::sys::SPA_PARAM_ROUTE_index, Value::Int(3)),
+                Property::new(
+                    spa::sys::SPA_PARAM_ROUTE_name,
+                    Value::String("unknown-port".into()),
+                ),
+                Property::new(
+                    spa::sys::SPA_PARAM_ROUTE_direction,
+                    Value::Id(spa::utils::Id(spa::sys::SPA_DIRECTION_OUTPUT)),
+                ),
+                Property::new(
+                    spa::sys::SPA_PARAM_ROUTE_devices,
+                    Value::ValueArray(ValueArray::Int(vec![4])),
+                ),
+                Property::new(
+                    spa::sys::SPA_PARAM_ROUTE_available,
+                    Value::Id(spa::utils::Id(spa::sys::SPA_PARAM_AVAILABILITY_unknown)),
+                ),
+            ],
+        };
+        catalog.read(spa::sys::SPA_PARAM_EnumRoute, 3, &unknown);
+        assert!(output_available(&graph, &node));
+        unknown.properties.last_mut().unwrap().value =
+            Value::Id(spa::utils::Id(spa::sys::SPA_PARAM_AVAILABILITY_no));
+        Arc::make_mut(&mut graph.devices.get_mut(&42).unwrap().catalog).read(
+            spa::sys::SPA_PARAM_EnumRoute,
+            3,
+            &unknown,
+        );
+        assert!(!output_available(&graph, &node));
     }
 }

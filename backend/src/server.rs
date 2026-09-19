@@ -120,7 +120,7 @@ pub fn bind_socket(path: &Path) -> io::Result<BoundSocket> {
 }
 
 /// Validate systemd's activation contract before taking ownership of FD 3.
-/// CLOEXEC prevents future command adapters from retaining the listening socket.
+/// CLOEXEC prevents child processes from retaining the listening socket.
 pub fn systemd_listener() -> io::Result<Option<StdListener>> {
     let pid = std::env::var("LISTEN_PID")
         .ok()

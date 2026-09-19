@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build and install one matching backend + guarded-adapter release atomically.
+# Build and install the backend atomically.
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -119,11 +119,6 @@ case $ACTION in
     release=$(mktemp -d "$LIBEXEC_DIR/releases/release.XXXXXXXX")
     chmod 755 -- "$release"
     install -m 755 -- "$BINARY" "$release/omarchy-audio-service"
-    install -d -m 755 -- "$release/helpers"
-    for helper in "$ROOT"/scripts/audio-* "$ROOT/scripts/.audio-common"; do
-      [[ ${helper##*/} == audio-rust-backend ]] && continue
-      install -m 755 -- "$helper" "$release/helpers/${helper##*/}"
-    done
     touch "$release/.audio-control-release"
     previous=$(readlink -- "$LIBEXEC_DIR/current" || true)
     was_active=false

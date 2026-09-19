@@ -71,6 +71,11 @@ with tempfile.TemporaryDirectory(prefix='audio-routes-') as temporary:
                 assert len(state['ports']) == 2, state['ports']
                 assert [p['activePort'] for p in state['ports']] == ['[Out] Speaker', '[In] Mic'], state['ports']
             check_catalog(state)
+            assert state['outputs']['availability']['audio_test_routed_output'] is True
+            device_process.send_signal(signal.SIGWINCH)
+            client.wait_state(lambda s:s.get('catalogReady') and s['outputs']['availability'].get('audio_test_routed_output') is False)
+            device_process.send_signal(signal.SIGWINCH)
+            client.wait_state(lambda s:s.get('catalogReady') and s['outputs']['availability'].get('audio_test_routed_output') is True)
             scene = client.request('scene.capture', dict(name='Routed devices'))
             assert scene['profiles'] == [dict(card='audio_test_device', profile='HiFi')], scene
             assert {p['value'] for p in scene['ports']} == {'[Out] Speaker', '[In] Mic'}, scene

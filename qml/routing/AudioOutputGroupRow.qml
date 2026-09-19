@@ -101,7 +101,7 @@ CursorSurface {
         onHovered: function(on) { if (on) root.cursorRequested() }
         onChanged: function(values) {
           root.membersChosen(values)
-          // The helper commits transactionally. Retain the stored selection
+          // The service commits transactionally. Retain the stored selection
           // until the watched rules file confirms the new member set.
           Qt.callLater(function() { memberSelect.values = root.members })
         }

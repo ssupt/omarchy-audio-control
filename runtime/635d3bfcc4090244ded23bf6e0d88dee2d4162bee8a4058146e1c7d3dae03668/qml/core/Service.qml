@@ -26,6 +26,7 @@ Item {
   property var policies: ({})
   property var profiles: []
   property var ports: []
+  property var outputs: ({})
   property var routes: ({ playback: {}, recording: {}, error: "" })
   readonly property bool busy: state.busy === true
   readonly property bool transactionBusy: busy && state.operation !== "node.audio"
@@ -89,6 +90,7 @@ Item {
         if (JSON.stringify(root.profiles) !== JSON.stringify(value.profiles || [])) root.profiles = value.profiles || []
         if (JSON.stringify(root.ports) !== JSON.stringify(value.ports || [])) root.ports = value.ports || []
         if (JSON.stringify(root.routes) !== JSON.stringify(value.routes || {})) root.routes = value.routes || {}
+        if (JSON.stringify(root.outputs) !== JSON.stringify(value.outputs || {})) root.outputs = value.outputs || {}
         root.state = value
       },
       fault: function(message) {

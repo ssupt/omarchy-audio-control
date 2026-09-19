@@ -24,6 +24,7 @@ struct fixture {
     int pending;
     bool routes_hidden;
     bool catalog_changed;
+    bool outputs_unavailable;
     int active_ports[2];
     int pending_port;
     bool suppress_report;
@@ -74,7 +75,7 @@ static int enum_catalog(struct fixture *f, int seq, uint32_t id, uint32_t start,
                 SPA_PARAM_ROUTE_description, SPA_POD_String(names[i]),
                 SPA_PARAM_ROUTE_priority, SPA_POD_Int(100-(int)i),
                 SPA_PARAM_ROUTE_direction, SPA_POD_Id(i < 2 ? SPA_DIRECTION_OUTPUT : SPA_DIRECTION_INPUT),
-                SPA_PARAM_ROUTE_available, SPA_POD_Id(f->catalog_changed && i % 2 ? SPA_PARAM_AVAILABILITY_no : SPA_PARAM_AVAILABILITY_yes),
+                SPA_PARAM_ROUTE_available, SPA_POD_Id((f->catalog_changed && i % 2) || (f->outputs_unavailable && i < 2) ? SPA_PARAM_AVAILABILITY_no : SPA_PARAM_AVAILABILITY_yes),
                 SPA_PARAM_ROUTE_profiles, SPA_POD_Array(sizeof(int32_t), SPA_TYPE_Int, 2, profiles),
                 SPA_PARAM_ROUTE_devices, SPA_POD_Array(sizeof(int32_t), SPA_TYPE_Int, 1, devices), 0);
         } else {
@@ -266,6 +267,13 @@ static void toggle_routes(void *data, int signal) {
     info(f);
 }
 
+static void toggle_availability(void *data, int signal) {
+    struct fixture *f = data;
+    f->outputs_unavailable = !f->outputs_unavailable;
+    f->params[3].flags ^= SPA_PARAM_INFO_SERIAL;
+    info(f);
+}
+
 static void toggle_catalog(void *data, int signal) {
     struct fixture *f = data;
     f->catalog_changed = !f->catalog_changed;
@@ -292,6 +300,7 @@ int main(int argc, char **argv) {
     f.timer = pw_loop_add_timer(loop, apply, &f);
     pw_loop_add_signal(loop, SIGUSR1, toggle_routes, &f);
     pw_loop_add_signal(loop, SIGUSR2, toggle_catalog, &f);
+    pw_loop_add_signal(loop, SIGWINCH, toggle_availability, &f);
     pw_loop_add_signal(loop, SIGINT, quit, &f);
     pw_loop_add_signal(loop, SIGTERM, quit, &f);
     struct pw_context *context = pw_context_new(loop, NULL, 0);

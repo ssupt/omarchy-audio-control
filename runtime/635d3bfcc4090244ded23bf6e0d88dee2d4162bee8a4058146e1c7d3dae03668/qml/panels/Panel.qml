@@ -22,17 +22,6 @@ Panel {
   property var service: null
   readonly property var audioService: service ? service : bar && bar.shell
     ? bar.shell.serviceFor("ssupt.audio-control") : null
-  readonly property string catalogRevision: audioService && audioService.ready
-    ? String(audioService.state.catalogRevision || "") : ""
-  onCatalogRevisionChanged: catalogRefresh.restart()
-  Timer {
-    id: catalogRefresh
-    interval: 200
-    onTriggered: {
-      root.resolveVolumeSink()
-      if (!sinkAvailabilityProc.running) sinkAvailabilityProc.running = true
-    }
-  }
   readonly property var nodes: Pipewire.nodes ? Pipewire.nodes.values : []
   readonly property var sink: Pipewire.defaultAudioSink
   readonly property var rawSource: Pipewire.defaultAudioSource
@@ -88,8 +77,8 @@ Panel {
   onCandidateStreamsChanged: enforceOutputVolumeLimit()
   readonly property var candidateRecordingStreams: rulesStore.recordingStreams
 
-  property var sinkAvailability: ({})
-  property bool sinkAvailabilityLoaded: false
+  readonly property var sinkAvailability: audioService && audioService.ready
+    ? audioService.outputs.availability || ({}) : ({})
 
   function usableInputNode(node) {
     try {
@@ -317,55 +306,13 @@ Panel {
   // *into* the processing, so the slider would move while the speakers did not,
   // and on a chain with a limiter it would change the tone as well.
   //
-  // omarchy-audio-output-sink resolves the *current* default output through any
-  // such sink to the physical one, which is the same definition the volume keys
-  // and the output switcher use. Resolving the default (rather than "whatever a
-  // tuning fronts") is what keeps this correct when headphones or HDMI are
-  // selected while a tuning still exists.
-  property string volumeSinkName: ""
-  property bool volumeSinkResolvePending: false
+  // The shared native graph resolves the selected DSP output to its hardware.
+  readonly property var volumeSink: Model.outputVolumeNode(nodes, sink,
+    audioService && audioService.ready ? audioService.outputs : null)
+  onVolumeSinkChanged: enforceOutputVolumeLimit()
 
   // Carry sub-notch touchpad deltas between wheel events.
   property real wheelAccumulator: 0
-
-  readonly property var volumeSink: {
-    try {
-      if (volumeSinkName === "" || !sink) return sink
-      if (volumeSinkName === Model.nodeName(sink)) return sink
-      var match = null
-      for (var i = 0; i < nodes.length && i < 4096; i++) {
-        var n = nodes[i]
-        if (!n || !n.isSink || n.isStream || Model.nodeName(n) !== volumeSinkName
-            || !n.audio) continue
-        if (match) return sink
-        match = n
-      }
-      return match || sink
-    } catch (_error) {
-      return sink
-    }
-  }
-  onVolumeSinkChanged: enforceOutputVolumeLimit()
-
-  // Re-resolve when the default or service graph catalog changes.
-  onSinkChanged: {
-    // Never expose the physical endpoint resolved for the previous default
-    // while a newer asynchronous lookup is still in flight.
-    volumeSinkName = ""
-    resolveVolumeSink()
-  }
-
-  function resolveVolumeSink() {
-    if (volumeSinkProc.running) {
-      volumeSinkResolvePending = true
-      return
-    }
-    volumeSinkResolvePending = false
-    volumeSinkProc.response = ""
-    volumeSinkProc.requestedDefaultName = Model.nodeName(sink)
-    volumeSinkProc.requestedDefaultObjectId = Model.nodeObjectId(sink)
-    volumeSinkProc.running = true
-  }
 
   readonly property real outputVolume: audioNodeVolume(volumeSink)
   readonly property bool outputMuted: audioNodeMuted(volumeSink)
@@ -955,13 +902,8 @@ Panel {
 
   function sinkAvailable(node) {
     var name = Model.nodeName(node)
-    if (name === "" || !sinkAvailabilityLoaded) return true
+    if (name === "") return true
     return Model.mapValue(sinkAvailability, name, true) !== false
-  }
-
-  function updateSinkAvailability(raw) {
-    sinkAvailability = Model.parseSinkAvailability(raw)
-    sinkAvailabilityLoaded = true
   }
 
   function friendlyDeviceLabel(text) {
@@ -1113,21 +1055,6 @@ Panel {
     sceneController.apply(scene)
   }
 
-  AudioCommand {
-    service: root.audioService
-    id: sinkAvailabilityProc
-    command: runtime.scriptCommand("audio-sink-availability")
-    stdout: AudioReply {
-      waitForEnd: true
-      onStreamFinished: sinkAvailabilityProc.response = String(text || "")
-    }
-    property string response: ""
-    onExited: function(exitCode) {
-      if (exitCode === 0) root.updateSinkAvailability(response)
-      response = ""
-    }
-  }
-
   // Capture notifications are best-effort; probe once so a missing
   // notify-send never turns into repeated spawn failures.
   Process {
@@ -1135,34 +1062,6 @@ Panel {
     running: true
     command: ["/bin/sh", "-c", "command -v notify-send >/dev/null 2>&1"]
     onExited: function(exitCode) { root.notificationsAvailable = exitCode === 0 }
-  }
-
-  AudioCommand {
-    service: root.audioService
-    id: volumeSinkProc
-    property string response: ""
-    property string requestedDefaultName: ""
-    property string requestedDefaultObjectId: ""
-    command: runtime.scriptCommand("audio-resolve-output-sink")
-    stdout: AudioReply {
-      waitForEnd: true
-      onStreamFinished: volumeSinkProc.response = String(text || "").trim()
-    }
-    onExited: function(exitCode) {
-      var resolved = Model.sanitizeIdentifier(response, 160)
-      var currentDefaultName = Model.nodeName(root.sink)
-      var currentDefaultObjectId = Model.nodeObjectId(root.sink)
-      var requestStillCurrent = requestedDefaultName === currentDefaultName
-        && requestedDefaultObjectId === currentDefaultObjectId
-      var retry = root.volumeSinkResolvePending || !requestStillCurrent
-      if (requestStillCurrent)
-        root.volumeSinkName = exitCode === 0 && resolved !== "" ? resolved : ""
-      response = ""
-      requestedDefaultName = ""
-      requestedDefaultObjectId = ""
-      root.volumeSinkResolvePending = false
-      if (retry) Qt.callLater(root.resolveVolumeSink)
-    }
   }
 
   Timer {

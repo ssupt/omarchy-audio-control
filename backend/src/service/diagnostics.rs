@@ -13,7 +13,7 @@ impl Service {
     pub(super) async fn refresh_diagnostics(&self, request: &Request) -> Result<Value> {
         request.params::<NoParams>()?;
         // A separate lock coalesces concurrent readers without holding the
-        // native/helper mutation queue during slow service or graph inspection.
+        // audio mutation queue during slow service or graph inspection.
         let mut sample = self.diagnostics.lock().await;
         if let Some(sample) = sample.as_ref() {
             if sample.finished.elapsed() < Duration::from_secs(5) {

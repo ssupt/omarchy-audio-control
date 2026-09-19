@@ -1,4 +1,3 @@
-pub mod adapter;
 pub mod automation;
 pub mod diagnostics;
 pub mod file_watch;
@@ -7,6 +6,7 @@ pub mod groups;
 pub mod launch;
 pub mod microphone;
 pub mod native;
+pub mod outputs;
 pub mod profiles;
 pub mod protocol;
 pub mod pulse;

@@ -70,18 +70,6 @@ Item {
   property var shell: null
   property var manifest: null
   property var service: null
-  readonly property string catalogRevision: service && service.ready
-    ? String(service.state.catalogRevision || "") : ""
-  onCatalogRevisionChanged: catalogRefresh.restart()
-  Timer {
-    id: catalogRefresh
-    interval: 200
-    onTriggered: {
-      if (!window.visible) return
-      if (root.profileMenuOpen) { restart(); return }
-      root.resolveVolumeSink()
-    }
-  }
   property bool closingFromHost: false
   property bool openRequested: false
   property bool quickPanelProxyOpen: false
@@ -174,25 +162,9 @@ Item {
   readonly property var deviceCards: Model.audioCardsByBluetooth(audioCards, false)
   readonly property var pipewireNodes: Pipewire.nodes ? Pipewire.nodes.values : []
   readonly property var defaultOutputDevice: Pipewire.defaultAudioSink
-  property string volumeSinkName: ""
-  property bool volumeSinkResolvePending: false
-  readonly property var outputDevice: {
-    try {
-      if (!defaultOutputDevice || !volumeSinkName
-          || Model.nodeName(defaultOutputDevice) === volumeSinkName) return defaultOutputDevice
-      var match = null
-      for (var i = 0; i < pipewireNodes.length && i < 4096; i++) {
-        var node = pipewireNodes[i]
-        if (!node || !node.isSink || node.isStream
-            || Model.nodeName(node) !== volumeSinkName) continue
-        if (match) return defaultOutputDevice
-        match = node
-      }
-      return match || defaultOutputDevice
-    } catch (_error) {
-      return defaultOutputDevice
-    }
-  }
+  readonly property var outputDevice: Model.outputVolumeNode(pipewireNodes, defaultOutputDevice,
+    service && service.ready ? service.outputs : null)
+
   readonly property var rawInputDevice: Pipewire.defaultAudioSource
   readonly property var inputDevice: usableInputNode(rawInputDevice)
     && mutableAudioNode(rawInputDevice) ? rawInputDevice : null
@@ -236,10 +208,6 @@ Item {
     || profileSetPending || portSetPending || microphoneTest.busy
     || diagnosticsMutationBusy
   readonly property color hoverFill: Style.hoverFillFor(foreground, Color.accent)
-  onDefaultOutputDeviceChanged: {
-    volumeSinkName = ""
-    resolveVolumeSink()
-  }
   onOutputDeviceChanged: enforceOutputVolumeLimit()
 
   function pluginId() {
@@ -296,7 +264,6 @@ Item {
     Qt.callLater(function() {
       if (!window.visible) return
       keyCatcher.forceActiveFocus()
-      refresh()
     })
   }
 
@@ -325,23 +292,6 @@ Item {
     microphoneTest.discard()
     if (shell && typeof shell.hide === "function") shell.hide("ssupt.audio-control")
     else window.visible = false
-  }
-
-  function refresh() {
-    if (!window.visible) return
-    resolveVolumeSink()
-  }
-
-  function resolveVolumeSink() {
-    if (volumeSinkProc.running) {
-      volumeSinkResolvePending = true
-      return
-    }
-    volumeSinkResolvePending = false
-    volumeSinkProc.response = ""
-    volumeSinkProc.requestedDefaultName = Model.nodeName(defaultOutputDevice)
-    volumeSinkProc.requestedDefaultObjectId = Model.nodeObjectId(defaultOutputDevice)
-    volumeSinkProc.running = true
   }
 
   function mutableAudioNode(node) {
@@ -947,35 +897,6 @@ Item {
     inputDeviceLive: root.mutableAudioNode(root.inputDevice)
     sessionActive: window.visible
   }
-
-  AudioCommand {
-    service: root.service
-    id: volumeSinkProc
-    property string response: ""
-    property string requestedDefaultName: ""
-    property string requestedDefaultObjectId: ""
-    command: runtime.scriptCommand("audio-resolve-output-sink")
-    stdout: AudioReply {
-      waitForEnd: true
-      onStreamFinished: volumeSinkProc.response = String(text || "").trim()
-    }
-    onExited: function(exitCode) {
-      var resolved = Model.sanitizeIdentifier(response, 160)
-      var currentDefaultName = Model.nodeName(root.defaultOutputDevice)
-      var currentDefaultObjectId = Model.nodeObjectId(root.defaultOutputDevice)
-      var requestStillCurrent = requestedDefaultName === currentDefaultName
-        && requestedDefaultObjectId === currentDefaultObjectId
-      var retry = root.volumeSinkResolvePending || !requestStillCurrent
-      if (requestStillCurrent)
-        root.volumeSinkName = exitCode === 0 && resolved !== "" ? resolved : ""
-      response = ""
-      requestedDefaultName = ""
-      requestedDefaultObjectId = ""
-      root.volumeSinkResolvePending = false
-      if (retry) Qt.callLater(root.resolveVolumeSink)
-    }
-  }
-
 
   FloatingWindow {
     id: window

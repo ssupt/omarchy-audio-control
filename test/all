@@ -114,36 +114,9 @@ if AUDIO_CONTROL_PRIVATE_RUNTIME_DIR="$runtime_private" \
   fail "bounded capture silently removed a NUL byte"
 fi
 
-resolved_sink=$(AUDIO_CONTROL_PRIVATE_RUNTIME_DIR="$runtime_private" \
-  AUDIO_CONTROL_OUTPUT_SINK_RESPONSE=physical-speakers PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-resolve-output-sink")
-[[ $resolved_sink == physical-speakers ]] || fail "bounded physical output resolver"
-if AUDIO_CONTROL_PRIVATE_RUNTIME_DIR="$runtime_private" \
-  AUDIO_CONTROL_OUTPUT_SINK_RESPONSE=$'physical-speakers\nunexpected-output' \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-resolve-output-sink" \
-    >/dev/null 2>&1; then
-  fail "physical output resolver accepted multiple lines"
-fi
-if AUDIO_CONTROL_PRIVATE_RUNTIME_DIR="$runtime_private" \
-  AUDIO_CONTROL_OUTPUT_SINK_OVERSIZED=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-resolve-output-sink" >/dev/null 2>&1; then
-  fail "physical output resolver accepted oversized output"
-fi
-availability=$(AUDIO_CONTROL_PRIVATE_RUNTIME_DIR="$runtime_private" \
-  AUDIO_CONTROL_SINK_AVAILABILITY_RESPONSE=$'physical-speakers\t1\nheadphones\t0' \
-  PATH="$TEST_DIR/mocks:$PATH" "$ROOT/scripts/audio-sink-availability")
-[[ $availability == $'physical-speakers\t1\nheadphones\t0' ]] ||
-  fail "bounded sink availability"
-if AUDIO_CONTROL_PRIVATE_RUNTIME_DIR="$runtime_private" \
-  AUDIO_CONTROL_SINK_AVAILABILITY_OVERSIZED=1 PATH="$TEST_DIR/mocks:$PATH" \
-  "$ROOT/scripts/audio-sink-availability" >/dev/null 2>&1; then
-  fail "sink availability accepted oversized output"
-fi
 rm -rf -- "$runtime_safety_dir"
 
 for helper_call in \
-  'audio-resolve-output-sink extra' \
-  'audio-sink-availability extra' \
   'audio-speaker-test output extra' \
   'audio-recovery extra' \
   'prepare-advanced-window extra' \
@@ -704,11 +677,22 @@ assert.equal(model.streamIconName({ ready: true, properties: {
   'application.icon_name': '../../private/icon'
 } }, [], []), '')
 assert.equal(model.friendlyStreamLabel('constructor'), 'constructor')
-const prototypeAvailability = model.parseSinkAvailability('__proto__\t0\nconstructor\t0\n')
-assert.equal(model.mapValue(prototypeAvailability, '__proto__', true), false)
-assert.equal(model.mapValue(prototypeAvailability, 'constructor', true), false)
-assert.equal(model.parseSinkAvailability('duplicate\t1\nduplicate\t0\n').duplicate, false)
 assert.deepEqual(model.parseStreamOutputOption('override:' + '1'.repeat(21)), { mode: '', sink: '' })
+const selectedDsp = { id: 30, name: 'omarchy_speaker_tuning', ready: true, isSink: true, isStream: true,
+  audio: {}, properties: { 'object.serial': '300', 'media.class': 'Audio/Sink' } }
+const hardwareOutput = { id: 40, name: 'hardware', ready: true, isSink: true, audio: {},
+  properties: { 'object.serial': '400' } }
+const outputState = { volume: { source: { generation: 'g', id: 30, serial: '300' },
+  target: { generation: 'g', id: 40, serial: '400' } } }
+assert.deepEqual(model.classifyAudioNodes([selectedDsp]).sinks, [selectedDsp])
+assert.equal(model.outputVolumeNode([selectedDsp, hardwareOutput], selectedDsp, outputState), hardwareOutput)
+assert.equal(model.outputVolumeNode([selectedDsp, hardwareOutput], hardwareOutput, outputState), hardwareOutput)
+assert.equal(model.outputVolumeNode([selectedDsp], selectedDsp, outputState), selectedDsp)
+assert.equal(model.outputVolumeNode([hardwareOutput, hardwareOutput], selectedDsp, outputState), selectedDsp)
+assert.equal(model.outputVolumeNode([{...hardwareOutput, properties:{'object.serial':'401'}}], selectedDsp, outputState), selectedDsp)
+assert.equal(model.outputVolumeNode([hardwareOutput], {...selectedDsp, properties:{'object.serial':'301'}}, outputState).id, 30)
+assert.equal(model.outputVolumeNode([hardwareOutput], selectedDsp, null), selectedDsp)
+assert.equal(model.outputVolumeNode(Array(4097).fill(hardwareOutput), selectedDsp, outputState), selectedDsp)
 const diagnostics = model.parseAudioDiagnostics(JSON.stringify({
   version: 1,
   healthy: true,
