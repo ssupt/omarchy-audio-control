@@ -141,9 +141,15 @@ with tempfile.TemporaryDirectory(prefix='audio-groups-') as temporary, ExitStack
         third = member('audio_test_third')
         until(lambda: any(s['name'] == 'audio_test_third' for s in sinks()))
         client.wait_state(lambda s: any(n['name'] == 'audio_test_third' and n['state'] for n in s['nodes']))
-        change('update', id=group_id, name='Desk', members=['audio_test_left', 'audio_test_third'])
-        assert json.loads(rules_path.read_text())['outputGroups'][0]['members'] == ['audio_test_left', 'audio_test_third']
-        change('update', id=group_id, name='Desk', members=['audio_test_left', 'audio_test_right'])
+        # Rapid replacements race native subscriptions to disappearing nodes.
+        # Their ENOENT replies must not reconnect the service or invalidate the
+        # generation used by the following rollback and routing operations.
+        for _ in range(8):
+            for other in ('audio_test_third', 'audio_test_right'):
+                members = ['audio_test_left', other]
+                change('update', id=group_id, name='Desk', members=members)
+                assert json.loads(rules_path.read_text())['outputGroups'][0]['members'] == members
+                assert client.state['generation'] == state['generation']
         run('pactl', 'set-default-sink', 'audio_test_left')
         saved = rules_path.read_bytes()
         lock = rules_path.with_suffix('.json.lock')

@@ -453,8 +453,10 @@ fn session(
                     let _ = completion.reply.send(Ok(()));
                 }
             })
-            .error(move |id, _, _, _| {
-                if id == pw::core::PW_ID_CORE {
+            .error(move |id, _, res, _| {
+                // Removed nodes can reject in-flight subscriptions with ENOENT
+                // on the core. Only a broken connection ends this session.
+                if id == pw::core::PW_ID_CORE && res == -libc::EPIPE {
                     if let Some(loop_) = loop_.upgrade() {
                         loop_.quit();
                     }
