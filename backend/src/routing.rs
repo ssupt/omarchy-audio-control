@@ -77,10 +77,22 @@ fn internal(node: &Node) -> bool {
             .get("application.id")
             .is_some_and(|v| v == "ssupt.audio-control")
 }
+fn monitor(node: &Node) -> bool {
+    class(node) == "Stream/Input/Audio"
+        && (node
+            .properties
+            .get("stream.monitor")
+            .is_some_and(|v| matches!(v.as_str(), "true" | "1"))
+            || node
+                .properties
+                .get("media.category")
+                .is_some_and(|v| v == "Monitor"))
+}
 pub fn stream_direction(node: &Node) -> Option<Direction> {
     // Registry properties are incomplete until the first Node info event.
     if node.state.is_empty()
         || internal(node)
+        || monitor(node)
         || node.properties.contains_key("pulse.module.id")
         || node.name.starts_with("output.omarchy_audio_group_")
         || node.name.starts_with("omarchy_audio_group_")
@@ -151,6 +163,9 @@ pub fn target<'a>(
                 _ => None,
             }
         })
+        // Level meters tap the stream alongside its destination. They do not
+        // make it a multi-output application or participate in routing changes.
+        .filter(|id| !graph.nodes.get(id).is_some_and(monitor))
         .collect();
     if ids.len() > 1 {
         return Err(Failure::new(
@@ -513,6 +528,65 @@ mod tests {
         graph.links.get_mut(&21).unwrap().input_node = 3;
         assert!(target(&graph, &graph.nodes[&1], Direction::Playback).is_err());
         assert!(snapshot(&graph)["playback"].as_object().unwrap().is_empty());
+    }
+    #[test]
+    fn monitor_taps_do_not_replace_or_ambiguate_application_targets() {
+        for (key, value) in [
+            ("stream.monitor", "true"),
+            ("stream.monitor", "1"),
+            ("media.category", "Monitor"),
+        ] {
+            let mut graph = graph();
+            graph.nodes.insert(
+                4,
+                Node {
+                    id: 4,
+                    serial: "104".into(),
+                    name: "level-meter".into(),
+                    state: "Running".into(),
+                    properties: [
+                        ("media.class".into(), "Stream/Input/Audio".into()),
+                        (key.into(), value.into()),
+                    ]
+                    .into(),
+                    ..Node::default()
+                },
+            );
+            graph.links.insert(
+                21,
+                Link {
+                    id: 21,
+                    output_node: 1,
+                    input_node: 4,
+                    state: "Active".into(),
+                },
+            );
+            assert_eq!(
+                snapshot(&graph)["playback"]["101"],
+                json!({"target":"102", "mode":"default"})
+            );
+            assert!(stream_direction(&graph.nodes[&4]).is_none());
+            graph.links.get_mut(&20).unwrap().input_node = 3;
+            assert_eq!(snapshot(&graph)["playback"]["101"]["target"], "103");
+            graph.links.remove(&20);
+            assert!(
+                target(&graph, &graph.nodes[&1], Direction::Playback)
+                    .unwrap()
+                    .is_none()
+            );
+            // Unmarked processing peers still count; do not hide ambiguous routes.
+            graph.nodes.get_mut(&4).unwrap().properties.remove(key);
+            graph.links.insert(
+                20,
+                Link {
+                    id: 20,
+                    output_node: 1,
+                    input_node: 2,
+                    state: "Paused".into(),
+                },
+            );
+            assert!(target(&graph, &graph.nodes[&1], Direction::Playback).is_err());
+        }
     }
     #[test]
     fn routing_waits_for_full_node_properties() {

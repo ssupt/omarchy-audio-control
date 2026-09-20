@@ -32,7 +32,8 @@ with tempfile.TemporaryDirectory(prefix='audio-routing-') as temporary, ExitStac
                AUDIO_CONTROL_PRIVATE_RUNTIME_DIR=temporary,
                DBUS_SESSION_BUS_ADDRESS='unix:path='+str(work/'bus'),
                DBUS_SYSTEM_BUS_ADDRESS='unix:path='+str(work/'bus'),
-               WIREPLUMBER_CONFIG_DIR='/usr/share/wireplumber')
+               WIREPLUMBER_CONFIG_DIR='/usr/share/wireplumber',
+               PULSE_SERVER='unix:'+str(work/'pulse/native'), PULSE_RUNTIME_PATH=str(work/'pulse'))
     bus = work/'bus.conf'
     bus.write_text('<busconfig><type>session</type><listen>unix:path='+str(work/'bus')+'</listen>'
         '<auth>EXTERNAL</auth><policy context="default"><allow send_destination="*"/>'
@@ -72,6 +73,9 @@ with tempfile.TemporaryDirectory(prefix='audio-routing-') as temporary, ExitStac
         pw = launch(['pipewire', '-c', str(config)])
         until(lambda: (work/'audio-test').exists())
         wp = launch(['wireplumber', '--profile', 'policy'])
+        (work/'pulse').mkdir()
+        launch(['pipewire-pulse'])
+        until(lambda: (work/'pulse/native').exists())
         (work/'empty-path').mkdir()
         backend = launch([str(BINARY)], dict(env, PATH=str(work/'empty-path')))
         path = work/'omarchy-audio-control/backend.sock'
@@ -119,6 +123,10 @@ with tempfile.TemporaryDirectory(prefix='audio-routing-') as temporary, ExitStac
                        for l in client.state['links'])
 
         def start_stream(name, record=False, extra=''):
+            if name == 'test_follow':
+                return launch(['pacat', '--playback', '--raw', '--rate=48000', '--channels=2',
+                               '--format=s16le', '--property=node.name='+name,
+                               '--property=application.name='+name, '/dev/zero'])
             command = ['pw-record' if record else 'pw-play', '--raw', '--rate=48000', '--channels=1' if record else '--channels=2',
                        '--format=s16', '--properties=node.name='+name+' application.name='+name+' '+extra,
                        '/dev/null' if record else '/dev/zero']
@@ -137,6 +145,11 @@ with tempfile.TemporaryDirectory(prefix='audio-routing-') as temporary, ExitStac
         until(lambda: linked('test_follow', 'audio_test_output') and linked('test_pinned', 'audio_test_output')
               and linked('test_record', 'audio_test_input'))
         assert route('test_pinned', 'audio_test_output')['outcome'] == 'applied'
+        meter = launch(['pw-record', '--raw', '--rate=48000', '--channels=2', '--format=f32',
+                        '--target='+node('test_follow')['serial'],
+                        '--properties=node.name=test_meter media.category=Monitor stream.monitor=true',
+                        '/dev/null'])
+        until(lambda: linked('test_follow', 'test_meter'))
         old = identity('audio_test_output')
         assert select('audio_test_other_output', old)['outcome'] == 'applied'
         assert default('playback') == 'audio_test_other_output'
@@ -150,6 +163,13 @@ with tempfile.TemporaryDirectory(prefix='audio-routing-') as temporary, ExitStac
         assert route('test_pinned', 'audio_test_other_output', 'default')['outcome'] == 'applied'
         assert select('audio_test_output')['outcome'] == 'applied'
         assert linked('test_follow', 'audio_test_output') and linked('test_pinned', 'audio_test_output')
+        assert route('test_follow', 'audio_test_other_output')['outcome'] == 'applied'
+        assert route('test_follow', 'audio_test_output', 'default')['outcome'] == 'applied'
+        assert linked('test_follow', 'test_meter')
+        assert node('test_meter')['serial'] not in client.state['routes']['recording']
+        stop(meter)
+        client.wait_state(lambda s: all(n['name'] != 'test_meter' for n in s['nodes']))
+        print('PASS: live monitor taps preserve default switching and explicit/follow-default routes', flush=True)
         print('PASS: default followers move; explicit routes stay pinned; default mode clears the pin; stale requests fail', flush=True)
 
         static = launch(['pw-loopback',
