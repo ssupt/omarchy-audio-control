@@ -253,14 +253,18 @@ Panel {
   // removal signal; rebuilding a Repeater from that signal path has crashed
   // in Quickshell's PipeWire service. The snapshot timer lets that mutation
   // settle first, and closed panels keep their repeaters detached entirely.
-  // The Repeaters below use only the snapshot lengths as their models and
-  // resolve each node by index. Passing native PwNode objects as JavaScript
-  // list rows makes Qt synthesize delegate properties from an object that may
-  // disappear mid-regeneration when hardware is unplugged.
+  // Stable string keys preserve surviving delegates. Native PwNode objects
+  // stay outside the item models so Qt never synthesizes delegate roles from
+  // an object that can disappear during hardware removal.
   property var displayAudioSinks: []
   property var displayAudioSources: []
   property var displayAudioStreams: []
   property var displayRecordingStreams: []
+  readonly property string nodeGeneration: audioService && audioService.state.generation || ""
+  AudioNodeModel { id: sinkRows; nodes: root.displayAudioSinks; generation: root.nodeGeneration }
+  AudioNodeModel { id: sourceRows; nodes: root.displayAudioSources; generation: root.nodeGeneration }
+  AudioNodeModel { id: streamRows; nodes: root.displayAudioStreams; generation: root.nodeGeneration }
+  AudioNodeModel { id: recordingRows; nodes: root.displayRecordingStreams; generation: root.nodeGeneration }
 
   // The service publishes live links and explicit/default routing metadata.
   readonly property var streamRoutes: audioService && audioService.routes.playback || ({})
@@ -644,11 +648,8 @@ Panel {
     return Model.listSnapshot(list)
   }
 
-  // Repeaters rebuild every delegate when their model array is reassigned,
-  // even if the contents are identical. During device churn those redundant
-  // destroy+incubate cycles are exactly what crashes Quickshell's QJSEngine,
-  // so only reassign when the node membership actually changed. Row sliders
-  // and meters bind nodes directly and stay live without a reassignment.
+  // Refresh snapshots only when membership changes. Sliders and meters keep
+  // observing the same native objects between changes.
   function serialSignature(list) {
     var parts = []
     for (var i = 0; i < list.length; i++) {
@@ -684,6 +685,11 @@ Panel {
       displayAudioStreams = nextStreams
     if (serialSignature(displayRecordingStreams) !== serialSignature(nextRecording))
       displayRecordingStreams = nextRecording
+    // A node may finish binding without changing the snapshot's object list.
+    sinkRows.synchronize()
+    sourceRows.synchronize()
+    streamRows.synchronize()
+    recordingRows.synchronize()
     clampCursor()
   }
 
@@ -1453,13 +1459,14 @@ Panel {
             }
 
             Repeater {
-              model: root.displayAudioSinks.length
+              model: sinkRows
 
               AudioSinkRow {
                 id: sinkDelegate
                 required property int index
+                required property string nodeKey
                 width: panelColumn.width
-                node: root.displayAudioSinks[index]
+                node: sinkRows.nodeForKey(nodeKey)
                 rowIndex: index
                 bar: root.bar
                 preferredName: root.preferredOutputName
@@ -1589,13 +1596,14 @@ Panel {
             }
 
             Repeater {
-              model: root.displayAudioSources.length
+              model: sourceRows
 
               AudioSourceRow {
                 id: sourceDelegate
                 required property int index
+                required property string nodeKey
                 width: panelColumn.width
-                node: root.displayAudioSources[index]
+                node: sourceRows.nodeForKey(nodeKey)
                 rowIndex: index
                 bar: root.bar
                 preferredName: root.preferredInputName
@@ -1636,13 +1644,14 @@ Panel {
 
             Repeater {
               id: streamRepeater
-              model: root.displayAudioStreams.length
+              model: streamRows
 
               AudioStreamRow {
                 id: streamDelegate
                 required property int index
+                required property string nodeKey
                 width: panelColumn.width
-                node: root.displayAudioStreams[index]
+                node: streamRows.nodeForKey(nodeKey)
                 volumeMaximum: root.outputVolumeMaximum
                 nodeLive: root.mutableAudioNode(streamDelegate.node)
                 rowIndex: index
@@ -1709,13 +1718,14 @@ Panel {
 
             Repeater {
               id: recordingStreamRepeater
-              model: root.displayRecordingStreams.length
+              model: recordingRows
 
               AudioStreamRow {
                 id: recordingStreamDelegate
                 required property int index
+                required property string nodeKey
                 width: panelColumn.width
-                node: root.displayRecordingStreams[index]
+                node: recordingRows.nodeForKey(nodeKey)
                 nodeLive: root.mutableAudioNode(recordingStreamDelegate.node)
                 rowIndex: index
                 recording: true

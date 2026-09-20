@@ -92,6 +92,23 @@ Item {
           return item.maximum !== undefined && typeof item.moved === "function"
         })
         if (!root.check(root.slider && root.slider.maximum === 1, "unboosted slider exceeds 100%")) return
+        var originalStreams = root.panel.displayAudioStreams.slice()
+        var transient = {id: 4000000, name: "test-transient", ready: true,
+          isSink: true, isStream: true, audio: {volume: .4, muted: false, volumes: [.4, .4]},
+          properties: {"object.id": "4000000", "object.serial": "4000000", "media.class": "Stream/Output/Audio"}}
+        function samePlaybackRow() {
+          return root.descendants(root.panel).find(function(item) {
+            return item.routeSection === "streams" && item.node && item.node.name === "audio_test_playback"
+          }) === root.streamRow
+        }
+        root.panel.displayAudioStreams = originalStreams.concat([transient])
+        if (!root.check(samePlaybackRow(), "a new application recreated an existing mixer row")) return
+        root.panel.displayAudioStreams = [transient].concat(originalStreams)
+        if (!root.check(samePlaybackRow() && root.streamRow.rowIndex === 1,
+            "reordering applications reset a mixer row or its navigation index")) return
+        root.panel.displayAudioStreams = originalStreams
+        if (!root.check(samePlaybackRow() && root.streamRow.rowIndex === 0,
+            "closing another application recreated a mixer row")) return
         root.slider.moved(1.2)
         root.phase++
         break

@@ -139,11 +139,10 @@ fi
 
 # Native PwNode QObjects can disappear between a PipeWire removal event and a
 # Repeater regeneration. Keep them out of Qt's JavaScript-list delegate model;
-# delegates may resolve the panel snapshot by a stable integer index instead.
+# use string identity roles or numeric indices instead. Runtime tests cover
+# delegate retention while application membership and order change.
 for live_model in displayAudioSinks displayAudioSources \
     displayAudioStreams displayRecordingStreams; do
-  grep -q "model: root\\.${live_model}\\.length$" "$ROOT/qml/panels/Panel.qml" ||
-    fail "safe numeric Repeater model: $live_model"
   if grep -q "model: root\\.${live_model}$" "$ROOT/qml/panels/Panel.qml"; then
     fail "native PipeWire objects used directly as Repeater rows: $live_model"
   fi
