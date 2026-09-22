@@ -77,10 +77,19 @@ assert len(sys.stdin.buffer.read()) > 0
     clients = []
     log = open(work / 'runtime.log', 'w+')
     config = work/'pipewire.conf'
+    private_objects = ''.join(
+        '    { factory = metadata args = { metadata.name = '+name+' } }\n'
+        for name in ('sm-settings', 'persistent-sm-settings', 'schema-sm-settings'))
+    private_objects += '''    { factory = adapter args = {
+        factory.name = support.null-audio-sink
+        node.name = audio_test_null_input
+        node.description = "Unsupported Peak Input"
+        media.class = Audio/Source
+        audio.position = [ FL FR ]
+    } }
+'''
     config.write_text((ROOT/'test/fixtures/pipewire.conf').read_text().replace(
-        'context.objects = [', 'context.objects = [\n'+''.join(
-            '    { factory = metadata args = { metadata.name = '+name+' } }\n'
-            for name in ('sm-settings', 'persistent-sm-settings', 'schema-sm-settings'))))
+        'context.objects = [', 'context.objects = [\n'+private_objects))
     def pipewire():
         process = subprocess.Popen(['pipewire', '-c', str(config)], env=env, stdout=log, stderr=log)
         processes.append(process)
