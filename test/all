@@ -504,6 +504,12 @@ assert.deepEqual(classified.sinks.map(node => node.name), [
 assert.deepEqual(classified.sources.map(node => node.name), ['microphone'])
 assert.deepEqual(classified.playbackStreams.map(node => node.name), ['firefox'])
 assert.deepEqual(classified.recordingStreams.map(node => node.name), ['firefox-capture'])
+assert.equal(model.inputPeakSupported({ ready: true, properties: {
+  'factory.name': 'support.null-audio-sink', 'media.class': 'Audio/Source'
+}}), false)
+assert.equal(model.inputPeakSupported({ ready: true, properties: {
+  'factory.name': 'api.alsa.pcm.source', 'media.class': 'Audio/Source'
+}}), true)
 assert.equal(model.isPlaybackStream({
   isStream: true, isSink: false, type: 'Stream/Output/Audio'
 }), false)

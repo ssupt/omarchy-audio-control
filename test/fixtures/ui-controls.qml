@@ -21,7 +21,16 @@ Item {
   property real lastReleased: -1
 
   Test.TestCase { id: pointer; name: "AudioPointer"; when: false; optional: true }
-  Window { id: pointerWindow; width: 320; height: 100; visible: false }
+  Window {
+    id: pointerWindow
+    width: 320; height: 160; visible: false
+    Flickable {
+      id: pointerScroll
+      anchors.fill: parent
+      contentWidth: width
+      contentHeight: 500
+    }
+  }
   Connections {
     target: root.slider
     function onMoved(value) { root.sliderMoves++; root.lastMoved = value }
@@ -169,7 +178,7 @@ Item {
             && !root.advanced.sceneStatusIsError, "scene was not deleted from both panels")) return
         // Move the real control into a normal window: the headless compositor
         // does not support the quick panel's layer-shell pointer surface.
-        root.slider.parent = pointerWindow.contentItem
+        root.slider.parent = pointerScroll.contentItem
         root.slider.x = 20
         root.slider.y = 30
         root.slider.width = 280
@@ -191,6 +200,17 @@ Item {
         pointer.mouseRelease(root.slider, root.slider.width * .6, root.slider.height / 2)
         if (!root.check(!root.slider.dragging && Math.abs(root.lastReleased - root.lastMoved) < .001,
             "normal release lost the final slider value")) return
+        pointer.mouseDrag(root.slider, root.slider.width * .3, root.slider.height / 2,
+          root.slider.width * .4, root.slider.height + 30)
+        if (!root.check(!root.slider.dragging && Math.abs(root.lastMoved - .7) < .01
+            && Math.abs(root.lastReleased - root.lastMoved) < .001
+            && pointerScroll.contentY === 0, "slider drag outside the track lost its final value or scrolled the panel: "
+            + JSON.stringify({dragging: root.slider.dragging, moved: root.lastMoved,
+              released: root.lastReleased, contentY: pointerScroll.contentY}))) return
+        moves = root.sliderMoves
+        pointer.mouseMove(root.slider, root.slider.width * .4, root.slider.height / 2)
+        if (!root.check(!root.slider.dragging && root.sliderMoves === moves,
+            "slider resumed dragging after release outside the track")) return
         pointer.mousePress(root.slider, root.slider.width * .3, root.slider.height / 2)
         root.slider.visible = false
         pointer.mouseRelease(pointerWindow.contentItem, 300, 80)
@@ -301,8 +321,16 @@ Item {
       case 23:
         if (root.panel.routeMutationBusy) return
         if (!root.check(!root.panel.streamRouteSetError && root.panel.streamRoute(root.panel.candidateStreams.find(function(n) { return n.name === "audio_test_playback" })).mode === "default", "application default mode did not reach the panel")) return
+        if (!root.check(root.panel.source
+            && root.panel.source.name === "audio_test_null_input" && root.panel.hasInput
+            && !root.panel.inputPeakSupported,
+            "null input started an unsupported peak meter or lost controls: "
+            + JSON.stringify({error: root.panel.defaultInputError,
+              raw: root.panel.rawSource ? root.panel.rawSource.name : null,
+              source: root.panel.source ? root.panel.source.name : null,
+              hasInput: root.panel.hasInput, meter: root.panel.inputPeakSupported}))) return
         root.done = true
-        console.log("RUNTIME_UI_SUCCESS volume, tabs, shared scenes, canceled pointer drag, native policies, ports, profiles, defaults and application routes")
+        console.log("RUNTIME_UI_SUCCESS volume, tabs, shared scenes, pointer drag, native policies, ports, profiles, defaults, application routes and null input")
       }
     }
   }

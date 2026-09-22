@@ -257,7 +257,7 @@ assert len(sys.stdin.buffer.read()) > 0
                     id=playback['id'], serial=playback['serial']), volume=1.25))
                 b.request('settings.set', dict(key='outputOverdrive', value=False))
                 subprocess.run(['pw-metadata', '-n', 'default', '0', 'default.audio.sink', '{"name":"audio_test_output"}', 'Spa:String:JSON'], env=env, check=True, stdout=log)
-                subprocess.run(['pw-metadata', '-n', 'default', '0', 'default.audio.source', '{"name":"audio_test_input"}', 'Spa:String:JSON'], env=env, check=True, stdout=log)
+                subprocess.run(['pw-metadata', '-n', 'default', '0', 'default.audio.source', '{"name":"audio_test_null_input"}', 'Spa:String:JSON'], env=env, check=True, stdout=log)
                 subprocess.run(['pw-link', 'audio_test_playback:monitor_FL', 'audio_test_output:playback_FL'], env=env, check=True)
                 for directory in ('Ui','Commons'):
                     (work/directory).symlink_to(shell_root/directory,target_is_directory=True)

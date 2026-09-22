@@ -73,6 +73,16 @@ function isMonitorSource(node) {
   }
 }
 
+// Quickshell's peak capture cannot start on a null-audio-sink presented as a
+// source. Keep the source selectable; only omit its silent input meter.
+function inputPeakSupported(node) {
+  try {
+    return !!node && String(nodeProps(node)["factory.name"] || "") !== "support.null-audio-sink"
+  } catch (e) {
+    return false
+  }
+}
+
 // Keep PipeWire classification in one place so every surface excludes the
 // plugin's own streams and monitor sources consistently. QML list properties
 // are array-like rather than true Arrays, hence the length-based input check.
@@ -1607,6 +1617,7 @@ if (typeof module !== "undefined") {
     isAudioSource: isAudioSource,
     isInternalAudioNode: isInternalAudioNode,
     isMonitorSource: isMonitorSource,
+    inputPeakSupported: inputPeakSupported,
     classifyAudioNodes: classifyAudioNodes,
     listSnapshot: listSnapshot,
     hasOwn: hasOwn,

@@ -30,6 +30,7 @@ Panel {
   // and produce misleading capture state in the panel.
   readonly property var source: usableInputNode(rawSource) && mutableAudioNode(rawSource)
     ? rawSource : null
+  readonly property bool inputPeakSupported: Model.inputPeakSupported(source)
   AudioRulesController {
     service: root.audioService
     id: rulesStore
@@ -1025,8 +1026,8 @@ Panel {
 
   PwNodePeakMonitor {
     id: inputPeakMonitor
-    node: root.source
-    enabled: (root.opened || root.recordingApplicationCount > 0) && !!root.source
+    node: root.inputPeakSupported ? root.source : null
+    enabled: (root.opened || root.recordingApplicationCount > 0) && !!node
   }
 
   AudioSceneController {
