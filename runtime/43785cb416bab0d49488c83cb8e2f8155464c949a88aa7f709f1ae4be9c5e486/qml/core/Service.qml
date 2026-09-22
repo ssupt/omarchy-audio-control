@@ -57,7 +57,10 @@ Item {
     var params = { identity: identity }
     for (var key in patch) if (Model.hasOwn(patch, key)) params[key] = patch[key]
     request("node.level", params, function(_result, failure) {
-      root.error = failure ? failure.message : ""
+      // A route change can briefly reject a level request while its device
+      // parameters settle. The slider already reads back the observed value;
+      // this retryable conflict is not a panel error.
+      root.error = failure && failure.code !== "busy" ? failure.message : ""
     })
     return true
   }

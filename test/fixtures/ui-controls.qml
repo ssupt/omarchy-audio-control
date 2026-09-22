@@ -221,6 +221,8 @@ Item {
             "hidden slider retained its drag after release outside the control")) return
         pointerWindow.hide()
         root.panel.close()
+        if (!root.check(root.panel.displayAudioStreams.length > 0,
+            "closing cleared mixer rows before the panel fade")) return
         root.advanced.selectTab(0)
         root.policy = root.descendants(root.advanced).find(function(item) {
           return item.coreDefinitions !== undefined && typeof item.setSetting === "function"
@@ -230,6 +232,7 @@ Item {
         root.phase++
         break
       case 11:
+        if (root.panel.displayAudioStreams.length > 0) return
         if (root.policy.busy || root.policy.settings["node.features.audio.mono"] !== true) return
         if (!root.check(!root.policy.error, "native policy write failed")) return
         root.policy.setSetting("device.routes.default-sink-volume", .5)

@@ -627,7 +627,7 @@ Panel {
       Qt.callLater(resetScroll)
     } else {
       streamOutputMenuCount = 0
-      clearDisplayAudioModels()
+      audioModelRefreshTimer.stop()
     }
   }
 
@@ -1152,6 +1152,9 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
+    // Keep the rows mounted for KeyboardPanel's 140 ms fade. Dropping the
+    // models on logical close makes the card collapse before it disappears.
+    onVisibleChanged: if (!visible) root.clearDisplayAudioModels()
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(380))
     contentHeight: panel.fittedContentHeight(panelColumn.implicitHeight, Style.space(560))
