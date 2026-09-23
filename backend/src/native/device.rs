@@ -77,15 +77,16 @@ impl OwnedDevice {
         }
     }
     pub fn param(&mut self, param: u32, index: u32, pod: Option<&spa::pod::Pod>) {
-        if !self.inflight.contains(&param) || index >= 256 {
+        if !self.inflight.contains(&param) {
             return;
         }
         if let Some(object) = pod.and_then(catalog::object) {
             self.catalog.read(param, index, &object);
-            if param == spa::sys::SPA_PARAM_Route {
-                if let Some(route) = audio::read_route(object) {
-                    self.routes.insert(index, route);
-                }
+            if param == spa::sys::SPA_PARAM_Route
+                && let Some(route) = audio::read_route(object)
+                && (self.routes.len() < 256 || self.routes.contains_key(&index))
+            {
+                self.routes.insert(index, route);
             }
         }
     }

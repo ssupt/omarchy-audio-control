@@ -149,6 +149,11 @@ impl Storage {
         }
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
+        struct ForgottenDevice {
+            address: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Alias {
             node: String,
             label: String,
@@ -234,6 +239,14 @@ impl Storage {
                         .as_array_mut()
                         .unwrap()
                         .retain(|r| r["app"] != app || r["direction"] != params.direction);
+                    Ok(())
+                })?
+            }
+            "devices.forget" => {
+                let params = request.params::<ForgottenDevice>()?;
+                let address = canonical_bluetooth_address(&params.address).ok_or_else(invalid)?;
+                self.update(Kind::Rules, |store| {
+                    forget_bluetooth_device(store, &address);
                     Ok(())
                 })?
             }
@@ -356,6 +369,79 @@ pub fn bluetooth_address(value: &str) -> String {
         .filter(char::is_ascii_hexdigit)
         .collect::<String>()
         .to_ascii_lowercase()
+}
+fn canonical_bluetooth_address(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 17 {
+        return None;
+    }
+    for (index, byte) in bytes.iter().enumerate() {
+        if (index + 1) % 3 == 0 {
+            if *byte != b':' {
+                return None;
+            }
+        } else if !byte.is_ascii_hexdigit() {
+            return None;
+        }
+    }
+    Some(bluetooth_address(value))
+}
+fn bluetooth_node_matches(name: &str, address: &str) -> bool {
+    let Some(rest) = name
+        .strip_prefix("bluez_output.")
+        .or_else(|| name.strip_prefix("bluez_input."))
+    else {
+        return false;
+    };
+    let token = rest.split('.').next().unwrap_or("");
+    token.len() == 17
+        && token.bytes().enumerate().all(|(index, byte)| {
+            if (index + 1) % 3 == 0 {
+                byte == b':' || byte == b'_'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+        && bluetooth_address(token) == address
+}
+fn forget_bluetooth_device(rules: &mut Value, address: &str) {
+    let mut removed_sinks = BTreeSet::new();
+    rules["outputGroups"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|group| {
+            let contains_device = group["members"].as_array().is_some_and(|members| {
+                members.iter().any(|member| {
+                    member
+                        .as_str()
+                        .is_some_and(|name| bluetooth_node_matches(name, address))
+                })
+            });
+            if contains_device {
+                if let Some(sink) = group["sink"].as_str() {
+                    removed_sinks.insert(sink.to_owned());
+                }
+            }
+            !contains_device
+        });
+    rules["appRules"].as_array_mut().unwrap().retain(|rule| {
+        let target = rule["target"].as_str().unwrap_or("");
+        !bluetooth_node_matches(target, address) && !removed_sinks.contains(target)
+    });
+    rules["devices"]["aliases"]
+        .as_object_mut()
+        .unwrap()
+        .retain(|name, _| !bluetooth_node_matches(name, address) && !removed_sinks.contains(name));
+    for flag in ["favorites", "hidden"] {
+        rules["devices"][flag]
+            .as_array_mut()
+            .unwrap()
+            .retain(|name| {
+                name.as_str().is_none_or(|name| {
+                    !bluetooth_node_matches(name, address) && !removed_sinks.contains(name)
+                })
+            });
+    }
 }
 fn require_direction(value: &str, stream: bool) -> Result<()> {
     if (if stream {
@@ -658,6 +744,43 @@ mod tests {
         assert_eq!(identifier(&json!("  exact name  "), 160), "  exact name  ");
         assert_eq!(identifier(&json!("spoof\u{202e}name"), 160), "");
         assert_eq!(label(&json!("\n Display   Name \t"), 80), "Display Name");
+    }
+    #[test]
+    fn forgetting_bluetooth_removes_only_that_devices_saved_routes() {
+        let mut rules = normalize(
+            Kind::Rules,
+            &json!({
+                "appRules": [
+                    {"app":"music","direction":"playback","target":"bluez_output.AA_BB_CC_DD_EE_FF.1"},
+                    {"app":"call","direction":"recording","target":"bluez_input.AA:BB:CC:DD:EE:FF"},
+                    {"app":"video","direction":"playback","target":"omarchy_audio_group_0123456789abcdef"},
+                    {"app":"other","direction":"playback","target":"bluez_output.11_22_33_44_55_66.1"}
+                ],
+                "outputGroups": [{"id":"0123456789abcdef","name":"Desk",
+                    "sink":"omarchy_audio_group_0123456789abcdef",
+                    "members":["alsa_output.speakers","bluez_output.AA_BB_CC_DD_EE_FF.1"]}],
+                "devices": {"aliases":{"bluez_output.AA_BB_CC_DD_EE_FF.1":"Old",
+                    "bluez_output.11_22_33_44_55_66.1":"Still paired"},
+                    "favorites":["bluez_output.AA_BB_CC_DD_EE_FF.1"],
+                    "hidden":["bluez_output.11_22_33_44_55_66.1"]}
+            }),
+        );
+        let unchanged = rules.clone();
+        forget_bluetooth_device(&mut rules, "aabbccddeeff");
+        assert_eq!(rules["appRules"].as_array().unwrap().len(), 1);
+        assert_eq!(rules["appRules"][0]["app"], "other");
+        assert!(rules["outputGroups"].as_array().unwrap().is_empty());
+        assert_eq!(rules["devices"]["aliases"].as_object().unwrap().len(), 1);
+        assert_eq!(
+            rules["devices"]["hidden"][0],
+            "bluez_output.11_22_33_44_55_66.1"
+        );
+        assert_eq!(
+            canonical_bluetooth_address("AA:BB:CC:DD:EE:FF"),
+            Some("aabbccddeeff".into())
+        );
+        assert!(canonical_bluetooth_address("AA:BB:CC:DD:EE:FF;rm").is_none());
+        assert_ne!(rules, unchanged);
     }
     #[test]
     fn invalid_or_future_configuration_is_not_overwritten() {

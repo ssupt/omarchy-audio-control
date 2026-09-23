@@ -139,6 +139,7 @@ Item {
   onActiveTabChanged: visitedTabs |= (1 << activeTab)
   property bool cursorActive: false
   property int selectedIndex: 0
+  property int routingControl: 0
   property int profileMenuCount: 0
   readonly property bool profileMenuOpen: profileMenuCount > 0
   readonly property var audioPreferences: service && service.stores.preferences ? service.stores.preferences : Model.parseAudioPreferences("")
@@ -418,9 +419,9 @@ Item {
 
   function selectedAudioProfile(card) {
     if (!card) return ""
-    if (!card.bluetooth) return String(card.activeProfile || "off")
-    return Model.preferredAudioProfile(
-      audioPreferences, card.address, profileOptions(card), card.activeProfile)
+    // Another panel may change a Bluetooth codec without updating this
+    // plugin's saved preference. The dropdown must report the live profile.
+    return String(card.activeProfile || "off")
   }
 
   function nodeLabel(node) {
@@ -486,12 +487,56 @@ Item {
 
   function clampCursor() {
     selectedIndex = Math.max(0, Math.min(Math.max(0, itemCount - 1), selectedIndex))
+    routingControl = Math.min(routingControl, routingControlCount(selectedIndex) - 1)
   }
   onItemCountChanged: clampCursor()
 
+  function routingControlCount(index) {
+    if (activeTab !== 4) return 1
+    if (index >= outputGroupStartIndex && index < newRuleAppIndex) {
+      var group = audioRules.outputGroups[index - outputGroupStartIndex]
+      return 2 + (group && group.members ? group.members.length : 0)
+    }
+    if (index >= routingRuleStartIndex && index < managedDeviceStartIndex) return 2
+    if (index >= managedDeviceStartIndex) return 3
+    return 1
+  }
+
+  function routingCursorTarget() {
+    if (activeTab !== 4) return null
+    var row = null
+    if (selectedIndex >= outputGroupStartIndex && selectedIndex < newRuleAppIndex)
+      row = outputGroupRepeater.itemAt(selectedIndex - outputGroupStartIndex)
+    else if (selectedIndex >= routingRuleStartIndex && selectedIndex < managedDeviceStartIndex)
+      row = routingRuleRepeater.itemAt(selectedIndex - routingRuleStartIndex)
+    else if (selectedIndex >= managedDeviceStartIndex)
+      row = managedDeviceRepeater.itemAt(selectedIndex - managedDeviceStartIndex)
+    return row && typeof row.keyboardTarget === "function"
+      ? row.keyboardTarget(routingControl) : row
+  }
+
   function moveCursor(delta) {
     if (itemCount === 0) return
-    selectedIndex = Math.max(0, Math.min(itemCount - 1, selectedIndex + delta))
+    if (activeTab === 4 && delta > 0 && routingControl + 1 < routingControlCount(selectedIndex))
+      routingControl++
+    else if (activeTab === 4 && delta < 0 && routingControl > 0)
+      routingControl--
+    else {
+      var next = Math.max(0, Math.min(itemCount - 1, selectedIndex + delta))
+      if (next === selectedIndex) return
+      selectedIndex = next
+      routingControl = delta < 0 ? routingControlCount(next) - 1 : 0
+    }
+    if (activeTab === 4) Qt.callLater(function() { root.ensureCursorVisible(root.routingCursorTarget()) })
+  }
+
+  function adjustRoutingLevelAtCursor(direction) {
+    if (activeTab !== 4 || selectedIndex < outputGroupStartIndex
+        || selectedIndex >= newRuleAppIndex) return false
+    var group = outputGroupRepeater.itemAt(selectedIndex - outputGroupStartIndex)
+    if (!group || routingControl < 1 || routingControl > group.memberLevels.length) return false
+    group.adjustMember(routingControl, direction)
+    return true
   }
 
   function closeProfileMenus() {
@@ -526,6 +571,7 @@ Item {
     cancelAliasEdit()
     activeTab = next
     selectedIndex = 0
+    routingControl = 0
     clampCursor()
     var flick = scrollArea ? scrollArea.contentItem : null
     if (flick && flick.contentY !== undefined) flick.contentY = 0
@@ -536,10 +582,12 @@ Item {
   }
 
   function setCursor(index) {
-    // Mouse claims never scroll; keyboard navigation sets the flag itself.
+    // Scrolling under a stationary pointer must not steal keyboard selection.
+    if (keyboardScrolling) return
     keyboardScrolling = false
     cursorActive = true
     selectedIndex = index
+    routingControl = 0
   }
 
   function activateCursor() {
@@ -552,17 +600,22 @@ Item {
       if (selectedIndex === outputGroupCreateIndex) outputGroupCreateRow.activate()
       else if (selectedIndex < newRuleAppIndex) {
         var groupRow = outputGroupRepeater.itemAt(selectedIndex - outputGroupStartIndex)
-        if (groupRow) groupRow.toggleMemberMenu()
+        if (groupRow && routingControl === 0) groupRow.toggleMemberMenu()
+        else if (groupRow && routingControl === groupRow.memberLevels.length + 1)
+          deleteOutputGroup(groupRow.modelData)
       } else if (selectedIndex === newRuleAppIndex) newRuleAppRow.toggleAppMenu()
       else if (selectedIndex === newRuleDeviceIndex) newRuleDeviceRow.toggleDeviceMenu()
       else if (selectedIndex < managedDeviceStartIndex) {
         var ruleRow = routingRuleRepeater.itemAt(selectedIndex - routingRuleStartIndex)
-        if (ruleRow) ruleRow.toggleTargetMenu()
+        if (ruleRow && routingControl === 0) ruleRow.toggleTargetMenu()
+        else if (ruleRow) deleteAppRule(ruleRow.modelData.app, ruleRow.modelData.direction)
       } else {
         var deviceIndex = selectedIndex - managedDeviceStartIndex
         if (deviceIndex >= 0 && deviceIndex < managedDevices.length) {
           var managed = managedDevices[deviceIndex]
-          if (managed) toggleDeviceFavorite(managed.name, managed.favorite)
+          if (managed && routingControl === 0) aliasEditingDevice = managed.name
+          else if (managed && routingControl === 1) toggleDeviceFavorite(managed.name, managed.favorite)
+          else if (managed) toggleDeviceHidden(managed.name, managed.hidden)
         }
       }
       return
@@ -649,10 +702,12 @@ Item {
     var point = item.mapToItem(flick.contentItem || flick, 0, 0)
     var top = point.y
     var bottom = top + (item.height || 0)
-    var margin = Style.space(12)
-    if (top < flick.contentY + margin) flick.contentY = Math.max(0, top - margin)
-    else if (bottom > flick.contentY + flick.height - margin)
-      flick.contentY = bottom + margin - flick.height
+    var topMargin = Style.space(100)
+    var bottomMargin = Style.space(12)
+    if (top < flick.contentY + topMargin)
+      flick.contentY = Math.max(0, top - topMargin)
+    else if (bottom > flick.contentY + flick.height - bottomMargin)
+      flick.contentY = bottom + bottomMargin - flick.height
   }
 
   function setAudioProfile(card, profile) {
@@ -918,21 +973,26 @@ Item {
       anchors.fill: parent
       focus: true
 
+      HoverHandler {
+        // Scrolling content under a still pointer must not claim the cursor.
+        onPointChanged: root.keyboardScrolling = false
+      }
+
       PanelKeyCatcher {
         id: keyCatcher
         anchors.fill: parent
         blocked: root.profileMenuOpen || root.aliasEditingDevice !== ""
-          onMoveRequested: function(dx, dy) {
-            if (root.recoveryConfirmOpen) {
-              if (dx !== 0) recoveryConfirm.selectedIndex = recoveryConfirm.selectedIndex === 0 ? 1 : 0
-              return
-            }
-            root.keyboardScrolling = true
-            if (dx !== 0) {
-              root.cursorActive = true
-              if (root.activeTab === 0 && root.adjustBalanceAtCursor(dx)) return
-              if (root.activeTab === 2 && root.adjustPolicyVolumeAtCursor(dx)) return
-              root.switchTab(dx)
+        onMoveRequested: function(dx, dy) {
+          if (root.recoveryConfirmOpen) {
+            if (dx !== 0) recoveryConfirm.selectedIndex = recoveryConfirm.selectedIndex === 0 ? 1 : 0
+            return
+          }
+          root.keyboardScrolling = true
+          if (dx !== 0) {
+            root.cursorActive = true
+            if (root.activeTab === 0) root.adjustBalanceAtCursor(dx)
+            else if (root.activeTab === 2) root.adjustPolicyVolumeAtCursor(dx)
+            else if (root.activeTab === 4) root.adjustRoutingLevelAtCursor(dx)
             return
           }
           if (!root.cursorActive) { root.cursorActive = true; return }
@@ -1669,6 +1729,7 @@ Item {
                     available: rulesStore.outputGroupAvailable(modelData)
                     statusText: rulesStore.outputGroupStatusText(modelData)
                     busy: root.routingMutation
+                    keyboardControl: root.routingControl
                     memberVolumeBusy: root.audioMutationBusy || root.routingMutation
                     volumeMaximum: root.outputOverdrive ? 1.5 : 1.0
                     hasCursor: root.cursorActive && root.activeTab === 4
@@ -1912,6 +1973,7 @@ Item {
                       ? root.recordingRuleTargetOptions(routingRuleDelegate.currentValue)
                       : root.ruleTargetOptions(routingRuleDelegate.currentValue)
                     menuEnabled: !root.routingMutation
+                    keyboardControl: root.routingControl
                     hasCursor: root.cursorActive && root.activeTab === 4
                       && root.selectedIndex === root.routingRuleStartIndex
                         + routingRuleDelegate.index
@@ -1954,6 +2016,7 @@ Item {
                 }
 
                 Repeater {
+                  id: managedDeviceRepeater
                   model: (root.visitedTabs & 16) ? root.managedDevices : []
 
                   AudioDevicePrefRow {
@@ -1972,6 +2035,7 @@ Item {
                       return alias !== "" ? alias : managedDeviceDelegate.title
                     }
                     busy: root.routingMutation
+                    keyboardControl: root.routingControl
                     hasCursor: root.cursorActive && root.activeTab === 4
                       && root.selectedIndex === root.managedDeviceStartIndex
                         + managedDeviceDelegate.index

@@ -49,7 +49,7 @@ CursorSurface {
 
       Text {
         width: parent.width
-        text: root.card.label
+        text: root.card.bluetooth === true ? "Bluetooth codec" : root.card.label
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
@@ -60,10 +60,12 @@ CursorSurface {
       Text {
         visible: root.card.bluetooth === true
         width: parent.width
-        text: "Bluetooth audio"
+        text: root.card.label
         color: Qt.darker(root.foreground, 1.35)
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
+        wrapMode: Text.Wrap
+        maximumLineCount: 2
         elide: Text.ElideRight
       }
     }

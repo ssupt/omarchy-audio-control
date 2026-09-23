@@ -130,6 +130,27 @@ impl Catalog {
         }
     }
     pub fn read(&mut self, param: u32, index: u32, object: &Object) {
+        // The event index is an opaque cursor, not an ordinal. BlueZ profiles
+        // use sparse indexes above 131000 even when there are only six choices.
+        // Bound stored entries instead of rejecting large cursor values.
+        let full = match param {
+            spa::sys::SPA_PARAM_EnumProfile => {
+                self.profiles.len() >= 256 && !self.profiles.contains_key(&index)
+            }
+            spa::sys::SPA_PARAM_Profile => {
+                self.active_profile.len() >= 2 && !self.active_profile.contains_key(&index)
+            }
+            spa::sys::SPA_PARAM_EnumRoute => {
+                self.ports.len() >= 256 && !self.ports.contains_key(&index)
+            }
+            spa::sys::SPA_PARAM_Route => {
+                self.active_routes.len() >= 256 && !self.active_routes.contains_key(&index)
+            }
+            _ => return,
+        };
+        if full {
+            return;
+        }
         let expected = match param {
             spa::sys::SPA_PARAM_Profile | spa::sys::SPA_PARAM_EnumProfile => {
                 spa::sys::SPA_TYPE_OBJECT_ParamProfile
@@ -139,7 +160,7 @@ impl Catalog {
             }
             _ => return,
         };
-        if index >= 256 || object.type_ != expected || object.id != param {
+        if object.type_ != expected || object.id != param {
             return;
         }
         match param {
@@ -177,7 +198,7 @@ impl Catalog {
                 if let Some(Value::Struct(classes)) =
                     field(object, spa::sys::SPA_PARAM_PROFILE_classes)
                 {
-                    for class in classes.iter().skip(1).take(64) {
+                    for class in classes.iter().take(64) {
                         if let Value::Struct(values) = class {
                             if let [Value::String(name), Value::Int(count), ..] = values.as_slice()
                             {
@@ -587,14 +608,15 @@ mod tests {
         catalog.read(
             spa::sys::SPA_PARAM_EnumProfile,
             256,
-            &profile(4, "overflow"),
+            &profile(4, "sparse-cursor"),
         );
+        assert!(catalog.profiles.contains_key(&256));
         assert_eq!(
             snapshot(&graph(catalog.clone())).0[0]["profiles"]
                 .as_array()
                 .unwrap()
                 .len(),
-            1
+            2
         );
         catalog.read(
             spa::sys::SPA_PARAM_EnumProfile,
@@ -602,25 +624,43 @@ mod tests {
             &profile(0, "same-index"),
         );
         assert_eq!(snapshot(&graph(catalog)).0, json!([]));
+
+        let mut bounded = Catalog::default();
+        for i in 0..256 {
+            bounded.read(
+                spa::sys::SPA_PARAM_EnumProfile,
+                i * 4096,
+                &profile(i as i32, &format!("profile-{i}")),
+            );
+        }
+        bounded.read(
+            spa::sys::SPA_PARAM_EnumProfile,
+            u32::MAX,
+            &profile(257, "extra"),
+        );
+        assert_eq!(bounded.profiles.len(), 256);
     }
     #[test]
     fn bluetooth_profiles_need_no_alsa_ports_and_labels_are_cleaned() {
         let mut catalog = Catalog::default();
-        let mut object = profile(1, "a2dp-sink-aac");
+        let mut object = profile(131074, "a2dp-sink-sbc_xq");
         object.properties.push(Property::new(
             spa::sys::SPA_PARAM_PROFILE_description,
-            Value::String(" AAC\nHeadphones\u{202e} ".into()),
+            Value::String(" SBC-XQ\nHeadphones\u{202e} ".into()),
         ));
         object.properties.push(Property::new(
             spa::sys::SPA_PARAM_PROFILE_classes,
-            Value::Struct(vec![
+            Value::Struct(vec![Value::Struct(vec![
+                Value::String("Audio/Sink".into()),
                 Value::Int(1),
-                Value::Struct(vec![Value::String("Audio/Sink".into()), Value::Int(1)]),
-            ]),
+            ])]),
         ));
-        catalog.read(spa::sys::SPA_PARAM_EnumProfile, 0, &object);
+        catalog.read(spa::sys::SPA_PARAM_EnumProfile, 131074, &object);
+        assert_eq!(snapshot(&graph(catalog.clone())).0, json!([]));
+        let mut active = object.clone();
+        active.id = spa::sys::SPA_PARAM_Profile;
+        catalog.read(spa::sys::SPA_PARAM_Profile, 131074, &active);
         let mut graph = graph(catalog);
-        assert_eq!(snapshot(&graph).0, json!([]));
         graph
             .devices
             .get_mut(&42)
@@ -629,8 +669,9 @@ mod tests {
             .insert("device.api".into(), "bluez5".into());
         let (cards, _) = snapshot(&graph);
         assert_eq!(cards[0]["bluetooth"], true);
-        assert_eq!(cards[0]["profiles"][0]["label"], "AAC Headphones");
+        assert_eq!(cards[0]["profiles"][0]["label"], "SBC-XQ Headphones");
         assert_eq!(cards[0]["profiles"][0]["sinks"], 1);
+        assert_eq!(cards[0]["activeProfile"], "a2dp-sink-sbc_xq");
     }
     #[test]
     fn ports_exclude_monitors_and_ambiguous_targets() {

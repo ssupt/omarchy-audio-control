@@ -25,6 +25,7 @@ CursorSurface {
   signal memberVolumeMoved(var node, real value)
 
   property bool memberMenuReportedOpen: false
+  property int keyboardControl: 0
 
   width: parent ? parent.width : 0
   implicitHeight: groupContent.implicitHeight + Style.space(18)
@@ -32,6 +33,19 @@ CursorSurface {
 
   function toggleMemberMenu() { if (memberSelect.enabled) memberSelect.toggle() }
   function closeMemberMenu() { memberSelect.close() }
+  function keyboardTarget(index) {
+    if (index === memberLevels.length + 1) return deleteButton
+    if (index > 0) return memberRepeater.itemAt(index - 1)
+    return memberSelect
+  }
+  function adjustMember(index, direction) {
+    var descriptor = memberLevels[index - 1]
+    if (!descriptor || !descriptor.connected || memberVolumeBusy) return
+    var volume = Number(descriptor.node.audio.volume)
+    if (!isFinite(volume)) return
+    memberVolumeMoved(descriptor.node,
+      Math.max(0, Math.min(volumeMaximum, volume + direction * 0.05)))
+  }
   function reportMemberMenu(open) {
     var next = open === true
     if (memberMenuReportedOpen === next) return
@@ -92,7 +106,7 @@ CursorSurface {
         options: root.options
         triggerLabel: "Choose outputs"
         emptyText: "No physical outputs available"
-        hasCursor: root.hasCursor
+        hasCursor: root.hasCursor && root.keyboardControl === 0
         enabled: !root.busy
         opacity: enabled ? 1 : 0.6
         foreground: root.foreground
@@ -117,6 +131,7 @@ CursorSurface {
         fontFamily: root.fontFamily
         bordered: true
         enabled: !root.busy
+        hasCursor: root.hasCursor && root.keyboardControl === root.memberLevels.length + 1
         anchors.verticalCenter: parent.verticalCenter
         onClicked: root.deleted()
       }
@@ -160,6 +175,7 @@ CursorSurface {
       }
 
       Repeater {
+        id: memberRepeater
         model: root.memberLevels.length
 
         AudioOutputGroupMemberLevel {
@@ -171,6 +187,7 @@ CursorSurface {
           connected: !!descriptor && descriptor.connected === true
           maximum: root.volumeMaximum
           busy: root.memberVolumeBusy
+          hasKeyboardCursor: root.hasCursor && root.keyboardControl === index + 1
           foreground: root.foreground
           urgent: root.urgent
           fontFamily: root.fontFamily

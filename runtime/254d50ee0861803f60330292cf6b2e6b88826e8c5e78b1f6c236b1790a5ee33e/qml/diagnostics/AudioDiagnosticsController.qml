@@ -37,10 +37,7 @@ Item {
   readonly property bool recovering: recoveryProc.running || recoveryPending
   readonly property bool busy: refreshing || copying || recovering
 
-  onSessionActiveChanged: {
-    if (sessionActive) refresh()
-    else stopSpeakerTest(false)
-  }
+  onSessionActiveChanged: if (!sessionActive) stopSpeakerTest(false)
   onMutationBlockedChanged: if (mutationBlocked) {
     recoveryPending = false
     stopSpeakerTest(false)
@@ -151,9 +148,11 @@ Item {
       if (!root.service.ready) {
         root.snapshotRevision = ""
         root.refreshPending = false
+        root.loaded = false
+        root.snapshotValid = false
         root.error = "Audio service is not connected"
-      } else if (root.sessionActive) {
-        root.refresh()
+      } else {
+        root.error = ""
       }
     }
   }
@@ -189,13 +188,6 @@ Item {
         : "Could not complete Omarchy audio recovery", exitCode !== 0)
       if (exitCode === 0) recoveryRefresh.restart()
     }
-  }
-
-  Timer {
-    interval: 5000
-    running: root.sessionActive
-    repeat: true
-    onTriggered: if (!root.busy) root.refresh()
   }
 
   Timer {

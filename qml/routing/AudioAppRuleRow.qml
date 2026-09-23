@@ -16,6 +16,7 @@ CursorSurface {
   property color urgent: Color.urgent
   property string fontFamily: Style.font.family
   property bool menuReportedOpen: false
+  property int keyboardControl: 0
 
   signal targetChosen(string value)
   signal deleted()
@@ -28,6 +29,7 @@ CursorSurface {
   bordered: true
 
   function toggleTargetMenu() { if (targetDropdown.enabled) targetDropdown.toggle() }
+  function keyboardTarget(index) { return index === 1 ? deleteButton : targetDropdown }
   function closeTargetMenu() { targetDropdown.close() }
   function reportMenu(open) {
     var next = open === true
@@ -80,7 +82,7 @@ CursorSurface {
       popupDirection: "down"
       value: root.currentValue
       options: root.options
-      hasCursor: root.hasCursor
+      hasCursor: root.hasCursor && root.keyboardControl === 0
       enabled: root.menuEnabled
       opacity: enabled ? 1 : 0.6
       foreground: root.foreground
@@ -101,6 +103,7 @@ CursorSurface {
       fontFamily: root.fontFamily
       bordered: true
       enabled: root.enabled && root.menuEnabled
+      hasCursor: root.hasCursor && root.keyboardControl === 1
       anchors.verticalCenter: parent.verticalCenter
       onClicked: root.deleted()
     }

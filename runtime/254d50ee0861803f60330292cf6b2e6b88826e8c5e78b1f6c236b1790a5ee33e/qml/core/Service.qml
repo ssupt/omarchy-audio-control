@@ -29,7 +29,8 @@ Item {
   property var outputs: ({})
   property var routes: ({ playback: {}, recording: {}, error: "" })
   readonly property bool busy: state.busy === true
-  readonly property bool transactionBusy: busy && state.operation !== "node.audio"
+  readonly property bool transactionBusy: busy
+    && state.operation !== "node.audio" && state.operation !== "node.level"
   property var client: null
   property bool destroying: false
 

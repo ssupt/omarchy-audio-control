@@ -11,6 +11,7 @@ Item {
   required property bool connected
   property real maximum: 1
   property bool busy: false
+  property bool hasKeyboardCursor: false
   property color foreground: Color.foreground
   property color urgent: Color.urgent
   property string fontFamily: Style.font.family
@@ -75,6 +76,7 @@ Item {
       tickCount: root.maximum > 1 ? 7 : 5
       value: root.currentVolume
       enabled: root.enabled && root.connected && !root.busy
+      hasCursor: root.hasKeyboardCursor
       opacity: enabled ? 1 : 0.45
       onMoved: function(value) { root.volumeMoved(root.node, value) }
     }

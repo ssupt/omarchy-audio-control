@@ -154,7 +154,7 @@ impl Service {
                     "capabilities": [
                         "health", "state.subscribe", "node.audio", "node.level",
                         "store.read", "settings.set", "preferences.default", "preferences.profile",
-                        "rules.set_app", "rules.delete_app", "devices.alias", "devices.flag",
+                        "rules.set_app", "rules.delete_app", "devices.alias", "devices.flag", "devices.forget",
                         "scenes.save", "scenes.delete", "scene.apply", "scene.capture",
                         "microphone.start", "microphone.stop", "diagnostics.refresh", "diagnostics.copy", "groups.create", "groups.update", "groups.delete", "policy.set", "port.set", "profile.set", "default.set", "default.compat", "route.set"
                     ],
@@ -188,6 +188,7 @@ impl Service {
             | "preferences.profile"
             | "rules.set_app"
             | "rules.delete_app"
+            | "devices.forget"
             | "devices.alias"
             | "devices.flag"
             | "scenes.save"

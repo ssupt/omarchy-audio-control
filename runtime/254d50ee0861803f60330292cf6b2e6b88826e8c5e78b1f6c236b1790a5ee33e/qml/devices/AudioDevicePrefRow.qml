@@ -13,6 +13,7 @@ CursorSurface {
   required property bool editingAlias
   required property string aliasValue
   required property bool busy
+  property int keyboardControl: 0
   property color urgent: Color.urgent
   property string fontFamily: Style.font.family
 
@@ -24,6 +25,11 @@ CursorSurface {
   signal cursorRequested()
 
   readonly property bool interactive: !root.busy
+  function keyboardTarget(index) {
+    if (index === 1) return favoriteButton
+    if (index === 2) return hiddenButton
+    return renameButton
+  }
 
   width: parent ? parent.width : 0
   implicitHeight: prefContent.implicitHeight + Style.space(18)
@@ -140,6 +146,7 @@ CursorSurface {
       }
 
       PanelActionButton {
+        id: renameButton
         visible: !root.editingAlias
         iconText: "󰏫"
         tooltipText: "Rename device"
@@ -147,10 +154,12 @@ CursorSurface {
         fontFamily: root.fontFamily
         bordered: true
         enabled: root.enabled && root.interactive
+        hasCursor: root.hasCursor && root.keyboardControl === 0
         onClicked: root.aliasEditStarted()
       }
 
       PanelActionButton {
+        id: favoriteButton
         visible: !root.editingAlias
         iconText: root.favorite ? "󰓎" : "󰓒"
         tooltipText: root.favorite ? "Remove from favorites" : "Add to favorites"
@@ -158,10 +167,12 @@ CursorSurface {
         fontFamily: root.fontFamily
         bordered: true
         enabled: root.enabled && root.interactive
+        hasCursor: root.hasCursor && root.keyboardControl === 1
         onClicked: root.favoriteToggled()
       }
 
       PanelActionButton {
+        id: hiddenButton
         visible: !root.editingAlias
         iconText: "󰈉"
         tooltipText: root.hidden ? "Show device" : "Hide device"
@@ -170,6 +181,7 @@ CursorSurface {
         fontFamily: root.fontFamily
         bordered: true
         enabled: root.enabled && root.interactive
+        hasCursor: root.hasCursor && root.keyboardControl === 2
         onClicked: root.hiddenToggled()
       }
     }

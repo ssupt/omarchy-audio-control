@@ -329,6 +329,34 @@ with tempfile.TemporaryDirectory(prefix='audio-groups-') as temporary, ExitStack
             reply = client.response(client.send('adapter.run', dict(helper=helper, args=[])))
             assert reply['error']['code'] == 'method_not_found', reply
         print('PASS: native tuning visibility, physical volume, default changes and helper retirement', flush=True)
+
+        forgotten = 'bluez_output.AA_BB_CC_DD_EE_FF.1'
+        paired = 'bluez_output.11_22_33_44_55_66.1'
+        forgotten_group = dict(id='abcdef0123456789', name='Forgotten headset',
+            sink='omarchy_audio_group_abcdef0123456789',
+            members=['audio_test_left', forgotten])
+        saved = json.loads(rules_path.read_text())
+        saved['outputGroups'] = [forgotten_group]
+        saved['appRules'] = [dict(app='old', direction='playback', target=forgotten_group['sink']),
+            dict(app='other', direction='playback', target=paired)]
+        saved['devices']['aliases'][forgotten] = 'Old headset'
+        rules_path.write_text(json.dumps(saved))
+        client.wait_state(lambda s: s['stores']['rules']['outputGroups'] == [forgotten_group])
+        # An offline member alone preserves its setup; only the confirmed
+        # Bluetooth forget request removes the group and its dependent pin.
+        assert json.loads(rules_path.read_text())['outputGroups'] == [forgotten_group]
+        def forget():
+            reply = client.response(client.send('devices.forget',
+                dict(address='AA:BB:CC:DD:EE:FF')))
+            if reply.get('error', {}).get('code') == 'busy': return False
+            assert 'error' not in reply, reply
+            return True
+        until(forget)
+        remaining = json.loads(rules_path.read_text())
+        assert remaining['outputGroups'] == []
+        assert [rule['app'] for rule in remaining['appRules']] == ['other']
+        assert forgotten not in remaining['devices']['aliases']
+        print('PASS: explicit Bluetooth forget removes dependent routes; disconnect preserves them', flush=True)
     except Exception:
         log.flush()
         log.seek(0)

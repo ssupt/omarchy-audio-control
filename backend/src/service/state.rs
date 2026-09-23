@@ -159,7 +159,13 @@ impl Service {
             .storage
             .clone()
             .ok_or_else(|| Failure::new("unavailable", "Stores are unavailable"))?;
+        let forgetting = request.method == "devices.forget";
         let _transaction = self.transaction().await?;
+        let _external = if forgetting {
+            Some(crate::files::FileLock::mutation().await?)
+        } else {
+            None
+        };
         self.set_busy(true);
         let _busy = Busy(self);
         let request = request.clone();
@@ -167,6 +173,18 @@ impl Service {
             .await
             .map_err(|_| Failure::unknown("Store operation stopped unexpectedly"))?;
         self.reload_stores().await?;
+        if forgetting && result.is_ok() {
+            if let Some(native) = &self.native {
+                let storage = self.storage.clone().unwrap();
+                let native = native.clone();
+                // The saved group is gone even when its old combine module is
+                // still briefly in use; reconciliation removes it once safe.
+                let _ = tokio::task::spawn_blocking(move || {
+                    crate::groups::apply(&native, &storage, crate::groups::Change::Reconcile)
+                })
+                .await;
+            }
+        }
         result?.ok_or_else(|| Failure::new("method_not_found", "Unknown store method"))
     }
 }

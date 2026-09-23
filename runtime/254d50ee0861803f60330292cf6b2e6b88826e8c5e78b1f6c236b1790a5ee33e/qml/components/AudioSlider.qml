@@ -5,6 +5,15 @@ import qs.Ui
 // panel can scroll, so the press must keep its grab outside the slider too.
 PanelSlider {
   id: root
+  property bool hasCursor: false
+
+  Rectangle {
+    anchors.fill: parent
+    radius: height / 3
+    color: "transparent"
+    border.color: root.fillColor
+    border.width: root.hasCursor ? 1 : 0
+  }
 
   function cancelDrag() {
     dragging = false

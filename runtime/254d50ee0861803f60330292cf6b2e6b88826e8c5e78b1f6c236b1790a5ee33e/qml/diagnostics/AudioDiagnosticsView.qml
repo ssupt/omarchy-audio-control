@@ -19,6 +19,7 @@ Column {
   signal recoveryRequested()
 
   readonly property var snapshot: controller.snapshot
+  readonly property bool checked: controller.snapshotValid
   readonly property int itemCount: 4
   readonly property var defaultOutput: {
     var values = snapshot.devices || []
@@ -87,6 +88,35 @@ Column {
       fontFamily: root.fontFamily
     }
 
+    AudioDiagnosticActionRow {
+      id: refreshRow
+      width: parent.width
+      title: root.checked ? "Check system health again" : "Check system health"
+      description: root.controller.refreshing ? "Collecting a new read-only snapshot…"
+        : "Inspect services, graph statistics, devices, formats, and routes."
+      icon: "󰑐"
+      busy: root.controller.refreshing
+      actionEnabled: !root.controller.copying && !root.controller.speakerTesting
+        && !root.controller.recovering
+      hasCursor: root.tabActive && root.cursorActive && root.selectedIndex === 0
+      foreground: root.foreground
+      fill: root.fill
+      fontFamily: root.fontFamily
+      onHasCursorChanged: if (hasCursor) root.ensureVisible(refreshRow)
+      onHovered: root.cursorRequested(0)
+      onActivated: root.controller.refresh()
+    }
+
+    Text {
+      visible: root.controller.error !== ""
+      width: parent.width
+      text: root.controller.error
+      color: root.urgent
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      wrapMode: Text.WordWrap
+    }
+
     BorderSurface {
       width: parent.width
       implicitHeight: healthContent.implicitHeight + Style.space(20)
@@ -108,8 +138,9 @@ Column {
           spacing: Style.space(8)
 
           Text {
-            text: root.controller.refreshing ? "󰔟" : (root.snapshot.healthy ? "󰄬" : "󰀦")
-            color: root.snapshot.healthy ? root.foreground : root.urgent
+            text: root.controller.refreshing ? "󰔟"
+              : (!root.checked ? "󰋗" : (root.snapshot.healthy ? "󰄬" : "󰀦"))
+            color: !root.checked || root.snapshot.healthy ? root.foreground : root.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.iconLarge
             anchors.verticalCenter: parent.verticalCenter
@@ -122,8 +153,9 @@ Column {
             Text {
               width: parent.width
               text: root.controller.refreshing ? "Checking audio services…"
-                : (root.snapshot.healthy ? "Audio system is healthy" : "Audio needs attention")
-              color: root.snapshot.healthy ? root.foreground : root.urgent
+                : (!root.checked ? "Health check has not run"
+                  : (root.snapshot.healthy ? "Audio system is healthy" : "Audio needs attention"))
+              color: !root.checked || root.snapshot.healthy ? root.foreground : root.urgent
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
               font.bold: true
@@ -132,8 +164,10 @@ Column {
 
             Text {
               width: parent.width
-              text: "PipeWire " + (root.snapshot.versions.pipewire || "unknown")
-                + " · WirePlumber " + (root.snapshot.versions.wireplumber || "unknown")
+              text: root.checked
+                ? "PipeWire " + (root.snapshot.versions.pipewire || "unknown")
+                  + " · WirePlumber " + (root.snapshot.versions.wireplumber || "unknown")
+                : "Use the button above to collect diagnostics."
               color: Qt.darker(root.foreground, 1.35)
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -143,7 +177,7 @@ Column {
         }
 
         Repeater {
-          model: root.snapshot.services
+          model: root.checked ? root.snapshot.services : []
 
           Row {
             required property var modelData
@@ -182,6 +216,7 @@ Column {
   }
 
   Column {
+    visible: root.checked
     width: parent.width
     spacing: Style.space(8)
 
@@ -244,6 +279,7 @@ Column {
   }
 
   Column {
+    visible: root.checked
     width: parent.width
     spacing: Style.space(8)
 
@@ -308,6 +344,7 @@ Column {
   }
 
   Column {
+    visible: root.checked
     width: parent.width
     spacing: Style.space(8)
 
@@ -353,25 +390,6 @@ Column {
       text: "DIAGNOSTIC ACTIONS"
       foreground: root.foreground
       fontFamily: root.fontFamily
-    }
-
-    AudioDiagnosticActionRow {
-      id: refreshRow
-      width: parent.width
-      title: "Refresh diagnostics"
-      description: root.controller.refreshing ? "Collecting a new read-only snapshot…"
-        : "Recheck services, graph statistics, devices, formats, and routes."
-      icon: "󰑐"
-      busy: root.controller.refreshing
-      actionEnabled: !root.controller.copying && !root.controller.speakerTesting
-        && !root.controller.recovering
-      hasCursor: root.tabActive && root.cursorActive && root.selectedIndex === 0
-      foreground: root.foreground
-      fill: root.fill
-      fontFamily: root.fontFamily
-      onHasCursorChanged: if (hasCursor) root.ensureVisible(refreshRow)
-      onHovered: root.cursorRequested(0)
-      onActivated: root.controller.refresh()
     }
 
     AudioDiagnosticActionRow {
@@ -443,11 +461,10 @@ Column {
     }
 
     Text {
-      visible: root.controller.error !== "" || root.controller.status !== ""
+      visible: root.controller.status !== ""
       width: parent.width
-      text: root.controller.error !== "" ? root.controller.error : root.controller.status
-      color: root.controller.error !== "" || root.controller.statusIsError
-        ? root.urgent : root.foreground
+      text: root.controller.status
+      color: root.controller.statusIsError ? root.urgent : root.foreground
       font.family: root.fontFamily
       font.pixelSize: Style.font.bodySmall
       wrapMode: Text.WordWrap

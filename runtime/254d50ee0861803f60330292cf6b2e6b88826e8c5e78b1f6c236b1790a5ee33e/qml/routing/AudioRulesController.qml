@@ -15,7 +15,7 @@ Item {
   readonly property bool loaded: !!service && service.ready && !!service.stores
   property string error: ""
   property bool writing: false
-  readonly property bool busy: writing || (!!service && service.busy)
+  readonly property bool busy: writing || (!!service && service.transactionBusy)
 
   readonly property var nodeGroups: Model.classifyAudioNodes(nodes)
   readonly property var sinks: nodeGroups.sinks
