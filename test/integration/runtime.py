@@ -283,6 +283,7 @@ ShellRoot {
   property bool finishing: false
   property bool sharedVerified: false
   property bool disconnected: false
+  property bool refreshedAfterReconnect: false
   property var diagnosticsA: null
   property var diagnosticsB: null
   property var uiProbe: null
@@ -333,6 +334,18 @@ ShellRoot {
           root.aliasDone = true
         })
       }
+      if (root.sharedVerified && !root.client.ready && !root.disconnected) {
+        if (!root.diagnosticsA.error || !root.diagnosticsB.error) {
+          console.log("RUNTIME_FAILURE missing disconnected diagnostic status")
+          Qt.quit(); return
+        }
+        root.disconnected = true
+      }
+      if (root.disconnected && root.client.ready && !root.refreshedAfterReconnect) {
+        root.refreshedAfterReconnect = true
+        root.diagnosticsA.refresh()
+        root.diagnosticsB.refresh()
+      }
       if ((!root.uiProbe || root.uiProbe.done) && root.aliasDone && !root.finishing && root.diagnosticsA.loaded && root.diagnosticsB.loaded
           && !root.diagnosticsA.refreshing && !root.diagnosticsB.refreshing) {
         if (root.diagnosticsA.error || root.diagnosticsB.error
@@ -345,17 +358,10 @@ ShellRoot {
           root.sharedVerified = true
           crashProc.command = ["/bin/kill", "-KILL", String(root.client.client.info.pid)]
           crashProc.running = true
-        } else if (root.disconnected && root.client.ready) {
+        } else if (root.disconnected && root.refreshedAfterReconnect && root.client.ready) {
           root.finishing = true
           console.log("RUNTIME_SUCCESS shared diagnostics, controls and reconnect")
           quitTimer.start()
-        }
-        if (root.sharedVerified && !root.client.ready && !root.disconnected) {
-          if (!root.diagnosticsA.error || !root.diagnosticsB.error) {
-            console.log("RUNTIME_FAILURE missing disconnected diagnostic status")
-            Qt.quit(); return
-          }
-          root.disconnected = true
         }
       }
     }
