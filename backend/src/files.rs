@@ -12,17 +12,34 @@ use std::time::{Duration, Instant};
 pub struct FileLock {
     _file: File,
 }
+
+/// Hold both migration-era names until the Bluetooth companion and older
+/// audio releases no longer use the UID-suffixed mutation lock.
+pub struct MutationLocks {
+    _legacy: FileLock,
+    _current: FileLock,
+}
 impl FileLock {
     pub fn descriptor(&self) -> std::os::fd::RawFd {
         self._file.as_raw_fd()
     }
-    pub async fn mutation() -> Result<Self> {
-        Self::runtime("omarchy-audio-mutation.lock").await
+    pub async fn mutation() -> Result<MutationLocks> {
+        // Always acquire in this order. The companion takes the legacy lock
+        // first and then the current lock during the paired release.
+        let legacy = Self::runtime(format!("omarchy-audio-mutation-{}.lock", unsafe {
+            libc::geteuid()
+        }))
+        .await?;
+        let current = Self::runtime("omarchy-audio-mutation.lock".to_owned()).await?;
+        Ok(MutationLocks {
+            _legacy: legacy,
+            _current: current,
+        })
     }
     pub async fn settings() -> Result<Self> {
-        Self::runtime("omarchy-audio-settings.lock").await
+        Self::runtime("omarchy-audio-settings.lock".to_owned()).await
     }
-    async fn runtime(name: &'static str) -> Result<Self> {
+    async fn runtime(name: String) -> Result<Self> {
         let runtime = std::env::var_os("AUDIO_CONTROL_PRIVATE_RUNTIME_DIR")
             .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
             .ok_or_else(|| Failure::new("unsafe_path", "Private audio runtime is unavailable"))?;

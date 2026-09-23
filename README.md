@@ -88,6 +88,11 @@ Existing files and schemas are preserved under `~/.config/omarchy` (or
 
 The optional [Advanced Bluetooth Audio](https://github.com/ssupt/omarchy-bluetooth-audio)
 companion shares `audio-preferences.json`.
+This Rust branch also accepts the companion panel's node ID and name through
+`audio-output-set-default` and `audio-input-set-default`. The service checks
+that the live endpoint still matches before applying the default change. The
+compatibility helpers and the Bluetooth service branch should be released
+together.
 
 ## Development
 

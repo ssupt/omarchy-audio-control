@@ -158,6 +158,22 @@ with tempfile.TemporaryDirectory(prefix='audio-routing-') as temporary, ExitStac
         client.wait_state(lambda s: s['routes']['playback'].get(following,{}).get('mode') == 'default')
         rejected('default.set', dict(identity=identity('audio_test_output'), previous=old), {'conflict'})
         rejected('default.set', dict(identity=dict(old, serial='stale')), {'stale_node'})
+        output = node('audio_test_output')
+        compat = dict(direction='output', id=output['id'], name=output['name'],
+                      previous='audio_test_other_output')
+        rejected('default.compat', dict(compat, previous='audio_test_output'), {'conflict'})
+        rejected('default.compat', dict(compat, name='stale_name'), {'conflict'})
+        rejected('default.compat', dict(compat, direction='input'), {'conflict'})
+        assert client.request('default.compat', compat)['outcome'] == 'applied'
+        client.wait_state(lambda s: json.loads(s['metadata']['default']['0:default.audio.sink']['value'])['name'] == 'audio_test_output')
+        assert linked('test_follow', 'audio_test_output') and linked('test_pinned', 'audio_test_output')
+        assert select('audio_test_other_output')['outcome'] == 'applied'
+        run(str(ROOT/'scripts/audio-output-set-default'), str(output['id']),
+            output['name'], 'audio_test_other_output')
+        client.wait_state(lambda s: json.loads(s['metadata']['default']['0:default.audio.sink']['value'])['name'] == 'audio_test_output')
+        assert select('audio_test_other_output')['outcome'] == 'applied'
+        input_node = node('audio_test_input')
+        run(str(ROOT/'scripts/audio-input-set-default'), str(input_node['id']), input_node['name'])
         rejected('route.set', dict(identity=identity('test_follow'), target=identity('audio_test_input'), mode='override'), {'invalid_target'})
         rejected('route.set', dict(identity=identity('test_follow'), target=old, mode='default'), {'conflict'})
         assert route('test_pinned', 'audio_test_other_output', 'default')['outcome'] == 'applied'

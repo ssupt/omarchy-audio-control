@@ -1,0 +1,26 @@
+#!/bin/bash
+# Compatibility for the Bluetooth panel while both plugins move to Rust.
+set -euo pipefail
+
+direction=${1:-}
+[[ $# -ge 3 && $# -le 4 ]] || exit 2
+shift
+node_id=$1
+node_name=$2
+previous=${3:-}
+[[ $direction == output || $direction == input ]] || exit 2
+[[ $node_id =~ ^(0|[1-9][0-9]{0,9})$ && -n $node_name ]] || exit 2
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+release="$script_dir/../backend-release.json"
+build_id=$(jq -er '.buildId | select(type == "string" and test("^[0-9a-f]{64}$"))' "$release")
+runtime=${XDG_RUNTIME_DIR:?}
+socket="$runtime/omarchy-audio-control/backend-${build_id:0:24}.sock"
+if [[ ! -S $socket && -S $runtime/omarchy-audio-control/backend.sock ]]; then
+  socket="$runtime/omarchy-audio-control/backend.sock"
+fi
+params=$(jq -cn --arg direction "$direction" --argjson id "$node_id" \
+  --arg name "$node_name" --arg previous "$previous" \
+  '{direction:$direction,id:$id,name:$name,previous:$previous}')
+"$script_dir/../bin/omarchy-audio-service" --socket "$socket" \
+  --request default.compat "$params" >/dev/null

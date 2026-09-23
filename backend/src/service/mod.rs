@@ -156,7 +156,7 @@ impl Service {
                         "store.read", "settings.set", "preferences.default", "preferences.profile",
                         "rules.set_app", "rules.delete_app", "devices.alias", "devices.flag",
                         "scenes.save", "scenes.delete", "scene.apply", "scene.capture",
-                        "microphone.start", "microphone.stop", "diagnostics.refresh", "diagnostics.copy", "groups.create", "groups.update", "groups.delete", "policy.set", "port.set", "profile.set", "default.set", "route.set"
+                        "microphone.start", "microphone.stop", "diagnostics.refresh", "diagnostics.copy", "groups.create", "groups.update", "groups.delete", "policy.set", "port.set", "profile.set", "default.set", "default.compat", "route.set"
                     ],
                     "maxFrameBytes": MAX_FRAME_BYTES, "maxSnapshotBytes": MAX_SNAPSHOT_BYTES
                 }))
@@ -172,7 +172,7 @@ impl Service {
             "node.audio" | "node.level" => self.audio_request(request).await,
             "microphone.start" => self.start_microphone(request).await,
             "microphone.stop" => self.stop_microphone_request(request).await,
-            "default.set" | "route.set" => self.routing_request(request).await,
+            "default.set" | "default.compat" | "route.set" => self.routing_request(request).await,
             "profile.set" => self.profile_request(request).await,
             "port.set" => self.port_request(request).await,
             "policy.set" => self.policy_request(request).await,

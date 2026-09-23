@@ -1,0 +1,2 @@
+#!/bin/bash
+exec "$(dirname -- "${BASH_SOURCE[0]}")/audio-bluetooth-default-compat" output "$@"
