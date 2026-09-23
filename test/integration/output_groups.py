@@ -85,6 +85,13 @@ with tempfile.TemporaryDirectory(prefix='audio-groups-') as temporary, ExitStack
         return next((s['sink'] for s in streams
                      if s['properties'].get('application.name') == 'Group Test Player'), None)
 
+    def group_inputs(group_name):
+        group = next(s for s in sinks() if s['name'] == group_name)
+        streams = json.loads(run('pactl', '-f', 'json', 'list', 'sink-inputs'))
+        return [s for s in streams if s['owner_module'] == str(group['owner_module'])
+                and s['properties'].get('target.object') in
+                ('audio_test_left', 'audio_test_right')]
+
     try:
         launch(['dbus-daemon', '--nofork', '--config-file='+str(bus)])
         until(lambda: (work/'bus').exists())
@@ -198,6 +205,11 @@ with tempfile.TemporaryDirectory(prefix='audio-groups-') as temporary, ExitStack
         until(lambda: player_sink() == group['index'])
         documents = {p.name: p.read_bytes() for p in (work/'config/omarchy').glob('audio-*.json')}
 
+        outputs = until(lambda: group_inputs(group_name) if len(group_inputs(group_name)) == 2 else None)
+        for output in outputs:
+            run('pactl', 'set-sink-input-mute', str(output['index']), '1')
+        assert all(s['mute'] for s in group_inputs(group_name))
+
         module_before_restart = next(s for s in sinks() if s['name'] == group_name)['owner_module']
         client.close()
         client = None
@@ -211,8 +223,10 @@ with tempfile.TemporaryDirectory(prefix='audio-groups-') as temporary, ExitStack
         client.request('state.subscribe')
         state = client.wait_state(lambda s: s.get('graphReady') and any(n['name'] == group_name for n in s['nodes']))
         assert next(s for s in sinks() if s['name'] == group_name)['owner_module'] == module_before_restart
+        until(lambda: len(group_inputs(group_name)) == 2
+              and all(not s['mute'] for s in group_inputs(group_name)))
         assert all((work/'config/omarchy'/name).read_bytes() == data for name, data in documents.items())
-        print('PASS: service restart preserves group module identity, selected output, playback and settings', flush=True)
+        print('PASS: service restart preserves group playback and unmutes its internal outputs', flush=True)
 
         stop(right)
         until(lambda: all(s['name'] != group_name for s in sinks()), timeout=6)
@@ -227,6 +241,8 @@ with tempfile.TemporaryDirectory(prefix='audio-groups-') as temporary, ExitStack
         group = until(lambda: next((s for s in sinks() if s['name'] == group_name), None))
         until(lambda: run('pactl', 'get-default-sink').strip() == group_name
               and player_sink() == group['index'])
+        until(lambda: len(group_inputs(group_name)) == 2
+              and all(not s['mute'] for s in group_inputs(group_name)))
         assert player.poll() is None
         assert all((work/'config/omarchy'/name).read_bytes() == data for name, data in documents.items())
         print('PASS: reconnect restores the selected group and playback without rewriting saved settings', flush=True)

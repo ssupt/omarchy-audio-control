@@ -187,6 +187,7 @@ pub fn apply(native: &native::Handle, storage: &Storage, change: Change) -> Resu
     let result: Result<Value> = (|| {
         if let Some(new) = &new {
             created = server.ensure(new)?;
+            server.unmute_outputs(new)?;
         }
         groups.retain(|g| g.id != id);
         if let Some(new) = &new {
@@ -357,6 +358,31 @@ impl Server<'_> {
             "Could not create the output group",
         ))
     }
+    fn unmute_outputs(&mut self, group: &Group) -> Result<()> {
+        let module = self
+            .owned(group)?
+            .and_then(|sink| sink.owner_module)
+            .ok_or_else(conflict)?;
+        // PipeWire can restore a previous mute on the combine module's
+        // playback streams even while the visible group sink is unmuted.
+        // Only touch streams owned by this group and aimed at its members.
+        for input in self.pulse.sink_inputs()? {
+            if input.owner_module != Some(module) || !input.mute {
+                continue;
+            }
+            let target = input.proplist.get_str("target.object");
+            if !group
+                .members
+                .iter()
+                .any(|member| target.as_deref() == Some(member))
+            {
+                continue;
+            }
+            self.guard()?;
+            self.pulse.unmute_sink_input(input.index)?;
+        }
+        Ok(())
+    }
     fn remove(&mut self, group: &Group, degraded: bool) -> Result<()> {
         let Some(sink) = self.owned(group)? else {
             return Ok(());
@@ -405,7 +431,7 @@ impl Server<'_> {
         let mut failed = false;
         for group in groups {
             let result = if self.members_present(group)? {
-                self.ensure(group).map(|_| ())
+                self.ensure(group).and_then(|_| self.unmute_outputs(group))
             } else {
                 self.remove(group, true)
             };

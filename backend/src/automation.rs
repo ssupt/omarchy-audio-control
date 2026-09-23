@@ -48,13 +48,17 @@ pub fn signature(graph: &Graph, rules: &Value) -> String {
     .to_string()
 }
 pub fn group_signature(graph: &Graph, rules: &Value) -> String {
-    let sinks: Vec<_> = graph
+    let nodes: Vec<_> = graph
         .nodes
         .values()
-        .filter(|n| class(n) == "Audio/Sink")
+        .filter(|n| {
+            class(n) == "Audio/Sink"
+                || (class(n) == "Stream/Output/Audio"
+                    && n.name.starts_with("output.omarchy_audio_group_"))
+        })
         .map(|n| json!([n.id, n.serial, n.name, !n.state.is_empty()]))
         .collect();
-    json!([graph.generation, sinks, rules["outputGroups"]]).to_string()
+    json!([graph.generation, nodes, rules["outputGroups"]]).to_string()
 }
 pub fn routes(graph: &Graph, rules: &Value) -> Vec<(String, crate::routing::Set)> {
     let mut result = Vec::new();

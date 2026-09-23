@@ -5,7 +5,7 @@ use libpulse_binding as pulse;
 use pulse::callbacks::ListResult;
 use pulse::context::{
     Context, FlagSet, State,
-    introspect::{ModuleInfo, SinkInfo, SourceInfo},
+    introspect::{ModuleInfo, SinkInfo, SinkInputInfo, SourceInfo},
 };
 use pulse::mainloop::standard::Mainloop;
 use pulse::operation::{Operation, State as OperationState};
@@ -116,6 +116,42 @@ impl Session {
         Rc::try_unwrap(list).ok().unwrap().into_inner().result()
     }
 
+    pub fn sink_inputs(&mut self) -> Result<Vec<SinkInputInfo<'static>>> {
+        self.ready()?;
+        let list = Rc::new(RefCell::new(List::default()));
+        let callback = list.clone();
+        let op = self
+            .context
+            .introspect()
+            .get_sink_input_info_list(move |item| {
+                callback
+                    .borrow_mut()
+                    .push(item.map_owned(SinkInputInfo::to_owned), 4096);
+            });
+        self.finish(op, false)?;
+        Rc::try_unwrap(list).ok().unwrap().into_inner().result()
+    }
+
+    pub fn unmute_sink_input(&mut self, index: u32) -> Result<()> {
+        self.ready()?;
+        let success = Rc::new(RefCell::new(false));
+        let callback = success.clone();
+        let op = self.context.introspect().set_sink_input_mute(
+            index,
+            false,
+            Some(Box::new(move |ok| *callback.borrow_mut() = ok)),
+        );
+        self.finish(op, true)?;
+        if *success.borrow() {
+            Ok(())
+        } else {
+            Err(Failure::new(
+                "group_failed",
+                "Could not restore output group playback",
+            ))
+        }
+    }
+
     pub fn in_use(&mut self, sink: &SinkInfo<'_>) -> Result<bool> {
         self.ready()?;
         let default = Rc::new(RefCell::new(None));
@@ -129,21 +165,10 @@ impl Session {
         if sink.name.as_deref() == Some(default.as_str()) {
             return Ok(true);
         }
-        let list = Rc::new(RefCell::new(List::default()));
-        let callback = list.clone();
-        let op = self
-            .context
-            .introspect()
-            .get_sink_input_info_list(move |item| {
-                callback.borrow_mut().push(item.map_owned(|i| i.sink), 4096);
-            });
-        self.finish(op, false)?;
-        Ok(Rc::try_unwrap(list)
-            .ok()
-            .unwrap()
-            .into_inner()
-            .result()?
-            .contains(&sink.index))
+        Ok(self
+            .sink_inputs()?
+            .iter()
+            .any(|input| input.sink == sink.index))
     }
 
     pub fn load(&mut self, arguments: &str) -> Result<u32> {
