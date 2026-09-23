@@ -82,11 +82,13 @@ impl OwnedDevice {
         }
         if let Some(object) = pod.and_then(catalog::object) {
             self.catalog.read(param, index, &object);
-            if param == spa::sys::SPA_PARAM_Route
-                && let Some(route) = audio::read_route(object)
-                && (self.routes.len() < 256 || self.routes.contains_key(&index))
-            {
-                self.routes.insert(index, route);
+            if param == spa::sys::SPA_PARAM_Route {
+                let Some(route) = audio::read_route(object) else {
+                    return;
+                };
+                if self.routes.len() < 256 || self.routes.contains_key(&index) {
+                    self.routes.insert(index, route);
+                }
             }
         }
     }
