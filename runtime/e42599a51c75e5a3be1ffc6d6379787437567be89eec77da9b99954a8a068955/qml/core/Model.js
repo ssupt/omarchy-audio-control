@@ -164,63 +164,6 @@ function boundedSerializedInput(raw, maximumLength) {
   return text.length <= maximumLength ? text : null
 }
 
-function storedObjectDocument(raw, maximumLength) {
-  var text = boundedSerializedInput(raw, maximumLength)
-  if (text === null || text.trim() === "") return null
-  try {
-    var parsed = JSON.parse(text)
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed : null
-  } catch (e) {
-    return null
-  }
-}
-
-function hasVersionOneOrNone(parsed) {
-  return !hasOwn(parsed, "version") || parsed.version === 1
-}
-
-// FileView can observe an atomic replacement between rename/watch events and
-// briefly fail or expose malformed external edits. These validators let the
-// QML surfaces retain their last known-good state instead of interpreting a
-// transient read as a request to reset every preference.
-function isAudioPreferencesDocument(raw) {
-  var parsed = storedObjectDocument(raw, 1048576)
-  if (!parsed || !hasVersionOneOrNone(parsed)) return false
-  if (hasOwn(parsed, "defaults") && (!parsed.defaults
-      || typeof parsed.defaults !== "object" || Array.isArray(parsed.defaults))) return false
-  if (hasOwn(parsed, "bluetoothProfiles") && (!parsed.bluetoothProfiles
-      || typeof parsed.bluetoothProfiles !== "object"
-      || Array.isArray(parsed.bluetoothProfiles))) return false
-  return true
-}
-
-function isAudioControlSettingsDocument(raw) {
-  var parsed = storedObjectDocument(raw, 65536)
-  if (!parsed || !hasVersionOneOrNone(parsed)) return false
-  if (hasOwn(parsed, "outputOverdrive") && typeof parsed.outputOverdrive !== "boolean")
-    return false
-  if (hasOwn(parsed, "captureNotifications")
-      && typeof parsed.captureNotifications !== "boolean") return false
-  return true
-}
-
-function isAudioScenesDocument(raw) {
-  var parsed = storedObjectDocument(raw, 2097152)
-  return !!parsed && hasVersionOneOrNone(parsed)
-    && (!hasOwn(parsed, "scenes") || Array.isArray(parsed.scenes))
-}
-
-function isAudioRulesDocument(raw) {
-  var parsed = storedObjectDocument(raw, 1048576)
-  if (!parsed || !hasVersionOneOrNone(parsed)) return false
-  if (hasOwn(parsed, "appRules") && !Array.isArray(parsed.appRules)) return false
-  if (hasOwn(parsed, "outputGroups") && !Array.isArray(parsed.outputGroups)) return false
-  if (hasOwn(parsed, "devices") && (!parsed.devices
-      || typeof parsed.devices !== "object" || Array.isArray(parsed.devices))) return false
-  return true
-}
-
 function normalizedBluetoothAddress(value) {
   return String(value || "").trim().toLowerCase().replace(/[^0-9a-f]/g, "")
 }
@@ -264,18 +207,6 @@ function parseAudioPreferences(raw) {
   }
 }
 
-function preferredAudioProfile(preferences, address, options, activeProfile) {
-  var profiles = preferences && preferences.bluetoothProfiles
-  var saved = profiles
-    ? String(mapValue(profiles, normalizedBluetoothAddress(address), "") || "") : ""
-  var values = options && typeof options.length === "number" ? options : []
-  for (var i = 0; i < values.length && i < 256; i++) {
-    var value = values[i] && typeof values[i] === "object" ? values[i].value : values[i]
-    if (String(value || "") === saved) return saved
-  }
-  return String(activeProfile || "")
-}
-
 function preferredAudioNodeName(preferences, direction, liveNode, nodes) {
   var defaults = preferences && preferences.defaults
   var saved = defaults && (direction === "output" || direction === "input")
@@ -305,22 +236,6 @@ function preferredAudioNodeName(preferences, direction, liveNode, nodes) {
     if (liveMatches > 1) return ""
   }
   return liveName
-}
-
-function parseAudioControlSettings(raw) {
-  var parsed
-  var text = boundedSerializedInput(raw, 65536)
-  try {
-    parsed = text === null ? {} : JSON.parse(text || "{}")
-  } catch (e) {
-    parsed = {}
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) parsed = {}
-  return {
-    version: 1,
-    outputOverdrive: parsed.outputOverdrive === true,
-    captureNotifications: parsed.captureNotifications !== false
-  }
 }
 
 // Bare shell summons are the same gesture Omarchy uses for its built-in audio
@@ -389,104 +304,6 @@ function normalizeAppKey(value) {
   return sanitizeSceneString(value, "", 120).replace(/[A-Z]/g, function(letter) {
     return letter.toLowerCase()
   })
-}
-
-function sanitizeSceneEntry(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null
-  var name = sanitizeSceneString(raw.name, "", 48)
-  if (name === "") return null
-
-  var defaults = raw.defaults && typeof raw.defaults === "object" && !Array.isArray(raw.defaults)
-    ? raw.defaults : {}
-  var devices = []
-  var seenDevices = {}
-  var rawDevices = Array.isArray(raw.devices) ? raw.devices : []
-  for (var i = 0; i < rawDevices.length && i < 256 && devices.length < 64; i++) {
-    var device = rawDevices[i]
-    if (!device || typeof device !== "object") continue
-    var deviceName = sanitizeIdentifier(device.name, 160)
-    if (device.direction !== "input" && device.direction !== "output") continue
-    var direction = device.direction
-    var deviceKey = direction + ":" + deviceName
-    if (deviceName === "" || hasOwn(seenDevices, deviceKey)) continue
-    setMapValue(seenDevices, deviceKey, true)
-    devices.push({
-      name: deviceName,
-      direction: direction,
-      volume: clampNumber(device.volume, 1, 0, 1.5),
-      // Scenes restore playback audibly: a captured output mute would
-      // silently silence an unrelated future session, while microphone
-      // muting is a deliberate privacy state worth restoring.
-      muted: direction === "input" && device.muted === true,
-      balance: clampNumber(device.balance, 0, -1, 1)
-    })
-  }
-
-  var ports = []
-  var seenPorts = {}
-  var rawPorts = Array.isArray(raw.ports) ? raw.ports : []
-  for (var j = 0; j < rawPorts.length && j < 256 && ports.length < 64; j++) {
-    var port = rawPorts[j]
-    if (!port || typeof port !== "object") continue
-    var endpoint = sanitizeIdentifier(port.endpoint, 160)
-    if (port.direction !== "input" && port.direction !== "output") continue
-    var portDirection = port.direction
-    var portValue = sanitizeIdentifier(port.value, 160)
-    var portKey = portDirection + ":" + endpoint
-    if (endpoint === "" || portValue === "" || hasOwn(seenPorts, portKey)) continue
-    setMapValue(seenPorts, portKey, true)
-    ports.push({ direction: portDirection, endpoint: endpoint, value: portValue })
-  }
-
-  var profiles = []
-  var seenProfiles = {}
-  var rawProfiles = Array.isArray(raw.profiles) ? raw.profiles : []
-  for (var k = 0; k < rawProfiles.length && k < 256 && profiles.length < 64; k++) {
-    var profile = rawProfiles[k]
-    if (!profile || typeof profile !== "object") continue
-    var card = sanitizeIdentifier(profile.card, 160)
-    var profileValue = sanitizeIdentifier(profile.profile, 160)
-    if (card === "" || profileValue === "" || hasOwn(seenProfiles, card)) continue
-    // Restoring "off" would power down cards the user may have enabled since;
-    // scenes choose how a card behaves when it is used, never whether it is.
-    if (profileValue === "off") continue
-    setMapValue(seenProfiles, card, true)
-    profiles.push({ card: card, profile: profileValue })
-  }
-
-  return {
-    name: name,
-    savedAt: sanitizeSceneString(raw.savedAt, "", 32),
-    defaults: {
-      output: sanitizeIdentifier(defaults.output, 160),
-      input: sanitizeIdentifier(defaults.input, 160)
-    },
-    devices: devices,
-    ports: ports,
-    profiles: profiles
-  }
-}
-
-function parseAudioScenes(raw) {
-  var parsed
-  var text = boundedSerializedInput(raw, 2097152)
-  try {
-    parsed = text === null ? {} : JSON.parse(text || "{}")
-  } catch (e) {
-    parsed = {}
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) parsed = {}
-
-  var scenes = []
-  var rawScenes = Array.isArray(parsed.scenes) ? parsed.scenes : []
-  var seen = {}
-  for (var i = 0; i < rawScenes.length && i < 96 && scenes.length < 24; i++) {
-    var scene = sanitizeSceneEntry(rawScenes[i])
-    if (!scene || hasOwn(seen, scene.name)) continue
-    setMapValue(seen, scene.name, true)
-    scenes.push(scene)
-  }
-  return { version: 1, scenes: scenes }
 }
 
 function sceneSummary(scene) {
@@ -784,18 +601,6 @@ function emptyAudioDiagnostics() {
   }
 }
 
-function parseAudioDiagnostics(raw) {
-  var parsed
-  var text = boundedSerializedInput(raw, 8388608)
-  try {
-    if (text === null) throw new Error("Audio diagnostics response is too large")
-    parsed = JSON.parse(text)
-  } catch (e) {
-    return { valid: false, value: emptyAudioDiagnostics() }
-  }
-  return normalizeAudioDiagnostics(parsed)
-}
-
 // Service snapshots have already crossed the bounded JSON transport. Normalize
 // their objects directly rather than stringify and parse a second full report.
 function normalizeAudioDiagnostics(parsed) {
@@ -926,30 +731,6 @@ function balanceValue(left, right) {
   return r >= l ? 1 - l / peak : -(1 - r / peak)
 }
 
-function applyBalance(volumes, leftIndex, rightIndex, balance) {
-  var values = []
-  var source = volumes && typeof volumes.length === "number" ? volumes : []
-  var sourceLength = Math.floor(Number(source.length))
-  // Audio channel collections are tiny in practice. Refuse an implausible
-  // collection instead of copying an attacker-controlled array-like object or
-  // returning a truncated channel map that could be assigned back to PipeWire.
-  if (!isFinite(sourceLength) || sourceLength < 0 || sourceLength > 64) return source
-  for (var i = 0; i < sourceLength; i++) {
-    var channel = Number(source[i])
-    values.push(isFinite(channel) && channel >= 0 ? channel : 0)
-  }
-  if (leftIndex < 0 || rightIndex < 0 || leftIndex >= values.length || rightIndex >= values.length)
-    return values
-
-  var value = Number(balance)
-  if (!isFinite(value)) value = 0
-  value = Math.max(-1, Math.min(1, value))
-  var peak = Math.max(values[leftIndex], values[rightIndex])
-  values[leftIndex] = peak * (value > 0 ? 1 - value : 1)
-  values[rightIndex] = peak * (value < 0 ? 1 + value : 1)
-  return values
-}
-
 function audioMeterLevel(peaks, volumes, peak, volume, muted) {
   if (muted) return 0
 
@@ -1056,13 +837,6 @@ function audioCardsByBluetooth(cards, bluetooth) {
   for (var i = 0; i < values.length && i < 256 && filtered.length < 64; i++)
     if (values[i] && values[i].bluetooth === bluetooth) filtered.push(values[i])
   return filtered
-}
-
-function hasBluetoothCards(cards) {
-  var values = Array.isArray(cards) ? cards : []
-  for (var i = 0; i < values.length && i < 256; i++)
-    if (values[i] && values[i].bluetooth) return true
-  return false
 }
 
 function friendlyDeviceLabel(text) {
@@ -1490,65 +1264,6 @@ function streamIconName(node, players, streams) {
   return ""
 }
 
-// Return a declarative scene plan so ordering is independently testable and
-// the controller can resolve live PipeWire objects only when each step runs.
-// Profiles can recreate endpoints, so no port, device, or default target may
-// be resolved before all profile helpers have completed.
-function audioScenePlan(scene) {
-  var normalized = sanitizeSceneEntry(scene)
-  if (!normalized) return []
-
-  var steps = []
-  var i
-  for (i = 0; i < normalized.profiles.length; i++) {
-    steps.push({
-      kind: "profile",
-      card: normalized.profiles[i].card,
-      profile: normalized.profiles[i].profile,
-      label: "Profile " + normalized.profiles[i].card
-    })
-  }
-  if (normalized.profiles.length > 0) steps.push({ kind: "settle", label: "Audio devices" })
-
-  for (i = 0; i < normalized.ports.length; i++) {
-    steps.push({
-      kind: "port",
-      direction: normalized.ports[i].direction,
-      endpoint: normalized.ports[i].endpoint,
-      value: normalized.ports[i].value,
-      label: "Port " + normalized.ports[i].endpoint
-    })
-  }
-  for (i = 0; i < normalized.devices.length; i++) {
-    steps.push({
-      kind: "device",
-      direction: normalized.devices[i].direction,
-      name: normalized.devices[i].name,
-      volume: normalized.devices[i].volume,
-      muted: normalized.devices[i].muted,
-      balance: normalized.devices[i].balance,
-      label: normalized.devices[i].name
-    })
-  }
-  if (normalized.defaults.output !== "") {
-    steps.push({
-      kind: "default",
-      direction: "output",
-      name: normalized.defaults.output,
-      label: "Default output"
-    })
-  }
-  if (normalized.defaults.input !== "") {
-    steps.push({
-      kind: "default",
-      direction: "input",
-      name: normalized.defaults.input,
-      label: "Default input"
-    })
-  }
-  return steps
-}
-
 // Scoped hosts may hide the media service. Prefer playing players, then paused
 // players with a matching stream, then controllable players. Within each tier,
 // prefer real players over proxies and keep list order. The host's pinned source
@@ -1622,18 +1337,10 @@ if (typeof module !== "undefined") {
     listSnapshot: listSnapshot,
     hasOwn: hasOwn,
     mapValue: mapValue,
-    isAudioPreferencesDocument: isAudioPreferencesDocument,
-    isAudioControlSettingsDocument: isAudioControlSettingsDocument,
-    isAudioScenesDocument: isAudioScenesDocument,
-    isAudioRulesDocument: isAudioRulesDocument,
     normalizedBluetoothAddress: normalizedBluetoothAddress,
     parseAudioPreferences: parseAudioPreferences,
-    preferredAudioProfile: preferredAudioProfile,
     preferredAudioNodeName: preferredAudioNodeName,
-    parseAudioControlSettings: parseAudioControlSettings,
     parseAudioOpenRequest: parseAudioOpenRequest,
-    parseAudioScenes: parseAudioScenes,
-    sanitizeSceneEntry: sanitizeSceneEntry,
     sanitizeIdentifier: sanitizeIdentifier,
     normalizeAppKey: normalizeAppKey,
     sceneSummary: sceneSummary,
@@ -1647,17 +1354,14 @@ if (typeof module !== "undefined") {
     availableRuleApplicationLabels: availableRuleApplicationLabels,
     deviceSortComparator: deviceSortComparator,
     emptyAudioDiagnostics: emptyAudioDiagnostics,
-    parseAudioDiagnostics: parseAudioDiagnostics,
     normalizeAudioDiagnostics: normalizeAudioDiagnostics,
     balanceValue: balanceValue,
-    applyBalance: applyBalance,
     audioMeterLevel: audioMeterLevel,
     outputVolumeName: outputVolumeName,
     outputVolumeNode: outputVolumeNode,
     audioProfileLabel: audioProfileLabel,
     audioProfileOptions: audioProfileOptions,
     audioCardsByBluetooth: audioCardsByBluetooth,
-    hasBluetoothCards: hasBluetoothCards,
     friendlyDeviceLabel: friendlyDeviceLabel,
     nodeName: nodeName,
     nodeProps: nodeProps,
@@ -1689,6 +1393,5 @@ if (typeof module !== "undefined") {
     streamIconName: streamIconName,
     pickActiveMprisPlayer: pickActiveMprisPlayer,
     streamRepresentsPlayer: streamRepresentsPlayer,
-    audioScenePlan: audioScenePlan
   }
 }
