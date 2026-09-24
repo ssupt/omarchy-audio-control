@@ -52,28 +52,26 @@ with tempfile.TemporaryDirectory(prefix='audio-diagnostics-') as temporary, Exit
     commands = work/'commands'
     commands.mkdir()
     real_top = shutil.which('pw-top')
-    (commands/'pw-top').write_text('''#!/usr/bin/env python3
-import os, pathlib, sys, time
-work = pathlib.Path(os.environ['AUDIO_DIAGNOSTICS_TEST_DIR'])
-with (work/'calls').open('a') as out: out.write('sample\\n')
-while (work/'gate').exists(): time.sleep(.025)
-mode = (work/'mode').read_text() if (work/'mode').exists() else ''
-if mode == 'oversize':
-    print('x' * (1024 * 1024 + 1))
-    raise SystemExit(0)
-if mode == 'malformed':
-    print('invalid statistics')
-    raise SystemExit(0)
-if mode == 'slow': time.sleep(30)
-import subprocess
-result = subprocess.run([os.environ['AUDIO_DIAGNOSTICS_REAL_TOP'], *sys.argv[1:]], capture_output=True)
-(work/'top-output').write_bytes(result.stdout)
-sys.stdout.buffer.write(result.stdout)
-raise SystemExit(result.returncode)
+    # Mark invocation before doing any expensive work. A Python shebang can
+    # spend the sampler's three-second deadline starting under local load,
+    # making this test report that pw-top was never called.
+    (commands/'pw-top').write_text('''#!/bin/sh
+set -eu
+work=$AUDIO_DIAGNOSTICS_TEST_DIR
+printf 'sample\\n' >>"$work/calls"
+while [ -e "$work/gate" ]; do sleep .025; done
+mode=$(cat "$work/mode" 2>/dev/null || true)
+case $mode in
+  oversize) head -c 1048577 /dev/zero | tr '\\000' x; exit 0 ;;
+  malformed) printf 'invalid statistics\\n'; exit 0 ;;
+  slow) sleep 30 ;;
+esac
+"$AUDIO_DIAGNOSTICS_REAL_TOP" "$@" >"$work/top-output"
+cat "$work/top-output"
 ''')
-    (commands/'wl-copy').write_text('''#!/usr/bin/env python3
-import os, pathlib, sys
-pathlib.Path(os.environ['AUDIO_DIAGNOSTICS_TEST_DIR'], 'clipboard').write_bytes(sys.stdin.buffer.read())
+    (commands/'wl-copy').write_text('''#!/bin/sh
+set -eu
+cat >"$AUDIO_DIAGNOSTICS_TEST_DIR/clipboard"
 ''')
     for command in commands.iterdir(): command.chmod(0o755)
     env.update(PATH=str(commands)+':'+env['PATH'], AUDIO_DIAGNOSTICS_TEST_DIR=temporary,
@@ -124,7 +122,20 @@ pathlib.Path(os.environ['AUDIO_DIAGNOSTICS_TEST_DIR'], 'clipboard').write_bytes(
         assert count() == 0, 'Diagnostics sampled without a request'
         gate.touch()
         first = a.send('diagnostics.refresh')
-        until(lambda: count() == 1)
+        try:
+            until(lambda: count() >= 1)
+        except AssertionError:
+            # Include the service reply when a sampler never launches. This
+            # distinguishes command rejection from a slow mock invocation.
+            a.socket.settimeout(1)
+            try:
+                print('Diagnostics refresh reply:', a.response(first), file=sys.stderr)
+                report = observer.wait_state(lambda s: s.get('diagnostics', {}).get('revision') == '1')
+                print('Diagnostics snapshot:', report['diagnostics'], file=sys.stderr)
+            except (OSError, TimeoutError):
+                print('Diagnostics refresh has no reply', file=sys.stderr)
+            raise
+        assert count() == 1, 'Diagnostics launched more than one shared sampler'
         second = b.send('diagnostics.refresh')
         state = observer.wait_state(lambda s: s.get('diagnostics', {}).get('refreshing'))
         assert not state['busy'], 'Read-only sampling claimed audio mutation ownership'

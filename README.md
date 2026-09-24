@@ -89,10 +89,15 @@ Existing files and schemas are preserved under `~/.config/omarchy` (or
 The optional [Advanced Bluetooth Audio](https://github.com/ssupt/omarchy-bluetooth-audio)
 companion shares `audio-preferences.json`.
 This Rust branch also accepts the companion panel's node ID and name through
-`audio-output-set-default` and `audio-input-set-default`. The service checks
-that the live endpoint still matches before applying the default change. The
-compatibility helpers and the Bluetooth service branch should be released
-together.
+`default.compat`. The service checks that the live endpoint still matches
+before applying the default change, and the companion waits for the result.
+The compatibility helpers remain available to older companion releases. The
+two service branches should be released together.
+
+If `~/.config/omarchy` is a symlink, the service observes edits in its current
+target. After retargeting that symlink, restart the audio service so its file
+watches attach to the new target. An explicit store read
+can see the new files sooner, but does not move the watches.
 
 ## Development
 
@@ -105,6 +110,12 @@ python3 packaging/build-release.py --output /tmp/omarchy-audio-release
 python3 packaging/build-release.py --check /tmp/omarchy-audio-release
 omarchy-plugin-validate /tmp/omarchy-audio-release
 ```
+
+The `scripts/audio-rust-backend` installer and `packaging/systemd` units are a
+supported development path for testing socket activation outside the plugin
+lifecycle. `install` builds or accepts a release binary, replaces the user
+units and restarts the service; `uninstall` removes that installation. The
+normal plugin install above uses its own service lifecycle.
 
 [MIT license](LICENSE), matching Omarchy's original audio widget.
 More plugins: [omarchy-plugins](https://github.com/ssupt/omarchy-plugins).

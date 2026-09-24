@@ -31,6 +31,8 @@ struct fixture {
     const char *control;
     unsigned port_requests;
     bool profile_mode;
+    bool profile_loopback;
+    int missing_headset_endpoint;
     uint32_t device_id;
     uint32_t active_profile;
     int pending_profile;
@@ -92,8 +94,9 @@ static int enum_catalog(struct fixture *f, int seq, uint32_t id, uint32_t start,
                 struct spa_pod_frame classes, class;
                 spa_pod_builder_prop(&b, SPA_PARAM_PROFILE_classes, 0);
                 spa_pod_builder_push_struct(&b, &classes);
-                spa_pod_builder_int(&b, 2);
-                for (int c = 0; c < 2; c++) {
+                int classes_count = f->profile_loopback && index == 1 ? 1 : 2;
+                spa_pod_builder_int(&b, classes_count);
+                for (int c = 0; c < classes_count; c++) {
                     int32_t device = c ? 0 : 4;
                     spa_pod_builder_push_struct(&b, &class);
                     spa_pod_builder_add(&b, SPA_POD_String(c ? "Audio/Source" : "Audio/Sink"),
@@ -246,13 +249,15 @@ static void bound(void *data, uint32_t id) {
     char device_id[24];
     snprintf(device_id, sizeof(device_id), "%u", id);
     for (int i = 0; i < 2; i++) {
+        if (f->active_profile == 3 && f->missing_headset_endpoint == i + 1) continue;
         struct pw_properties *props = pw_properties_new(
             "factory.name", "support.null-audio-sink",
             "node.name", i ? "audio_test_routed_input" : "audio_test_routed_output",
             "media.class", i ? "Audio/Source" : "Audio/Sink",
             "audio.position", "[ FL FR ]", "device.id", device_id,
             "adapter.auto-port-config", "{ mode = dsp monitor = true position = preserve }",
-            "card.profile.device", i ? "0" : "4", NULL);
+            "card.profile.device", i ? "0" : "4",
+            "bluez5.loopback", f->profile_loopback && i ? "true" : "false", NULL);
         f->nodes[i] = pw_core_create_object(f->core, "adapter", PW_TYPE_INTERFACE_Node,
                                           PW_VERSION_NODE, &props->dict, 0);
         pw_properties_free(props);
@@ -290,6 +295,11 @@ int main(int argc, char **argv) {
     pw_init(&argc, &argv);
     struct fixture f = { .pending = -1, .pending_profile = -1, .active_profile = 1, .profile_mode = argc > 2, .active_ports = {2, 7},
         .volumes = {{.008f, .027f}, {.064f, .125f}}, .control = argc > 1 ? argv[1] : NULL };
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--loopback") == 0) f.profile_loopback = true;
+        if (strcmp(argv[i], "--missing-headset-sink") == 0) f.missing_headset_endpoint = 1;
+        if (strcmp(argv[i], "--missing-headset-source") == 0) f.missing_headset_endpoint = 2;
+    }
     uint32_t ids[] = {SPA_PARAM_Route, SPA_PARAM_EnumProfile, SPA_PARAM_Profile, SPA_PARAM_EnumRoute};
     for (unsigned i = 0; i < 4; i++) f.params[i] = (struct spa_param_info) {
         .id = ids[i], .flags = (i == 0 || (i == 2 && f.profile_mode)) ? SPA_PARAM_INFO_READWRITE : SPA_PARAM_INFO_READ };

@@ -96,7 +96,13 @@ fn counts_ready(nodes: &[Saved], guard: &Guard) -> bool {
     .all(|(class_name, expected)| {
         let count = nodes
             .iter()
-            .filter(|n| class(&n.node) == class_name)
+            .filter(|n| {
+                class(&n.node) == class_name
+                    && !(expected == 0
+                        && class_name == "Audio/Source"
+                        && n.node.properties.get("bluez5.loopback").map(String::as_str)
+                            == Some("true"))
+            })
             .count();
         if expected == 0 {
             count == 0
@@ -212,18 +218,104 @@ impl<'a> Transition<'a> {
     }
     async fn settle(&self, guard: &Guard) -> Result<Vec<Saved>> {
         let mut state = self.native.subscribe();
+        // Save the first state of each object, then keep it muted even while
+        // another endpoint is still missing. Identity includes the graph
+        // generation and serial so a reused PipeWire id is a new object.
+        let mut observed: Vec<Saved> = Vec::new();
+        let mut ready: Option<(Vec<(u32, String)>, Instant)> = None;
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 let graph = state.borrow_and_update().clone();
                 match endpoints(&graph, guard) {
-                    Ok(nodes) if counts_ready(&nodes, guard) => return Ok(nodes),
-                    Ok(_) => (),
-                    Err(e) if e.code == "busy" => (),
+                    Ok(nodes) => {
+                        let mut transient_patch_error = false;
+                        for node in &nodes {
+                            if !observed.iter().any(|prior| {
+                                prior.identity.generation == node.identity.generation
+                                    && prior.identity.id == node.identity.id
+                                    && prior.identity.serial == node.identity.serial
+                            }) {
+                                observed.push(node.clone());
+                            }
+                            if node.node.audio.muted != Some(true) {
+                                match self
+                                    .patch(
+                                        node,
+                                        AudioPatch {
+                                            muted: Some(true),
+                                            volumes: None,
+                                        },
+                                        Some(guard),
+                                    )
+                                    .await
+                                {
+                                    Err(error)
+                                        if matches!(error.code.as_str(), "stale_node" | "busy") =>
+                                    {
+                                        transient_patch_error = true;
+                                    }
+                                    result => result?,
+                                }
+                            }
+                        }
+                        if counts_ready(&nodes, guard) && !transient_patch_error {
+                            let current = self.native.snapshot();
+                            let live = match endpoints(&current, guard) {
+                                Ok(live) => Some(live),
+                                Err(error) if error.code == "busy" => None,
+                                Err(error) => return Err(error),
+                            };
+                            if let Some(live) = live.filter(|live| {
+                                live.iter().all(|node| node.node.audio.muted == Some(true))
+                                    && counts_ready(live, guard)
+                            }) {
+                                let signature: Vec<_> = live
+                                    .iter()
+                                    .map(|node| (node.identity.id, node.identity.serial.clone()))
+                                    .collect();
+                                if ready.as_ref().is_some_and(|(previous, since)| {
+                                    *previous == signature
+                                        && since.elapsed() >= Duration::from_millis(100)
+                                }) {
+                                    return Ok(live
+                                        .into_iter()
+                                        .map(|node| {
+                                            observed
+                                                .iter()
+                                                .find(|first| {
+                                                    first.identity.generation
+                                                        == node.identity.generation
+                                                        && first.identity.id == node.identity.id
+                                                        && first.identity.serial
+                                                            == node.identity.serial
+                                                })
+                                                .cloned()
+                                                .unwrap_or(node)
+                                        })
+                                        .collect());
+                                }
+                                if ready
+                                    .as_ref()
+                                    .is_none_or(|(previous, _)| *previous != signature)
+                                {
+                                    ready = Some((signature, Instant::now()));
+                                }
+                            } else {
+                                ready = None;
+                            }
+                        } else {
+                            ready = None;
+                        }
+                    }
+                    Err(e) if e.code == "busy" => ready = None,
                     Err(e) => return Err(e),
                 }
-                state.changed().await.map_err(|_| {
-                    Failure::unknown("Audio disconnected while waiting for endpoints")
-                })?;
+                tokio::select! {
+                    changed = state.changed() => changed.map_err(|_| {
+                        Failure::unknown("Audio disconnected while waiting for endpoints")
+                    })?,
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => (),
+                }
             }
         })
         .await
@@ -273,22 +365,40 @@ impl<'a> Transition<'a> {
         Ok(())
     }
     async fn rollback(&self, selection: &Selection, old: &[Saved]) -> Result<()> {
+        let mut state = self.native.subscribe();
+        let current = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let graph = state.borrow_and_update().clone();
+                let after = selection.after.inspect(&graph);
+                if after.is_ok() {
+                    return Ok(selection.after.clone());
+                }
+                let before = selection.before.inspect(&graph);
+                if before.is_ok() {
+                    return Ok(selection.before.clone());
+                }
+                if after.as_ref().is_err_and(|error| error.code == "busy")
+                    || before.as_ref().is_err_and(|error| error.code == "busy")
+                {
+                    state.changed().await.map_err(|_| {
+                        Failure::unknown("Audio disconnected during profile rollback")
+                    })?;
+                    continue;
+                }
+                return Err(Failure::unknown(
+                    "Audio device or profile changed externally; rollback was skipped",
+                ));
+            }
+        })
+        .await
+        .map_err(|_| Failure::unknown("Audio profile did not settle before rollback"))??;
         let graph = self.native.snapshot();
-        let current = if selection.after.inspect(&graph).is_ok() {
-            &selection.after
-        } else if selection.before.inspect(&graph).is_ok() {
-            &selection.before
-        } else {
-            return Err(Failure::unknown(
-                "Audio device or profile changed externally; rollback was skipped",
-            ));
-        };
-        let nodes = endpoints(&graph, current)?;
-        self.mute(&nodes, current).await?;
+        let nodes = endpoints(&graph, &current)?;
+        self.mute(&nodes, &current).await?;
         // Reissue even if the cached profile is the original: a silent write may have landed.
         self.native
             .switch_profile(
-                current.clone(),
+                current,
                 selection.before.clone(),
                 nodes.iter().map(|n| n.identity.clone()).collect(),
             )

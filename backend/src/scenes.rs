@@ -6,6 +6,13 @@ use crate::storage::normalize_scene;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
+enum StepOutcome {
+    Applied,
+    Restored,
+    Skipped,
+    PersistenceFailed,
+}
+
 fn class(node: &Node) -> &str {
     node.properties
         .get("media.class")
@@ -173,7 +180,7 @@ pub async fn apply(
             if name.is_empty() {
                 continue;
             }
-            let change: Result<i32> = if domain == "devices" {
+            let change: Result<StepOutcome> = if domain == "devices" {
                 device(native, step, overdrive).await
             } else if domain == "profiles" {
                 let graph = native.snapshot();
@@ -182,20 +189,20 @@ pub async fn apply(
                         .await
                         .map(|value| {
                             if value["outcome"] == "persistence_failed" {
-                                2
+                                StepOutcome::PersistenceFailed
                             } else {
-                                0
+                                StepOutcome::Applied
                             }
                         })
                         .or_else(|error| {
                             if error.code == "unavailable" {
-                                Ok(3)
+                                Ok(StepOutcome::Skipped)
                             } else {
                                 Err(error)
                             }
                         })
                 } else {
-                    Ok(3)
+                    Ok(StepOutcome::Skipped)
                 }
             } else if domain == "ports" {
                 let graph = native.snapshot();
@@ -205,16 +212,16 @@ pub async fn apply(
                     native
                         .select_port(identity, text(step, "value"))
                         .await
-                        .map(|()| 0)
+                        .map(|()| StepOutcome::Applied)
                         .or_else(|error| {
                             if error.code == "unavailable" {
-                                Ok(3)
+                                Ok(StepOutcome::Skipped)
                             } else {
                                 Err(error)
                             }
                         })
                 } else {
-                    Ok(3)
+                    Ok(StepOutcome::Skipped)
                 }
             } else {
                 let graph = native.snapshot();
@@ -233,30 +240,38 @@ pub async fn apply(
                 .await
                 .map(|value| {
                     if value["outcome"] == "persistence_failed" {
-                        2
+                        StepOutcome::PersistenceFailed
                     } else {
-                        0
+                        StepOutcome::Applied
                     }
                 })
             };
             match change {
-                Ok(0) => result["applied"] = json!(result["applied"].as_u64().unwrap() + 1),
-                Ok(3) => result["skipped"].as_array_mut().unwrap().push(json!(name)),
-                Ok(2) => {
+                Ok(StepOutcome::Applied) => {
+                    result["applied"] = json!(result["applied"].as_u64().unwrap() + 1)
+                }
+                Ok(StepOutcome::Skipped) => {
+                    result["skipped"].as_array_mut().unwrap().push(json!(name))
+                }
+                Ok(StepOutcome::PersistenceFailed) => {
                     result["applied"] = json!(result["applied"].as_u64().unwrap() + 1);
                     result["errors"]
                         .as_array_mut()
                         .unwrap()
                         .push(json!(format!("{name}: preference could not be saved")));
                 }
-                other => {
+                Ok(StepOutcome::Restored) => {
+                    result["errors"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!(format!("{name}: change was restored")));
+                }
+                Err(error) => {
                     result["errors"]
                         .as_array_mut()
                         .unwrap()
                         .push(json!(format!("{name}: change could not be verified")));
-                    if matches!(other, Ok(4))
-                        || other.as_ref().is_err_and(|e| e.outcome == "unknown")
-                    {
+                    if error.outcome == "unknown" {
                         result["outcome"] = json!("unknown");
                         return Ok(result);
                     }
@@ -269,10 +284,10 @@ pub async fn apply(
     }
     Ok(result)
 }
-async fn device(native: &Handle, step: &Value, overdrive: bool) -> Result<i32> {
+async fn device(native: &Handle, step: &Value, overdrive: bool) -> Result<StepOutcome> {
     let graph = native.snapshot();
     let Some(node) = resolve(&graph, text(step, "direction"), text(step, "name")) else {
-        return Ok(3);
+        return Ok(StepOutcome::Skipped);
     };
     let identity = identity(&graph, node);
     let volume = step["volume"].as_f64().unwrap().min(
@@ -311,7 +326,7 @@ async fn device(native: &Handle, step: &Value, overdrive: bool) -> Result<i32> {
     }
     .await;
     if change.is_ok() {
-        return Ok(0);
+        return Ok(StepOutcome::Applied);
     }
     let current = native.snapshot();
     let live = native::validate_identity(&current, &identity)?;
@@ -339,5 +354,5 @@ async fn device(native: &Handle, step: &Value, overdrive: bool) -> Result<i32> {
             },
         )
         .await?;
-    Ok(1)
+    Ok(StepOutcome::Restored)
 }

@@ -30,13 +30,38 @@ impl Service {
                     attempted.clear();
                     continue;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                 let Some(service) = weak.upgrade() else {
                     return;
                 };
                 let Some(native) = &service.native else {
                     return;
                 };
+                // A profile can replace a Bluetooth sink several times. Wait
+                // until the output inventory stops changing before asking
+                // Pulse to enumerate it for output-group reconciliation.
+                let mut output_signature = crate::automation::group_signature(
+                    &native.snapshot(),
+                    &state.borrow_and_update()["stores"]["rules"],
+                );
+                let mut quiet_until =
+                    tokio::time::Instant::now() + std::time::Duration::from_millis(600);
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(quiet_until) => break,
+                        changed = state.changed() => {
+                            if changed.is_err() { return; }
+                            let next = crate::automation::group_signature(
+                                &native.snapshot(),
+                                &state.borrow_and_update()["stores"]["rules"],
+                            );
+                            if next != output_signature {
+                                output_signature = next;
+                                quiet_until = tokio::time::Instant::now()
+                                    + std::time::Duration::from_millis(600);
+                            }
+                        }
+                    }
+                }
                 let snapshot = state.borrow_and_update().clone();
                 let graph = native.snapshot();
                 if !graph.ready || !snapshot["stores"]["rules"].is_object() {

@@ -88,6 +88,7 @@ jobs:
           python test/integration/runtime.py backend/target/debug/omarchy-audio-service
           python test/integration/routed_audio.py backend/target/debug/omarchy-audio-service
           python test/integration/profiles.py backend/target/debug/omarchy-audio-service
+          python test/integration/profile_adversarial.py backend/target/debug/omarchy-audio-service
           python test/integration/deadlines.py
           python test/integration/microphone.py backend/target/debug/omarchy-audio-service
           python test/integration/output_groups.py backend/target/debug/omarchy-audio-service
@@ -101,6 +102,7 @@ jobs:
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/runtime.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/routed_audio.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/profiles.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
+          python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/profile_adversarial.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/microphone.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/output_groups.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/policy.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"

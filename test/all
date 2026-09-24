@@ -169,17 +169,6 @@ const cards = [{
   ]
 }]
 
-assert.deepEqual(model.parseAudioControlSettings('{"outputOverdrive":true}'), {
-  version: 1,
-  outputOverdrive: true,
-  captureNotifications: true
-})
-assert.deepEqual(model.parseAudioControlSettings('not json'), {
-  version: 1,
-  outputOverdrive: false,
-  captureNotifications: true
-})
-assert.equal(model.parseAudioControlSettings('{"captureNotifications":false}').captureNotifications, false)
 assert.deepEqual(model.parseAudioOpenRequest(''), { advanced: false, tab: 0 })
 assert.deepEqual(model.parseAudioOpenRequest('{}'), { advanced: false, tab: 0 })
 assert.deepEqual(model.parseAudioOpenRequest('{"view":"advanced"}'), { advanced: true, tab: 0 })
@@ -197,83 +186,6 @@ assert.deepEqual(model.parseAudioOpenRequest('[' + '0,'.repeat(4096) + '0]'), {
 assert.equal(model.sanitizeIdentifier(' exact identifier ', 160), ' exact identifier ')
 assert.equal(model.sanitizeIdentifier('invalid\nidentifier', 160), '')
 assert.equal(model.sanitizeIdentifier('x'.repeat(161), 160), '')
-assert.equal(model.isAudioControlSettingsDocument('{}'), true)
-assert.equal(model.isAudioControlSettingsDocument('{"outputOverdrive":"true"}'), false)
-assert.equal(model.isAudioControlSettingsDocument(''), false)
-assert.equal(model.isAudioPreferencesDocument('{"defaults":{}}'), true)
-assert.equal(model.isAudioPreferencesDocument('{"defaults":[]}'), false)
-assert.equal(model.isAudioScenesDocument('{"version":1,"scenes":[]}'), true)
-assert.equal(model.isAudioScenesDocument('{"version":2,"scenes":[]}'), false)
-assert.equal(model.isAudioScenesDocument('{"scenes":{}}'), false)
-assert.equal(model.isAudioRulesDocument('{"appRules":[],"devices":{}}'), true)
-assert.equal(model.isAudioRulesDocument('{"appRules":{}}'), false)
-assert.equal(model.isAudioRulesDocument('{"outputGroups":{}}'), false)
-assert.equal(model.isAudioRulesDocument('x'.repeat(1048577)), false)
-assert.deepEqual(
-  model.parseAudioScenes(JSON.stringify({
-    version: 1,
-    scenes: [{
-      name: 'Desk',
-      defaults: { output: 'speakers', input: 'mic' },
-      devices: [
-        { name: 'speakers', direction: 'output', volume: 0.5, muted: true, balance: 0 },
-        { name: 'mic', direction: 'input', volume: 1, muted: true, balance: 0 }
-      ],
-      ports: [],
-      profiles: [
-        { card: 'bluez_card.test', profile: 'a2dp-aac' },
-        { card: 'alsa_card.test', profile: 'off' }
-      ]
-    }]
-  })).scenes[0],
-  {
-    name: 'Desk',
-    savedAt: '',
-    defaults: { output: 'speakers', input: 'mic' },
-    devices: [
-      // Output muting is never restored: a scene must play audibly.
-      { name: 'speakers', direction: 'output', volume: 0.5, muted: false, balance: 0 },
-      { name: 'mic', direction: 'input', volume: 1, muted: true, balance: 0 }
-    ],
-    ports: [],
-    // "off" is never stored: scenes never power cards down.
-    profiles: [{ card: 'bluez_card.test', profile: 'a2dp-aac' }]
-  })
-const prototypeScenes = model.parseAudioScenes(JSON.stringify({
-  scenes: [
-    { name: '__proto__' },
-    { name: 'constructor' },
-    { name: '__proto__' }
-  ]
-}))
-assert.deepEqual(prototypeScenes.scenes.map(scene => scene.name), ['__proto__', 'constructor'])
-const sanitizedScene = model.sanitizeSceneEntry({
-  name: '  Desk\nScene  ',
-  defaults: { output: 'speakers', input: ' mic\n' },
-  devices: [
-    { name: 'bad', direction: 'sideways' },
-    { name: ' speakers\n', direction: 'output', volume: 0.5, muted: true },
-    { name: 'speakers', direction: 'output', volume: Infinity, muted: true },
-    { name: 'speakers', direction: 'output', volume: 0.25, muted: false }
-  ],
-  ports: [
-    { endpoint: 'speakers', direction: 'sideways', value: 'ignored' },
-    { endpoint: 'speakers', direction: 'output', value: 'headphones' },
-    { endpoint: 'speakers', direction: 'output', value: ' ignored\t' }
-  ],
-  profiles: [{ card: 'card.one', profile: 'stereo' }]
-})
-assert.equal(sanitizedScene.name, 'Desk Scene')
-assert.deepEqual(sanitizedScene.defaults, { output: 'speakers', input: '' })
-assert.deepEqual(sanitizedScene.devices, [
-  { name: 'speakers', direction: 'output', volume: 1, muted: false, balance: 0 }
-])
-assert.deepEqual(sanitizedScene.ports, [
-  { endpoint: 'speakers', direction: 'output', value: 'headphones' }
-])
-assert.deepEqual(model.audioScenePlan(sanitizedScene).map(step => step.kind), [
-  'profile', 'settle', 'port', 'device', 'default'
-])
 const audioPreferences = model.parseAudioPreferences(JSON.stringify({
   defaults: { output: 'headphones', input: 'headset-microphone' },
   bluetoothProfiles: { '00:11:22:33:44:55': 'a2dp-aac' }
@@ -295,12 +207,6 @@ assert.deepEqual(model.parseAudioPreferences(JSON.stringify({
   defaults: { output: '', input: ' input ' },
   bluetoothProfiles: { '001122334455': 'first-profile' }
 })
-assert.equal(model.preferredAudioProfile(
-  audioPreferences, '00-11-22-33-44-55', cards[0].profiles, cards[0].activeProfile
-), 'a2dp-aac')
-assert.equal(model.preferredAudioProfile(
-  audioPreferences, '00:11:22:33:44:55', [{ value: 'headset-msbc' }], 'headset-msbc'
-), 'headset-msbc')
 assert.equal(model.preferredAudioNodeName(
   audioPreferences, 'output', { name: 'speakers' }, [{ name: 'headphones' }]
 ), 'headphones')
@@ -317,12 +223,6 @@ assert.equal(model.preferredAudioNodeName(
     { name: 'headphones' }, { name: 'speakers' }, { name: 'speakers' }
   ]
 ), '')
-const oversizedProfileOptions = Array.from({ length: 300 }, (_, index) => ({
-  value: index === 256 ? 'a2dp-aac' : 'profile-' + index
-}))
-assert.equal(model.preferredAudioProfile(
-  audioPreferences, '00:11:22:33:44:55', oversizedProfileOptions, 'fallback'
-), 'fallback')
 const oversizedNodes = Array.from({ length: 4200 }, (_, index) => ({
   name: index === 4096 ? 'headphones' : 'node-' + index
 }))
@@ -333,11 +233,6 @@ assert.equal(model.balanceValue(1, 1), 0)
 assert.equal(model.balanceValue(1, 0.25), -0.75)
 assert.equal(model.balanceValue(0.5, 1), 0.5)
 assert.equal(model.balanceValue(NaN, Infinity), 0)
-assert.deepEqual(model.applyBalance([0.8, 0.8], 0, 1, 0.25), [0.6000000000000001, 0.8])
-assert.deepEqual(model.applyBalance([0.8, 0.8], 0, 1, -1), [0.8, 0])
-assert.deepEqual(model.applyBalance([NaN, Infinity], 0, 1, NaN), [0, 0])
-const oversizedChannels = new Array(65).fill(1)
-assert.equal(model.applyBalance(oversizedChannels, 0, 1, 0.5), oversizedChannels)
 assert.deepEqual([0.2, 0.6, 1].map(volume =>
   model.audioMeterLevel([], [], 1, volume, false)), [0.2, 0.6, 1])
 assert.ok(Math.abs(model.audioMeterLevel([0.8, 0.4], [0.25, 0.75], 0, 0, false) - 0.3) < 1e-9)
@@ -350,8 +245,6 @@ assert.equal(model.outputVolumeName(1.25, false), 'Concert hall')
 assert.equal(model.outputVolumeName(1.26, false), 'Overdrive')
 assert.equal(model.outputVolumeName(NaN, false), 'Silenced')
 assert.equal(model.outputVolumeName(Infinity, false), 'Silenced')
-assert.equal(cards.length, 1)
-assert.equal(model.hasBluetoothCards(cards), true)
 assert.deepEqual(model.audioCardsByBluetooth(cards, true).map(card => card.label), ['Headphones'])
 assert.deepEqual(model.audioProfileOptions(cards[0]), [
   { value: 'a2dp-aac', label: 'High fidelity (AAC, no microphone)' },
@@ -698,7 +591,7 @@ assert.equal(model.outputVolumeNode([{...hardwareOutput, properties:{'object.ser
 assert.equal(model.outputVolumeNode([hardwareOutput], {...selectedDsp, properties:{'object.serial':'301'}}, outputState).id, 30)
 assert.equal(model.outputVolumeNode([hardwareOutput], selectedDsp, null), selectedDsp)
 assert.equal(model.outputVolumeNode(Array(4097).fill(hardwareOutput), selectedDsp, outputState), selectedDsp)
-const diagnostics = model.parseAudioDiagnostics(JSON.stringify({
+const diagnostics = model.normalizeAudioDiagnostics({
   version: 1,
   healthy: true,
   graph: { available: true, rate: 48000, quantum: 256, latencyMs: 5.3, loadPercent: 7, errors: 2 },
@@ -707,16 +600,15 @@ const diagnostics = model.parseAudioDiagnostics(JSON.stringify({
   routes: [{ direction: 'playback', labels: ['Browser', 'Filter', 'Speakers'] }],
   capabilities: { speakerTest: true, supportReport: true, clipboard: true, recovery: true },
   warnings: ['XRUN reported', 'XRUN reported']
-}))
+})
 assert.equal(diagnostics.valid, true)
 assert.equal(diagnostics.value.graph.quantum, 256)
 assert.deepEqual(diagnostics.value.routes[0].labels, ['Browser', 'Filter', 'Speakers'])
 assert.deepEqual(diagnostics.value.warnings, ['XRUN reported'])
-assert.equal(model.parseAudioDiagnostics('not json').valid, false)
 const diagnosticObject = JSON.parse(JSON.stringify(diagnostics.value))
 const diagnosticBefore = JSON.stringify(diagnosticObject)
 assert.deepEqual(model.normalizeAudioDiagnostics(diagnosticObject),
-  model.parseAudioDiagnostics(diagnosticBefore))
+  diagnostics)
 assert.equal(JSON.stringify(diagnosticObject), diagnosticBefore,
   'diagnostic normalization must not mutate a shared service snapshot')
 for (const invalid of [null, [], {}, { version: 2, graph: {} }])
