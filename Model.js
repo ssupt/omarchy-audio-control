@@ -1386,6 +1386,14 @@ function nodeLabel(node) {
     var p = nodeProps(node)
     var nickname = friendlyDeviceLabel(node.nickname || node.nick
       || p["node.nick"] || p["device.profile.description"] || "")
+    // UCM cards that expose several ports (e.g. Scarlett "Input 1"/"Input 2")
+    // give every node the card name as its nick; append the port so they
+    // stay distinguishable.
+    var cardName = friendlyDeviceLabel(p["alsa.card_name"] || "")
+    var port = friendlyDeviceLabel(p["device.profile.description"] || "")
+    if (nickname && String(p["api.alsa.open.ucm"]) === "true" && nickname === cardName
+        && port && port !== nickname)
+      return nickname + " · " + port
     if (nickname) return nickname
     return friendlyDeviceLabel(node.description || p["node.description"]
       || nodeName(node) || "Unknown")
