@@ -1,0 +1,9 @@
+/backend/target/
+
+
+/test/integration/__pycache__/
+/packaging/__pycache__/
+/artifacts/
+
+# Development reports live in the sibling omarchy-audio-control-docs directory.
+/docs/
