@@ -614,6 +614,30 @@ assert.equal(JSON.stringify(diagnosticObject), diagnosticBefore,
 for (const invalid of [null, [], {}, { version: 2, graph: {} }])
   assert.equal(model.normalizeAudioDiagnostics(invalid).valid, false)
 console.log('PASS: profile and routing model')
+const labelNode = properties => ({ name: properties['node.name'], ready: true, properties })
+const scarlettInput = port => labelNode({
+  'node.name': 'alsa_input.usb-Focusrite_Scarlett_2i2_USB-00.HiFi__Mic' + port + '__source',
+  'node.nick': 'Scarlett 2i2 USB',
+  'alsa.card_name': 'Scarlett 2i2 USB',
+  'api.alsa.open.ucm': 'true',
+  'device.profile.description': 'Input ' + port + ' Mic/Inst/Line'
+})
+assert.equal(model.nodeLabel(scarlettInput(1)), 'Scarlett 2i2 USB · Input 1 Mic/Inst/Line')
+assert.equal(model.nodeLabel(scarlettInput(2)), 'Scarlett 2i2 USB · Input 2 Mic/Inst/Line')
+assert.equal(model.nodeLabel(labelNode({
+  'node.name': 'alsa_output.pci-0000_00_1f.3-platform-skl_hda_dsp_generic.HiFi__Headphones__sink',
+  'node.nick': 'Headphones',
+  'alsa.card_name': 'sof-hda-dsp',
+  'api.alsa.open.ucm': 'true',
+  'device.profile.description': 'Headphones'
+})), 'Headphones')
+assert.equal(model.nodeLabel(labelNode({
+  'node.name': 'alsa_input.usb-046d_Logitech_BRIO-03.analog-stereo',
+  'node.nick': 'Logitech BRIO',
+  'alsa.card_name': 'Logitech BRIO',
+  'device.profile.description': 'Analog Stereo'
+})), 'Logitech BRIO')
+console.log('PASS: multi-port UCM device labels')
 JS
 
 diagnostics_fixture="$TEST_DIR/fixtures/diagnostics"
