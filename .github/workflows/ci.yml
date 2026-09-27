@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   test:
-    name: Test and validate plugin
+    name: Test and validate plugin (${{ matrix.rust }})
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
@@ -138,3 +138,20 @@ jobs:
           path: ${{ runner.temp }}/omarchy-audio-control-linux-x86_64.tar.gz
           if-no-files-found: error
           retention-days: 14
+
+  required-checks:
+    name: Test and validate plugin
+    needs: [test, qml-runtime, release-candidate]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - name: Require every validation job to pass
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+          RUNTIME_RESULT: ${{ needs.qml-runtime.result }}
+          PACKAGE_RESULT: ${{ needs.release-candidate.result }}
+        run: |
+          test "$TEST_RESULT" = success
+          test "$RUNTIME_RESULT" = success
+          test "$PACKAGE_RESULT" = success
