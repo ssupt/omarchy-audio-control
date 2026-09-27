@@ -1,4 +1,0 @@
-#!/bin/bash
-
-[[ -n ${AUDIO_CONTROL_CLIPBOARD_LOG:-} ]] || exit 1
-command cat >"$AUDIO_CONTROL_CLIPBOARD_LOG"

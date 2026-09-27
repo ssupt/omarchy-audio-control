@@ -1,0 +1,11 @@
+[Unit]
+Description=Advanced Audio Control backend socket
+
+[Socket]
+ListenStream=%t/omarchy-audio-control/backend.sock
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

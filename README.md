@@ -1,180 +1,145 @@
 # Advanced Audio Control for Omarchy
 
-Advanced Audio Control expands Omarchy Quattro's built-in audio widget with
-controls for routing applications and configuring PipeWire audio devices.
+Advanced Audio Control brings persistent routing, saved setups, and device
+controls to Omarchy's audio panel.
 
-It follows Omarchy's visual language and preserves the familiar quick controls
-instead of introducing a separate mixer application.
+Choose which output or microphone each application uses, play through several
+outputs together, and restore saved device settings. Keep Omarchy's familiar
+quick mixer for everyday volume changes, with an advanced window for profiles,
+Bluetooth modes, microphone testing, and diagnostics.
 
-## Features
+Useful when you regularly switch between speakers, headphones, USB audio
+devices, or different setups for music and calls.
 
-- Remember each application's chosen output across stream and application restarts.
-- Route recording applications to a preferred microphone and control their gain.
-- Show application icons and live playback/recording activity meters.
-- Optionally extend output volume to 150% and adjust stereo channel balance.
-- Select endpoint ports when a live device exposes multiple usable paths.
-- Configure device profiles and Bluetooth codecs in separate keyboard-navigable tabs.
-- Control when Bluetooth headsets switch into communication mode.
-- Choose whether automatic Bluetooth profile selection favors quality or latency.
-- Configure supported WirePlumber safety policies, including mono audio, pause on
-  output loss, disconnect protection, and HDMI channel detection.
-- Set safe starting volumes for new devices and playback or recording applications.
-- Keep microphone use visible on the bar, including the recording applications and
-  a persistent app-count badge even while the microphone is muted.
-- Optionally notify when a new application starts capturing, while respecting
-  Omarchy's Do Not Disturb setting and suppressing shell-startup noise.
-- Show live microphone peak hold and a latched clipping warning in the quick mixer
-  and recording badge.
-- Record a private five-second microphone test, then explicitly play it back or
-  discard it; the temporary clip is removed when the Audio window closes.
-- Save the whole setup as an audio scene and restore it with one click from the
-  quick mixer: defaults, device volumes and balance, ports, and card profiles.
-  Scenes never restore output mutes and never power cards off; devices that are
-  absent are skipped and reported.
-- Pin any application to a device with offline routing rules that are enforced
-  whenever the application starts and the device is present.
-- Create named output groups that play through two to eight connected outputs
-  at once, then use them as defaults or per-application destinations.
-- Rename devices with aliases, mark favorites so they sort first, and hide
-  devices everywhere.
-- Inspect PipeWire and WirePlumber health from a Diagnostics tab: graph rate,
-  quantum-derived scheduling latency, DSP load, XRUN/error counters, service
-  state, negotiated device formats and channel maps, and active routes through
-  filters to hardware.
-- Identify every reported speaker channel at a conservative level, copy a
-  privacy-conscious support report, and launch Omarchy's official audio
-  recovery behind an explicit confirmation.
+## What it adds to Omarchy
 
-The bar audio icon uses left-click for the quick mixer, middle-click to mute or
-unmute the microphone, right-click to mute or unmute all audio, and the wheel to
-adjust output volume. Hovering it lists applications with active microphone access.
+Compared with the [stock audio panel in Omarchy 4.0.4](https://github.com/omacom/omarchy/blob/c668141e9c42b13c80c9ca4ea108e11708c5e8a5/shell/plugins/panels/audio/Panel.qml):
 
-`Super+Ctrl+A` opens the same quick mixer as Omarchy's built-in audio widget.
-Use the gear in that pullout—or **Setup > Audio**—for the advanced window.
+| Stock panel | Advanced Audio Control adds |
+| --- | --- |
+| Output, microphone, and application volume; device selection | A quick mixer plus persistent output and microphone choices for each application |
+| Current device controls | Saved scenes for defaults, volume, balance, ports, and profiles |
+| One selected output | Groups of two to eight outputs, each with its own volume control |
 
-The optional [Advanced Bluetooth Audio](https://github.com/ssupt/omarchy-bluetooth-audio)
-companion brings the same codec controls into Omarchy's Bluetooth panel while
-preserving its native pairing, discovery, and connection behavior. When both
-plugins are enabled, codec and preferred-device choices are shared immediately
-through `~/.config/omarchy/audio-preferences.json`.
+For example:
 
-More plugins by `ssupt`: [omarchy-plugins](https://github.com/ssupt/omarchy-plugins).
+- Send music to the speakers while a call uses headphones: set each application's
+  output to **Always use** its chosen device.
+- Save a **Desk** scene with USB speakers and a desk microphone, and a
+  **Headphones** scene for private listening; restore either setup from the
+  advanced window.
+- With [Advanced Bluetooth Audio](https://github.com/ssupt/omarchy-bluetooth-audio),
+  let a headset reconnect without replacing your microphone: choose **Manual**
+  or **Output** under **Audio on connect** for that device.
 
-## Requirements
+## Screenshots
 
-- Omarchy Quattro
-- PipeWire with WirePlumber (`pactl`, `wpctl`, `pw-metadata`, `pw-dump`,
-  `pw-top`, `pw-record`, and `pw-play`)
-- ALSA utilities (`speaker-test`) and systemd user services (`systemctl`)
-- `notify-send` for optional capture-start notifications
-- `jq`, `hyprctl`, `timeout`, `flock`, and `wl-copy`
+<table>
+  <tr><th>Quick mixer</th><th>Advanced window</th></tr>
+  <tr>
+    <td valign="top"><a href="screenshot-mixer.png"><img src="screenshot-mixer.png" width="348" alt="Quick mixer with device, microphone and application volume controls"></a></td>
+    <td valign="top"><a href="screenshot-advanced.png"><img src="screenshot-advanced.png" width="684" alt="Advanced window with device profiles, balance, microphone test and settings tabs"></a></td>
+  </tr>
+</table>
 
-These commands are present in a standard Omarchy installation. Routine controls
-do not require `sudo`, and the plugin does not install a background service.
-Omarchy recovery may request authorization only when it needs to reset a stuck
-USB audio device.
+## Everyday controls
 
-Application routes use WirePlumber's native stream-target restoration. Choosing
-**Follow default output** removes the remembered target; choosing **Always use**
-an output restores that choice whenever the application creates a new stream.
-Recording routes follow the same behavior for microphones. Explicitly routed
-recording applications stay pinned when the default input changes.
+| Action | Control |
+| --- | --- |
+| Open mixer | Left-click the audio icon or press `Super+Ctrl+A` |
+| Change output volume | Scroll over the audio icon |
+| Mute microphone | Middle-click the audio icon |
+| Mute all audio | Right-click the audio icon |
+| See microphone users | Hover over the audio icon |
+| Open advanced window | Select the mixer gear |
 
-The Policy tab discovers settings from the installed WirePlumber version, so it
-only shows controls the system supports. Changes use WirePlumber's persistent
-settings API. Starting-volume percentages are converted to its cubic storage
-scale before they are saved, keeping the displayed values perceptually accurate.
+For an application, **Follow default output** clears a saved destination;
+**Always use** keeps the chosen device across restarts. Recording applications
+can also stay pinned to a microphone. The advanced window also offers device
+aliases and favorites, stereo balance, supported Bluetooth modes, microphone
+activity and a five-second record-and-playback test, speaker identification,
+audio recovery, and diagnostics.
 
-Capture-start notifications can be disabled under **Policy > Microphone privacy**.
-Normal notification urgency lets Omarchy's notification service honor Do Not
-Disturb. The microphone test records only after an explicit action, stores its
-clip with private permissions in the user's runtime directory, never plays it
-automatically, and deletes it on discard or when the Audio window closes. Stopping
-before five seconds keeps the audio recorded so far and makes it ready to play.
+An output group can drift when its devices use separate clocks, especially with
+Bluetooth. Microphone tests start only when requested; clips stay in memory
+until discarded or until the advanced window closes.
 
-Scenes live in `~/.config/omarchy/audio-scenes.json` and routing rules and device
-preferences in `~/.config/omarchy/audio-rules.json`; both are plugin-owned and
-edited through the **Scenes** and **Routing** tabs. Manual route changes on a
-pinned application update its rule, and choosing follow-default deletes it.
-Hidden devices disappear from the mixer until shown again in the Routing tab.
+## Install
 
-Output groups are configured under **Routing > Output groups**. A live group
-behaves like one regular output throughout the plugin, so it can be selected as
-the default, used by a running stream or saved as an offline application rule.
-The quick mixer marks these destinations as **GROUP**. If a member disconnects,
-the definition stays saved and the Routing tab names the missing output. If the
-group was selected, following applications move to the first surviving member
-before the broken virtual output disappears from the mixer. The group is
-restored automatically when every member is available again. Each group card
-also exposes member-level sliders; these change the physical device volumes, so
-the same levels apply when those devices are used outside the group.
-The plugin creates PipeWire's
-[`module-combine-sink`](https://docs.pipewire.org/page_pulse_module_combine_sink.html)
-only while the group exists and reconciles its own marked modules without a
-background service. Updating or deleting a group first requires moving the
-default and active applications away from it. Outputs driven by separate clocks,
-especially Bluetooth devices, can drift slightly; this is a limitation of
-combining independent hardware rather than a UI synchronization issue.
-
-The Diagnostics tab refreshes only while it is visible. Its support report
-contains versions, health counters, human-readable device formats, service
-states, and active route labels; it excludes logs, usernames, hostnames,
-configuration files, and internal device names. The speaker test performs one
-finite channel-identification pass on the current default output and can be
-stopped immediately. Recovery never runs silently: after confirmation it opens
-`omarchy-restart-audio` in Omarchy's visible presentation terminal so USB-reset
-messages or authorization requests cannot be hidden by the shell.
-
-## Installation
+Requires **Omarchy Quattro on x86_64 Linux**, PipeWire and WirePlumber, with
+Omarchy's usual audio and desktop tools. Installation needs no Rust toolchain.
 
 ```bash
 omarchy plugin add https://github.com/ssupt/omarchy-audio-control.git --enable
-~/.config/omarchy/plugins/ssupt.audio-control/scripts/audio-menu-entry install
 ```
 
-The plugin replaces the built-in audio widget while it is enabled. Removing or
-disabling it restores Omarchy's original widget. The second command adds the
-optional **Setup > Audio** menu entry through Omarchy's user-menu extension.
-
-To add codec selection directly to the Bluetooth panel too:
-
-```bash
-omarchy plugin add https://github.com/ssupt/omarchy-bluetooth-audio.git --enable
-```
-
-## Updating
+Update or remove it:
 
 ```bash
 omarchy plugin update ssupt.audio-control
-```
-
-## Removing
-
-```bash
-~/.config/omarchy/plugins/ssupt.audio-control/scripts/audio-menu-entry remove
 omarchy plugin remove ssupt.audio-control
 ```
 
-Plugins run as unsandboxed code inside `omarchy-shell`. Review third-party
-plugin code before enabling it.
+Disabling or removing the plugin restores Omarchy's built-in audio widget.
+To add **Setup > Audio** to the menu, run:
 
-## Development
+```bash
+~/.config/omarchy/plugins/ssupt.audio-control/scripts/audio-menu-entry install
+```
+
+Use the same helper with `remove` before removing the plugin.
+
+## Saved settings
+
+Settings live under `~/.config/omarchy` (or `$XDG_CONFIG_HOME/omarchy`).
+Existing files and supported schemas are preserved.
+
+| File | What it remembers |
+| --- | --- |
+| `audio-control.json` | Output boost and capture notifications |
+| `audio-preferences.json` | Preferred devices and Bluetooth profiles, shared with the Bluetooth companion |
+| `audio-rules.json` | Application rules, device preferences, and output groups |
+| `audio-scenes.json` | Saved scenes |
+
+## Service architecture
+
+The interface uses Quickshell/QML. A Rust service keeps saved choices and
+in-progress changes alive when a panel closes or reloads. It coordinates audio
+changes with PipeWire and WirePlumber, then reports whether each requested
+change was confirmed, rejected, or left uncertain. The service controls audio;
+PipeWire still carries and mixes the sound.
+
+A controlled test against 0.8.1 measured over 99% less CPU with the advanced
+window open, using about 3 MiB more memory.
+
+If your Omarchy configuration directory is a symlink, restart the audio service
+after retargeting it so file watches follow the new location.
+
+## Contributing
+
+Edit `qml/`, `backend/src/`, and `scripts/`; `runtime/` contains generated QML.
+Builds require Rust/Cargo **1.85+**, libclang, pkg-config, and PipeWire and
+libpulse headers. Node.js, Python, jq, and Qt/Quickshell run the tests.
 
 ```bash
 ./test/all
-omarchy-plugin-validate .
+python3 packaging/build-release.py --output /tmp/omarchy-audio-release
+python3 packaging/build-release.py --check /tmp/omarchy-audio-release
+omarchy-plugin-validate /tmp/omarchy-audio-release
 ```
 
-The two entry points own presentation and keyboard navigation. Shared behavior
-stays outside them: `Model.js` contains pure, Node-tested transformations;
-`AudioRuntime.qml` owns paths; focused controllers own policy, saved-rule,
-scene, microphone-test, and diagnostics lifecycles; and `scripts/` contains
-the guarded system interactions. Diagnostics remain read-only until a user
-chooses a finite speaker test or confirms the official Omarchy recovery.
+Use a fresh directory outside the live plugin for each candidate. Commit the
+matching binary, release metadata, manifest, and generated runtime when changing
+runtime sources. CI also runs native audio, lifecycle, and upgrade tests under
+`test/integration/` with private audio devices and configuration.
 
-Advanced Audio Control is derived from Omarchy's built-in audio widget and is
-distributed under the same MIT license.
+For testing outside the shell, `scripts/audio-rust-backend install` and
+`uninstall` manage an optional systemd user service.
 
-## License
+The Bluetooth companion calls `default.compat` with a node ID and name; the
+service verifies the live endpoint and reports the outcome. Both plugins share
+`audio-preferences.json`, while compatibility helpers support older companions.
+Coordinate releases when changing that shared contract.
 
-MIT
+[MIT license](LICENSE), matching Omarchy's original audio widget.
+More plugins: [omarchy-plugins](https://github.com/ssupt/omarchy-plugins).

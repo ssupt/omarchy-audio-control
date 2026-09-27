@@ -11,6 +11,10 @@ set -euo pipefail
   exit 1
 }
 
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$script_dir/.audio-common"
+audio_acquire_mutation_lock || exit 1
+
 sink_name=$1
 speaker_command=${AUDIO_CONTROL_SPEAKER_TEST_COMMAND:-speaker-test}
 command -v jq >/dev/null
