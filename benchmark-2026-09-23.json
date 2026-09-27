@@ -1,0 +1,1356 @@
+{
+  "secondsPerScenario": 10.0,
+  "latencyMethod": "QML dispatch timestamp to independent pw-dump channelVolumes observation; 1 ms clock resolution, includes observer delivery, no physical audio measurement",
+  "runs": [
+    {
+      "label": "legacy",
+      "round": 1,
+      "version": "0.8.1",
+      "buildId": null,
+      "measurements": [
+        {
+          "scenario": "idle",
+          "durationSeconds": 10.004,
+          "cpuPercentOneCore": 0.311,
+          "medianPssKiB": 60122.0,
+          "helperLaunches": 1,
+          "helpers": {
+            "audio-resolve-output-sink": 1
+          }
+        },
+        {
+          "scenario": "advanced-open",
+          "durationSeconds": 10.005,
+          "cpuPercentOneCore": 3.225,
+          "medianPssKiB": 76789.0,
+          "helperLaunches": 13,
+          "helpers": {
+            "audio-profiles": 5,
+            "audio-ports": 5,
+            "audio-resolve-output-sink": 2,
+            "audio-output-groups": 1
+          }
+        },
+        {
+          "scenario": "closed-after-open",
+          "durationSeconds": 10.005,
+          "cpuPercentOneCore": 0.493,
+          "medianPssKiB": 80457.0,
+          "helperLaunches": 1,
+          "helpers": {
+            "audio-resolve-output-sink": 1
+          }
+        }
+      ],
+      "helpersAcrossRun": {
+        "audio-resolve-output-sink": 8,
+        "audio-output-groups": 4,
+        "audio-app-rules": 4,
+        "audio-microphone-test": 2,
+        "prepare-advanced-window": 1,
+        "place-advanced-window": 1,
+        "audio-profiles": 10,
+        "audio-bluetooth-autoswitch": 1,
+        "audio-ports": 10,
+        "audio-policy-settings": 1,
+        "audio-bluetooth-profile-preference": 1
+      },
+      "volumeObservationLatencyMs": [
+        1,
+        17,
+        17,
+        16,
+        17,
+        17,
+        16,
+        16,
+        16,
+        15,
+        16,
+        16,
+        16,
+        16,
+        15,
+        15,
+        16,
+        16,
+        15,
+        16,
+        15,
+        16,
+        15,
+        15,
+        16,
+        17,
+        16,
+        16,
+        17,
+        16,
+        15,
+        16,
+        16,
+        16,
+        17,
+        17,
+        16,
+        16,
+        17,
+        15
+      ],
+      "serverObservedVolumeLatency": {
+        "summary": {
+          "samples": 20,
+          "medianMs": 1.0,
+          "p95Ms": 1,
+          "maxMs": 4
+        },
+        "samples": [
+          {
+            "sentAtMs": 1790193596357,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193596357,
+            "monotonicNs": 136159147750186,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 0
+          },
+          {
+            "sentAtMs": 1790193596439,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193596440,
+            "monotonicNs": 136159230534397,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193596531,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193596531,
+            "monotonicNs": 136159321612139,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 0
+          },
+          {
+            "sentAtMs": 1790193596612,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193596613,
+            "monotonicNs": 136159403550902,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193596694,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193596698,
+            "monotonicNs": 136159487848494,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 4
+          },
+          {
+            "sentAtMs": 1790193596777,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193596777,
+            "monotonicNs": 136159567703834,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 0
+          },
+          {
+            "sentAtMs": 1790193596859,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193596859,
+            "monotonicNs": 136159649564012,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 0
+          },
+          {
+            "sentAtMs": 1790193596944,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193596944,
+            "monotonicNs": 136159734741911,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 0
+          },
+          {
+            "sentAtMs": 1790193597029,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193597030,
+            "monotonicNs": 136159820765262,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193597113,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193597114,
+            "monotonicNs": 136159904372511,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193597196,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193597197,
+            "monotonicNs": 136159987596477,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193597278,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193597279,
+            "monotonicNs": 136160069675469,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193597364,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193597365,
+            "monotonicNs": 136160155239503,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193597447,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193597448,
+            "monotonicNs": 136160238448116,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193597527,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193597527,
+            "monotonicNs": 136160317559880,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 0
+          },
+          {
+            "sentAtMs": 1790193597613,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193597614,
+            "monotonicNs": 136160404230208,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193597698,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193597699,
+            "monotonicNs": 136160489506164,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193597781,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193597782,
+            "monotonicNs": 136160572356520,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193597864,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193597864,
+            "monotonicNs": 136160654734722,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 0
+          },
+          {
+            "sentAtMs": 1790193597951,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193597952,
+            "monotonicNs": 136160742372035,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          }
+        ],
+        "undispatchedCommandRejected": true
+      }
+    },
+    {
+      "label": "rust",
+      "round": 1,
+      "version": "0.9.0-dev.27",
+      "buildId": "354ed9ac2bbed2dda2698c2fff1098a937fd87f3f4a2643340a8fe7d3ab95461",
+      "measurements": [
+        {
+          "scenario": "idle",
+          "durationSeconds": 10.005,
+          "cpuPercentOneCore": 0.013,
+          "medianPssKiB": 65926.0,
+          "helperLaunches": 0,
+          "helpers": {}
+        },
+        {
+          "scenario": "advanced-open",
+          "durationSeconds": 10.005,
+          "cpuPercentOneCore": 0.016,
+          "medianPssKiB": 79429.0,
+          "helperLaunches": 0,
+          "helpers": {}
+        },
+        {
+          "scenario": "closed-after-open",
+          "durationSeconds": 10.007,
+          "cpuPercentOneCore": 0.013,
+          "medianPssKiB": 82003.0,
+          "helperLaunches": 0,
+          "helpers": {}
+        }
+      ],
+      "helpersAcrossRun": {
+        "prepare-advanced-window": 1,
+        "place-advanced-window": 1
+      },
+      "volumeObservationLatencyMs": [
+        19,
+        16,
+        16,
+        15,
+        16,
+        16,
+        15,
+        15,
+        15,
+        16,
+        16,
+        16,
+        15,
+        16,
+        16,
+        16,
+        15,
+        16,
+        17,
+        15,
+        15,
+        17,
+        16,
+        15,
+        16,
+        15,
+        17,
+        16,
+        15,
+        17,
+        16,
+        16,
+        17,
+        17,
+        15,
+        16,
+        15,
+        16,
+        16,
+        16
+      ],
+      "serverObservedVolumeLatency": {
+        "summary": {
+          "samples": 20,
+          "medianMs": 1.0,
+          "p95Ms": 2,
+          "maxMs": 2
+        },
+        "samples": [
+          {
+            "sentAtMs": 1790193643631,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193643632,
+            "monotonicNs": 136206422203378,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193643714,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193643715,
+            "monotonicNs": 136206505102298,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193643805,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193643806,
+            "monotonicNs": 136206596205164,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193643889,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193643890,
+            "monotonicNs": 136206680135224,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193643969,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193643970,
+            "monotonicNs": 136206760410920,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193644053,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193644054,
+            "monotonicNs": 136206844593205,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193644133,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193644134,
+            "monotonicNs": 136206924183943,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193644215,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193644216,
+            "monotonicNs": 136207006062707,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193644290,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193644292,
+            "monotonicNs": 136207081943270,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 2
+          },
+          {
+            "sentAtMs": 1790193644375,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193644377,
+            "monotonicNs": 136207167037252,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 2
+          },
+          {
+            "sentAtMs": 1790193644459,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193644460,
+            "monotonicNs": 136207250745429,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193644550,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193644551,
+            "monotonicNs": 136207341250765,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193644629,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193644631,
+            "monotonicNs": 136207421013669,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 2
+          },
+          {
+            "sentAtMs": 1790193644716,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193644717,
+            "monotonicNs": 136207507409022,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193644796,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193644798,
+            "monotonicNs": 136207588112677,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 2
+          },
+          {
+            "sentAtMs": 1790193644880,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193644881,
+            "monotonicNs": 136207671500549,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193644964,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193644965,
+            "monotonicNs": 136207755379127,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193645045,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193645047,
+            "monotonicNs": 136207836971268,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 2
+          },
+          {
+            "sentAtMs": 1790193645130,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193645131,
+            "monotonicNs": 136207921668275,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193645212,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193645213,
+            "monotonicNs": 136208003012012,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          }
+        ],
+        "undispatchedCommandRejected": true
+      }
+    },
+    {
+      "label": "rust",
+      "round": 2,
+      "version": "0.9.0-dev.27",
+      "buildId": "354ed9ac2bbed2dda2698c2fff1098a937fd87f3f4a2643340a8fe7d3ab95461",
+      "measurements": [
+        {
+          "scenario": "idle",
+          "durationSeconds": 10.004,
+          "cpuPercentOneCore": 0.003,
+          "medianPssKiB": 66410.0,
+          "helperLaunches": 0,
+          "helpers": {}
+        },
+        {
+          "scenario": "advanced-open",
+          "durationSeconds": 10.005,
+          "cpuPercentOneCore": 0.015,
+          "medianPssKiB": 79895.0,
+          "helperLaunches": 0,
+          "helpers": {}
+        },
+        {
+          "scenario": "closed-after-open",
+          "durationSeconds": 10.006,
+          "cpuPercentOneCore": 0.01,
+          "medianPssKiB": 81962.0,
+          "helperLaunches": 0,
+          "helpers": {}
+        }
+      ],
+      "helpersAcrossRun": {
+        "prepare-advanced-window": 1,
+        "place-advanced-window": 1
+      },
+      "volumeObservationLatencyMs": [
+        2,
+        16,
+        16,
+        15,
+        16,
+        16,
+        16,
+        16,
+        16,
+        17,
+        16,
+        16,
+        16,
+        15,
+        16,
+        15,
+        15,
+        16,
+        15,
+        17,
+        16,
+        16,
+        15,
+        16,
+        15,
+        15,
+        15,
+        16,
+        15,
+        16,
+        16,
+        16,
+        17,
+        16,
+        15,
+        15,
+        16,
+        16,
+        16,
+        17
+      ],
+      "serverObservedVolumeLatency": {
+        "summary": {
+          "samples": 20,
+          "medianMs": 1.0,
+          "p95Ms": 2,
+          "maxMs": 2
+        },
+        "samples": [
+          {
+            "sentAtMs": 1790193690804,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193690805,
+            "monotonicNs": 136253595652378,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193690893,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193690894,
+            "monotonicNs": 136253684755460,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193690972,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193690973,
+            "monotonicNs": 136253763422844,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193691058,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193691059,
+            "monotonicNs": 136253849685210,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193691140,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193691141,
+            "monotonicNs": 136253931621666,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193691222,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193691224,
+            "monotonicNs": 136254013985068,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 2
+          },
+          {
+            "sentAtMs": 1790193691304,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193691305,
+            "monotonicNs": 136254095486047,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193691387,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193691388,
+            "monotonicNs": 136254178768718,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193691473,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193691475,
+            "monotonicNs": 136254264902109,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 2
+          },
+          {
+            "sentAtMs": 1790193691556,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193691557,
+            "monotonicNs": 136254347701095,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193691640,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193691641,
+            "monotonicNs": 136254431685288,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193691723,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193691724,
+            "monotonicNs": 136254514266103,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193691806,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193691807,
+            "monotonicNs": 136254596936182,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193691885,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193691886,
+            "monotonicNs": 136254676152294,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193691968,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193691969,
+            "monotonicNs": 136254759635194,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193692055,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193692056,
+            "monotonicNs": 136254846262298,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193692138,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193692139,
+            "monotonicNs": 136254929320213,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193692221,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193692223,
+            "monotonicNs": 136255013083660,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 2
+          },
+          {
+            "sentAtMs": 1790193692303,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193692304,
+            "monotonicNs": 136255094299077,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193692390,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193692391,
+            "monotonicNs": 136255181279598,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          }
+        ],
+        "undispatchedCommandRejected": true
+      }
+    },
+    {
+      "label": "legacy",
+      "round": 2,
+      "version": "0.8.1",
+      "buildId": null,
+      "measurements": [
+        {
+          "scenario": "idle",
+          "durationSeconds": 10.005,
+          "cpuPercentOneCore": 0.0,
+          "medianPssKiB": 60186.0,
+          "helperLaunches": 0,
+          "helpers": {}
+        },
+        {
+          "scenario": "advanced-open",
+          "durationSeconds": 10.004,
+          "cpuPercentOneCore": 3.26,
+          "medianPssKiB": 76975.0,
+          "helperLaunches": 13,
+          "helpers": {
+            "audio-profiles": 5,
+            "audio-ports": 5,
+            "audio-resolve-output-sink": 2,
+            "audio-output-groups": 1
+          }
+        },
+        {
+          "scenario": "closed-after-open",
+          "durationSeconds": 10.006,
+          "cpuPercentOneCore": 0.538,
+          "medianPssKiB": 80562.0,
+          "helperLaunches": 1,
+          "helpers": {
+            "audio-resolve-output-sink": 1
+          }
+        }
+      ],
+      "helpersAcrossRun": {
+        "audio-resolve-output-sink": 8,
+        "audio-output-groups": 4,
+        "audio-app-rules": 4,
+        "audio-microphone-test": 2,
+        "prepare-advanced-window": 1,
+        "audio-profiles": 10,
+        "place-advanced-window": 1,
+        "audio-bluetooth-autoswitch": 1,
+        "audio-bluetooth-profile-preference": 1,
+        "audio-ports": 10,
+        "audio-policy-settings": 1
+      },
+      "volumeObservationLatencyMs": [
+        17,
+        16,
+        16,
+        16,
+        16,
+        16,
+        16,
+        17,
+        16,
+        16,
+        17,
+        16,
+        16,
+        17,
+        15,
+        15,
+        16,
+        15,
+        15,
+        16,
+        17,
+        15,
+        15,
+        15,
+        17,
+        16,
+        15,
+        16,
+        17,
+        16,
+        16,
+        15,
+        16,
+        15,
+        17,
+        17,
+        16,
+        16,
+        16,
+        17
+      ],
+      "serverObservedVolumeLatency": {
+        "summary": {
+          "samples": 20,
+          "medianMs": 1.0,
+          "p95Ms": 2,
+          "maxMs": 4
+        },
+        "samples": [
+          {
+            "sentAtMs": 1790193738032,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193738032,
+            "monotonicNs": 136300822688998,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 0
+          },
+          {
+            "sentAtMs": 1790193738118,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193738119,
+            "monotonicNs": 136300909452143,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193738199,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193738200,
+            "monotonicNs": 136300990734600,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193738281,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193738282,
+            "monotonicNs": 136301072401144,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193738363,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193738367,
+            "monotonicNs": 136301157277038,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 4
+          },
+          {
+            "sentAtMs": 1790193738453,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193738453,
+            "monotonicNs": 136301243693967,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 0
+          },
+          {
+            "sentAtMs": 1790193738533,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193738533,
+            "monotonicNs": 136301323773058,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 0
+          },
+          {
+            "sentAtMs": 1790193738615,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193738616,
+            "monotonicNs": 136301405984338,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193738701,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193738702,
+            "monotonicNs": 136301492399810,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193738784,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193738784,
+            "monotonicNs": 136301574649638,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 0
+          },
+          {
+            "sentAtMs": 1790193738866,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193738868,
+            "monotonicNs": 136301658102114,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 2
+          },
+          {
+            "sentAtMs": 1790193738949,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193738950,
+            "monotonicNs": 136301740496953,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193739031,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193739032,
+            "monotonicNs": 136301821886658,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193739118,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193739119,
+            "monotonicNs": 136301909034680,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193739201,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193739201,
+            "monotonicNs": 136301991742147,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 0
+          },
+          {
+            "sentAtMs": 1790193739290,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193739291,
+            "monotonicNs": 136302081044539,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193739369,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193739370,
+            "monotonicNs": 136302160077201,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 1
+          },
+          {
+            "sentAtMs": 1790193739456,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193739458,
+            "monotonicNs": 136302248116908,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 2
+          },
+          {
+            "sentAtMs": 1790193739541,
+            "targetVolume": 0.5,
+            "nodeId": 17,
+            "observedAtMs": 1790193739541,
+            "monotonicNs": 136302331809440,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "latencyMs": 0
+          },
+          {
+            "sentAtMs": 1790193739617,
+            "targetVolume": 0.3,
+            "nodeId": 17,
+            "observedAtMs": 1790193739618,
+            "monotonicNs": 136302408180940,
+            "channelVolumes": [
+              0.027,
+              0.027
+            ],
+            "latencyMs": 1
+          }
+        ],
+        "undispatchedCommandRejected": true
+      }
+    }
+  ]
+}
