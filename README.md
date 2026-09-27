@@ -13,7 +13,7 @@ devices, or different setups for music and calls.
 
 ## What it adds to Omarchy
 
-Compared with the [stock Omarchy Quattro audio panel](https://github.com/omacom/omarchy/blob/quattro/shell/plugins/panels/audio/Panel.qml),
+Compared with the [stock Omarchy Quattro audio panel](https://github.com/omacom/omarchy/blob/c5b4db77d68e7fbce5cf11120712ea322557e967/shell/plugins/panels/audio/Panel.qml),
 checked **27 September 2026**:
 
 | Stock panel | Advanced Audio Control adds |

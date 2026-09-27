@@ -1,9 +1,15 @@
 # Audio service performance observations — 23 September 2026
 
-This benchmark compared release 0.8.1 with a packaged `0.9.0-dev.27` Rust
-build on one machine. These numbers are observations, not a CI threshold or a
-promise for other hardware. The [raw measurements](benchmark-2026-09-23.json)
-include the individual runs and volume observations.
+This benchmark compared release 0.8.1 at
+[`71c0b6a695b6aa10c66d550e462c79919eebdf2d`](https://github.com/ssupt/omarchy-audio-control/commit/71c0b6a695b6aa10c66d550e462c79919eebdf2d)
+with a packaged `0.9.0-dev.27` Rust build at
+[`b5d2c041d14a9a6ad98f9cff229dbe7de02a1eee`](https://github.com/ssupt/omarchy-audio-control/commit/b5d2c041d14a9a6ad98f9cff229dbe7de02a1eee).
+The Rust build ID was
+`354ed9ac2bbed2dda2698c2fff1098a937fd87f3f4a2643340a8fe7d3ab95461`.
+The test host has a 13th Gen Intel Core i7-13700HX CPU (24 logical CPUs).
+These numbers are observations, not a CI threshold or a promise for other
+hardware. The [raw measurements](benchmark-2026-09-23.json) include the
+individual runs and volume observations.
 
 | Measurement | 0.8.1 | Rust candidate |
 | --- | ---: | ---: |
