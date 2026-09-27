@@ -158,7 +158,7 @@ cat >"$AUDIO_DIAGNOSTICS_TEST_DIR/clipboard"
         snapshot = report['snapshot']
         assert not report['error']
         assert snapshot['versions']['pipewire']
-        assert snapshot['versions']['plugin'] == json.loads((ROOT/'packaging/manifest.json').read_text())['version']
+        assert snapshot['versions']['plugin'] == json.loads((ROOT/'packaging/manifest.template.json').read_text())['version']
         assert snapshot['capabilities']['topology']
         assert any(d['name'] == 'audio_test_output' and d['channels'] == 2 for d in snapshot['devices']), snapshot
         assert any(d['name'] == 'audio_test_input' for d in snapshot['devices'])

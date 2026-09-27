@@ -29,7 +29,7 @@ fn main() {
         "backend/Cargo.toml".to_owned(),
         "backend/Cargo.lock".into(),
         "backend/build.rs".into(),
-        "packaging/manifest.json".into(),
+        "packaging/manifest.template.json".into(),
         "packaging/build-release.py".into(),
     ];
     collect_sources(root, &root.join("backend/src"), &mut files);

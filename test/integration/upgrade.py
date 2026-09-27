@@ -81,7 +81,7 @@ with tempfile.TemporaryDirectory(prefix='audio-upgrade-') as temporary:
     if not PREVIOUS:
         # Load the source URLs first, so the engine holds cached versions
         # before the manifest begins pointing to build-specific component URLs.
-        shutil.copy2(CANDIDATE/'packaging/manifest.json', plugin/'manifest.json')
+        shutil.copy2(CANDIDATE/'packaging/manifest.template.json', plugin/'manifest.json')
     config = work/'config/omarchy'
     config.mkdir(parents=True)
     preferences = config/'audio-preferences.json'

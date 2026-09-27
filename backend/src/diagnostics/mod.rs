@@ -102,7 +102,7 @@ pub async fn collect(native: &native::Handle) -> Result<Value> {
         setting("clock.quantum")
     };
     let manifest: Value =
-        serde_json::from_str(include_str!("../../../packaging/manifest.json")).unwrap();
+        serde_json::from_str(include_str!("../../../packaging/manifest.template.json")).unwrap();
     let snapshot = json!({
         "version":1, "generatedAt":timestamp(),
         "healthy": services_ok && endpoints_ok && !output.is_empty() && stats.errors == 0 && stats_ok,

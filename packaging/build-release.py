@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def source_id(root):
     names = ['backend/Cargo.toml', 'backend/Cargo.lock', 'backend/build.rs',
-             'packaging/manifest.json', 'packaging/build-release.py']
+             'packaging/manifest.template.json', 'packaging/build-release.py']
     for directory in ('qml', 'backend/src', 'scripts'):
         paths = ((root / directory).rglob('*') if directory != 'scripts'
                  else (root / directory).iterdir())
@@ -46,7 +46,7 @@ def runtime_files(root, build_id):
 
 
 def release_manifest(root, build_id):
-    manifest = json.loads((root/'packaging/manifest.json').read_text())
+    manifest = json.loads((root/'packaging/manifest.template.json').read_text())
     for kind, name in manifest['entryPoints'].items():
         if (not isinstance(name, str) or not name.startswith('qml/')
                 or not name.endswith('.qml') or '\\' in name

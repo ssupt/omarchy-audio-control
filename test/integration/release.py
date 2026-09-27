@@ -23,6 +23,8 @@ def rejected(check, message):
 
 with tempfile.TemporaryDirectory(prefix='audio-release-test-') as temporary:
     candidate = release.build(Path(temporary)/'plugin with spaces', binary)
+    manifests = [*candidate.glob('manifest.json'), *candidate.glob('*/manifest.json')]
+    assert manifests == [candidate/'manifest.json'], 'Marketplace discovers extra plugin manifests'
     assert not (candidate/'docs').exists(), 'Development documentation was included in the package'
     assert not list(candidate.glob('*.qml')) and not list(candidate.glob('*.js')), 'UI files leaked into the package root'
     metadata = release.verify(candidate)
@@ -64,7 +66,7 @@ with tempfile.TemporaryDirectory(prefix='audio-release-test-') as temporary:
     extra.write_text('import QtQuick\nItem {}\n')
     rejected(lambda: release.verify(candidate), 'Unexpected generated QML was accepted')
     extra.unlink()
-    source_manifest = candidate/'packaging/manifest.json'
+    source_manifest = candidate/'packaging/manifest.template.json'
     original_manifest = source_manifest.read_text()
     for entry in ('../Service.qml', 'qml/../Service.qml', 'qml//core/Service.qml', '/qml/core/Service.qml'):
         value = json.loads(original_manifest)

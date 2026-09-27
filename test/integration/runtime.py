@@ -18,7 +18,7 @@ from client import Client
 ROOT = Path(__file__).resolve().parents[2]
 BINARY = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / 'backend/target/debug/omarchy-audio-service'
 PACKAGED = BINARY == (ROOT/'bin/omarchy-audio-service').resolve()
-ENTRY_POINTS = json.loads((ROOT/('manifest.json' if PACKAGED else 'packaging/manifest.json')).read_text())['entryPoints']
+ENTRY_POINTS = json.loads((ROOT/('manifest.json' if PACKAGED else 'packaging/manifest.template.json')).read_text())['entryPoints']
 
 
 def until(predicate, timeout=10):
