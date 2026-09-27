@@ -110,9 +110,37 @@ changes with PipeWire and WirePlumber, then reports whether each requested
 change was confirmed, rejected, or left uncertain. The service controls audio;
 PipeWire still carries and mixes the sound.
 
-For implementation and release details, see [development](DEVELOPMENT.md)
-and [Bluetooth integration](INTEGRATION.md). The dated measurements and
-their method are in [performance](PERFORMANCE.md).
+A controlled test against 0.8.1 measured over 99% less CPU with the advanced
+window open, using about 3 MiB more memory.
+
+If your Omarchy configuration directory is a symlink, restart the audio service
+after retargeting it so file watches follow the new location.
+
+## Contributing
+
+Edit `qml/`, `backend/src/`, and `scripts/`; `runtime/` contains generated QML.
+Builds require Rust/Cargo **1.85+**, libclang, pkg-config, and PipeWire and
+libpulse headers. Node.js, Python, jq, and Qt/Quickshell run the tests.
+
+```bash
+./test/all
+python3 packaging/build-release.py --output /tmp/omarchy-audio-release
+python3 packaging/build-release.py --check /tmp/omarchy-audio-release
+omarchy-plugin-validate /tmp/omarchy-audio-release
+```
+
+Use a fresh directory outside the live plugin for each candidate. Commit the
+matching binary, release metadata, manifest, and generated runtime when changing
+runtime sources. CI also runs native audio, lifecycle, and upgrade tests under
+`test/integration/` with private audio devices and configuration.
+
+For testing outside the shell, `scripts/audio-rust-backend install` and
+`uninstall` manage an optional systemd user service.
+
+The Bluetooth companion calls `default.compat` with a node ID and name; the
+service verifies the live endpoint and reports the outcome. Both plugins share
+`audio-preferences.json`, while compatibility helpers support older companions.
+Coordinate releases when changing that shared contract.
 
 [MIT license](LICENSE), matching Omarchy's original audio widget.
 More plugins: [omarchy-plugins](https://github.com/ssupt/omarchy-plugins).
