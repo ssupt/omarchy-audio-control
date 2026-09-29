@@ -74,13 +74,38 @@ function isMonitorSource(node) {
 }
 
 // Quickshell's peak capture cannot start on a null-audio-sink presented as a
-// source. Keep the source selectable; only omit its silent input meter.
+// source, nor on a pro-audio source whose channels are all AUX positions: the
+// capture stream asks for standard positions and Quickshell logs an error for
+// every buffer. Keep the source selectable; only omit its input meter.
 function inputPeakSupported(node) {
   try {
-    return !!node && String(nodeProps(node)["factory.name"] || "") !== "support.null-audio-sink"
+    if (!node) return false
+    var properties = nodeProps(node)
+    if (String(properties["factory.name"] || "") === "support.null-audio-sink") return false
+    var positions = String(properties["audio.position"] || "").split(/[\s,\[\]]+/)
+      .filter(function(position) { return position !== "" })
+    return positions.length === 0 || !positions.every(function(position) {
+      return /^AUX\d+$/i.test(position)
+    })
   } catch (e) {
     return false
   }
+}
+
+// Visualizers and system-audio recorders capture a sink's monitor, not a
+// microphone, so they must not count as microphone use.
+function capturesSinkMonitor(node) {
+  try {
+    var value = nodeProps(node)["stream.capture.sink"]
+    return value === true || String(value) === "true"
+  } catch (e) {
+    return false
+  }
+}
+
+function microphoneRecordingStreams(streams) {
+  var values = Array.isArray(streams) ? streams : []
+  return values.filter(function(node) { return !capturesSinkMonitor(node) })
 }
 
 // Keep PipeWire classification in one place so every surface excludes the
@@ -1340,6 +1365,8 @@ if (typeof module !== "undefined") {
     isInternalAudioNode: isInternalAudioNode,
     isMonitorSource: isMonitorSource,
     inputPeakSupported: inputPeakSupported,
+    capturesSinkMonitor: capturesSinkMonitor,
+    microphoneRecordingStreams: microphoneRecordingStreams,
     classifyAudioNodes: classifyAudioNodes,
     listSnapshot: listSnapshot,
     hasOwn: hasOwn,

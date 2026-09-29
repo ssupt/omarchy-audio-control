@@ -403,6 +403,28 @@ assert.equal(model.inputPeakSupported({ ready: true, properties: {
 assert.equal(model.inputPeakSupported({ ready: true, properties: {
   'factory.name': 'api.alsa.pcm.source', 'media.class': 'Audio/Source'
 }}), true)
+assert.equal(model.inputPeakSupported({ ready: true, properties: {
+  'factory.name': 'api.alsa.pcm.source', 'media.class': 'Audio/Source',
+  'audio.position': '[ AUX0 ]'
+}}), false)
+assert.equal(model.inputPeakSupported({ ready: true, properties: {
+  'factory.name': 'api.alsa.pcm.source', 'audio.position': 'AUX0,AUX1,AUX2,AUX3'
+}}), false)
+assert.equal(model.inputPeakSupported({ ready: true, properties: {
+  'factory.name': 'api.alsa.pcm.source', 'audio.position': '[ MONO ]'
+}}), true)
+assert.equal(model.inputPeakSupported({ ready: true, properties: {
+  'factory.name': 'api.alsa.pcm.source', 'audio.position': 'FL,FR'
+}}), true)
+const visualizerStream = {
+  name: 'cava', isStream: true, isSink: false, ready: true, audio: {},
+  properties: { 'application.name': 'cava', 'stream.capture.sink': 'true' }
+}
+assert.equal(model.capturesSinkMonitor(visualizerStream), true)
+assert.equal(model.capturesSinkMonitor(recordingStream), false)
+assert.deepEqual(model.microphoneRecordingStreams([recordingStream, visualizerStream])
+  .map(node => node.name), ['firefox-capture'])
+assert.deepEqual(model.microphoneRecordingStreams(null), [])
 assert.equal(model.isPlaybackStream({
   isStream: true, isSink: false, type: 'Stream/Output/Audio'
 }), false)

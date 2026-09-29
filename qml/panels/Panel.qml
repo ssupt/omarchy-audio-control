@@ -205,7 +205,8 @@ Panel {
     return list
   }
 
-  readonly property var activeRecordingLabels: Model.uniqueRecordingStreamLabels(recordingStreams)
+  readonly property var activeRecordingLabels: Model.uniqueRecordingStreamLabels(
+    Model.microphoneRecordingStreams(recordingStreams))
   readonly property int recordingApplicationCount: activeRecordingLabels.length
   readonly property real inputPeakLevel: {
     if (inputMuted) return 0
