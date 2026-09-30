@@ -82,9 +82,11 @@ function inputPeakSupported(node) {
     if (!node) return false
     var properties = nodeProps(node)
     if (String(properties["factory.name"] || "") === "support.null-audio-sink") return false
-    var positions = String(properties["audio.position"] || "").split(/[\s,\[\]]+/)
-      .filter(function(position) { return position !== "" })
+    // PipeWire accepts bare SPA-JSON positions and quoted JSON strings.
+    var positions = String(properties["audio.position"] || "")
+      .match(/"(?:[^"\\]|\\.)*"|[^\s,\[\]]+/g) || []
     return positions.length === 0 || !positions.every(function(position) {
+      if (position.charAt(0) === '"') position = JSON.parse(position)
       return /^AUX\d+$/i.test(position)
     })
   } catch (e) {
