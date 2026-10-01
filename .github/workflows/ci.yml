@@ -84,6 +84,7 @@ jobs:
           AUDIO_REQUIRE_QML: "1"
           AUDIO_TEST_OMARCHY_SHELL: "${{ github.workspace }}/omarchy/shell"
         run: |
+          python test/integration/text_rendering.py
           cargo build --locked --manifest-path backend/Cargo.toml
           python test/integration/runtime.py backend/target/debug/omarchy-audio-service
           python test/integration/routed_audio.py backend/target/debug/omarchy-audio-service
