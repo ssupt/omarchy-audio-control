@@ -118,6 +118,7 @@ after retargeting it so file watches follow the new location.
 ## Contributing
 
 Edit `qml/`, `backend/src/`, and `scripts/`; `runtime/` contains generated QML.
+Use `Text.PlainText` for labels; external names and saved text can contain markup.
 Builds require Rust/Cargo **1.85+**, libclang, pkg-config, and PipeWire and
 libpulse headers. Node.js, Python, jq, and Qt/Quickshell run the tests.
 
