@@ -14,7 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def source_id(root):
     names = ['backend/Cargo.toml', 'backend/Cargo.lock', 'backend/build.rs',
-             'packaging/manifest.template.json', 'packaging/build-release.py']
+             'packaging/manifest.template.json', 'packaging/build-release.py',
+             'packaging/launch-backend.py']
     for directory in ('qml', 'backend/src', 'scripts'):
         paths = ((root / directory).rglob('*') if directory != 'scripts'
                  else (root / directory).iterdir())
@@ -76,8 +77,8 @@ def verify(root):
     info = inspect(binary)
     if info['buildId'] != source_id(root) or metadata['buildId'] != info['buildId']:
         raise ValueError('Backend does not match the plugin sources; rebuild the release')
-    if info['target'] != 'x86_64-unknown-linux-gnu' or metadata['target'] != info['target']:
-        raise ValueError('This release targets Omarchy on x86_64 Linux')
+    if info['target'] not in ('x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu') or metadata['target'] != info['target']:
+        raise ValueError('This release requires a native x86_64 or aarch64 Linux backend')
     if any(metadata.get(key) != info.get(key) for key in ('version', 'protocolVersion')):
         raise ValueError('Backend version metadata does not match the executable')
     if not os.access(binary, os.X_OK):

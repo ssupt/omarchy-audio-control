@@ -100,6 +100,7 @@ jobs:
           python test/integration/release.py backend/target/debug/omarchy-audio-service
           python test/integration/packaging.py backend/target/debug/omarchy-audio-service
           python packaging/build-release.py --output "$RUNNER_TEMP/audio-upgrade-candidate" --binary backend/target/debug/omarchy-audio-service
+          python test/integration/native_startup.py "$RUNNER_TEMP/audio-upgrade-candidate"
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/runtime.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/routed_audio.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
           python "$RUNNER_TEMP/audio-upgrade-candidate/test/integration/profiles.py" "$RUNNER_TEMP/audio-upgrade-candidate/bin/omarchy-audio-service"
@@ -113,9 +114,16 @@ jobs:
           python test/integration/upgrade.py "$RUNNER_TEMP/audio-upgrade-candidate" legacy-plugin
 
   release-candidate:
-    name: Build self-contained plugin candidate
+    name: Build self-contained plugin candidate (${{ matrix.arch }})
     needs: [test, qml-runtime]
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
     timeout-minutes: 15
     steps:
       - name: Check out plugin
@@ -131,12 +139,14 @@ jobs:
           python3 packaging/build-release.py --output "$RUNNER_TEMP/audio-plugin"
           python3 packaging/build-release.py --check "$RUNNER_TEMP/audio-plugin"
           python3 test/integration/lifecycle.py "$RUNNER_TEMP/audio-plugin/bin/omarchy-audio-service"
-          tar -C "$RUNNER_TEMP/audio-plugin" -czf "$RUNNER_TEMP/omarchy-audio-control-linux-x86_64.tar.gz" .
+          python3 test/integration/release.py "$RUNNER_TEMP/audio-plugin/bin/omarchy-audio-service"
+          python3 test/integration/native_backend.py
+          tar -C "$RUNNER_TEMP/audio-plugin" -czf "$RUNNER_TEMP/omarchy-audio-control-linux-${{ matrix.arch }}.tar.gz" .
       - name: Upload candidate for review
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: omarchy-audio-control-linux-x86_64
-          path: ${{ runner.temp }}/omarchy-audio-control-linux-x86_64.tar.gz
+          name: omarchy-audio-control-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/omarchy-audio-control-linux-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
           retention-days: 14
 

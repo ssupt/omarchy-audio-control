@@ -65,7 +65,10 @@ assert len(sys.stdin.buffer.read()) > 0
                PULSE_SERVER='unix:'+str(work/'audio-test-pulse'),
                XDG_STATE_HOME=str(work / 'state'), XDG_CACHE_HOME=str(work / 'cache'),
                AUDIO_CONTROL_PRIVATE_RUNTIME_DIR=temporary,
-               AUDIO_INTEGRATION_LOG=str(work / 'operations'), PATH=str(binaries)+os.pathsep+os.environ['PATH'])
+               AUDIO_INTEGRATION_LOG=str(work / 'operations'),
+               # The private config must not invoke user tool-manager shims
+               # whose trust/configuration changes with XDG_CONFIG_HOME.
+               PATH=str(binaries)+os.pathsep+os.defpath+os.pathsep+os.environ['PATH'])
     # Remove inherited per-store overrides so tests cannot touch user documents.
     for key in ('OMARCHY_AUDIO_CONTROL_FILE', 'OMARCHY_AUDIO_PREFERENCES_FILE', 'OMARCHY_AUDIO_RULES_FILE', 'OMARCHY_AUDIO_SCENES_FILE'):
         env.pop(key, None)
@@ -370,7 +373,11 @@ ShellRoot {
   Process { id: crashProc }
   Timer { interval: 25000; running: true; onTriggered: { console.log("RUNTIME_FAILURE timeout"); Qt.quit() } }
 }
-'''.replace('DIAGNOSTICS_URL', json.dumps(((ROOT/ENTRY_POINTS['service']).parent.parent/'diagnostics/AudioDiagnosticsController.qml').as_uri())).replace('BACKEND_PROPERTIES', json.dumps({} if PACKAGED else {'backendCommand':[str(BINARY),'--plugin']})).replace('RUNTIME_URL', json.dumps((ROOT/ENTRY_POINTS['service']).with_name('AudioRuntime.qml').as_uri())).replace('SCRIPTS_PATH', json.dumps(str(ROOT/'scripts'))).replace('SERVICE_URL', json.dumps((ROOT/ENTRY_POINTS['service']).as_uri())).replace('UI_PROBE',
+'''.replace('DIAGNOSTICS_URL', json.dumps(((ROOT/ENTRY_POINTS['service']).parent.parent/'diagnostics/AudioDiagnosticsController.qml').as_uri())).replace('BACKEND_PROPERTIES', json.dumps({} if PACKAGED else {
+    # Preparation can outlast the five-second protocol deadline on first ARM
+    # builds. A delayed preparation must finish before hello is sent.
+    'backendPreparationCommand': [sys.executable, '-c', 'import time; time.sleep(6); print('+repr(str(BINARY))+')']
+})).replace('RUNTIME_URL', json.dumps((ROOT/ENTRY_POINTS['service']).with_name('AudioRuntime.qml').as_uri())).replace('SCRIPTS_PATH', json.dumps(str(ROOT/'scripts'))).replace('SERVICE_URL', json.dumps((ROOT/ENTRY_POINTS['service']).as_uri())).replace('UI_PROBE',
     ('var panel = Qt.createComponent('+json.dumps((ROOT/ENTRY_POINTS['barWidget']).as_uri())+'); '
      'var advanced = Qt.createComponent('+json.dumps((ROOT/ENTRY_POINTS['panel']).as_uri())+'); '
      'if (panel.status !== Component.Ready || advanced.status !== Component.Ready) { '
