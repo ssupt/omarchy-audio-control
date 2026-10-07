@@ -1,7 +1,7 @@
 {
-  "buildId": "3b9a83e019dc97d72fc5811b677ffca8800577e0aad56b3ed924b393c0871d84",
+  "buildId": "a54274df05584205c37b44db36e6dc3f27c076369617189206e5e7a45f2ad0a6",
   "target": "x86_64-unknown-linux-gnu",
   "version": "0.1.0",
   "protocolVersion": 1,
-  "sha256": "e37256102a94ca5ab01c7a1bb1bbb8afe0b3c9cdc56609d723fb43080efe40ec"
+  "sha256": "4a88e3b548c7140c1c4820cb84bfd2ed56a009a31894464371ed5b025032d9b3"
 }

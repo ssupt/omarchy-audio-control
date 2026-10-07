@@ -66,8 +66,26 @@ until discarded or until the advanced window closes.
 
 ## Install
 
-Requires **Omarchy Quattro on x86_64 Linux**, PipeWire and WirePlumber, with
-Omarchy's usual audio and desktop tools. Installation needs no Rust toolchain.
+Requires **Omarchy Quattro on x86_64 or aarch64 Linux**, PipeWire and WirePlumber,
+with Omarchy's usual audio and desktop tools. The Git checkout includes an
+x86_64 backend, so x86_64 installation needs no Rust toolchain.
+
+On **aarch64** (including Asahi Linux), install Rust/Cargo **1.85+**, libclang,
+pkg-config, and the PipeWire and libpulse development headers before enabling
+the plugin. For Arch-based systems:
+
+```bash
+sudo pacman -S --needed rust clang pkgconf pipewire libpulse
+```
+
+The plugin builds a native backend on first startup and after updates that
+change runtime sources. The panel shows **Preparing audio service…** until the
+build finishes. Builds stay under
+`${XDG_CACHE_HOME:-~/.cache}/omarchy-audio-control/`; dependencies are reused
+across updates, and the plugin checkout remains unchanged. Later starts use
+the cached executable. If preparation fails, install the requirements above
+and reload the plugin. Manual binary replacement after each update is no
+longer needed.
 
 ```bash
 omarchy plugin add https://github.com/ssupt/omarchy-audio-control.git --enable

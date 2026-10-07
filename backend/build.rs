@@ -31,6 +31,7 @@ fn main() {
         "backend/build.rs".into(),
         "packaging/manifest.template.json".into(),
         "packaging/build-release.py".into(),
+        "packaging/launch-backend.py".into(),
     ];
     collect_sources(root, &root.join("backend/src"), &mut files);
     println!(

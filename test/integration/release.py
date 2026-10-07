@@ -38,6 +38,11 @@ with tempfile.TemporaryDirectory(prefix='audio-release-test-') as temporary:
     nested_extra.write_text('// Added after the backend was built\n')
     rejected(lambda: release.verify(candidate), 'Added nested Rust source was accepted')
     nested_extra.unlink()
+    launcher = candidate/'packaging/launch-backend.py'
+    original_launcher = launcher.read_bytes()
+    launcher.write_bytes(original_launcher + b'\n# Changed native preparation\n')
+    rejected(lambda: release.verify(candidate), 'Modified native launcher was accepted')
+    launcher.write_bytes(original_launcher)
     executable = candidate/'bin/omarchy-audio-service'
     original = executable.read_bytes()
     executable.write_bytes(b'broken executable')

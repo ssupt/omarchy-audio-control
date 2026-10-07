@@ -1,3 +1,3 @@
 // Generated release paths; edit the qml sources instead.
 var root = "../../../../"
-var buildId = "3b9a83e019dc97d72fc5811b677ffca8800577e0aad56b3ed924b393c0871d84"
+var buildId = "a54274df05584205c37b44db36e6dc3f27c076369617189206e5e7a45f2ad0a6"

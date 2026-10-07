@@ -1,0 +1,5 @@
+#!/bin/bash
+# Select a native backend, rebuilding a cached copy when the bundle is foreign.
+set -euo pipefail
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+exec python3 "$ROOT/packaging/launch-backend.py" "$ROOT" "$@"

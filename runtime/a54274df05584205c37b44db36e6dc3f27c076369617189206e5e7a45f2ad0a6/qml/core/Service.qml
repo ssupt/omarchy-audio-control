@@ -12,9 +12,10 @@ Item {
   property var shell: null
   property var manifest: null
   property string omarchyPath: ""
-  // Release checkouts include this executable. Tests can inject an isolated
-  // binary; users never need a compiler or a separately installed user unit.
-  property var backendCommand: [decodeURIComponent(Qt.resolvedUrl(ReleasePaths.root + "bin/omarchy-audio-service").toString().replace(/^file:\/\//, "")), "--plugin"]
+  // Tests can inject a backend. Normal launches prepare a matching native
+  // executable before starting the protocol's five-second hello deadline.
+  property var backendCommand: []
+  property var backendPreparationCommand: [decodeURIComponent(Qt.resolvedUrl(ReleasePaths.root + "scripts/audio-service").toString().replace(/^file:\/\//, "")), "--prepare"]
   readonly property bool connected: backend.running
   property bool ready: false
   property string backendVersion: ""
@@ -103,13 +104,42 @@ Item {
       },
       callbackError: function() { console.warn("Audio command callback failed") }
     })
-    launchTimer.start()
+    if (backendCommand.length) launchTimer.start()
+    else {
+      root.error = "Preparing audio service…"
+      prepareBackend.running = true
+    }
   }
   Component.onDestruction: {
     destroying = true
     reconnectTimer.stop()
     backend.running = false
+    prepareBackend.running = false
     if (client) client.reset(Protocol.failure("disconnected", "Audio plugin closed", false))
+  }
+  Process {
+    id: prepareBackend
+    command: root.backendPreparationCommand
+    stdout: StdioCollector { id: preparedPath }
+    stderr: SplitParser {
+      splitMarker: "\n"
+      onRead: function(line) {
+        console.warn("Audio preparation:", String(line).slice(0, 1024))
+        if (String(line).indexOf("Audio backend preparation failed:") === 0)
+          root.error = String(line).slice(0, 1024)
+      }
+    }
+    onExited: function(code, _status) {
+      if (root.destroying) return
+      var path = preparedPath.text.trim()
+      if (code === 0 && path.charAt(0) === "/" && path.indexOf("\n") === -1) {
+        root.backendCommand = [path, "--plugin"]
+        root.error = ""
+        launchTimer.start()
+      } else if (root.error === "Preparing audio service…") {
+        root.error = "Audio service preparation failed; see the plugin README for native build requirements"
+      }
+    }
   }
   Process {
     id: backend
@@ -159,6 +189,6 @@ Item {
   Timer {
     id: reconnectTimer
     interval: 5000
-    onTriggered: if (!root.destroying && !backend.running) backend.running = true
+    onTriggered: if (!root.destroying && !backend.running && root.backendCommand.length) backend.running = true
   }
 }
