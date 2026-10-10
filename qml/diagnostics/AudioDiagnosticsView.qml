@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 
 Column {
   id: root
@@ -9,9 +10,9 @@ Column {
   required property bool tabActive
   required property bool cursorActive
   required property int selectedIndex
-  property color foreground: Color.foreground
-  property color urgent: Color.urgent
-  property color fill: Style.hoverFillFor(foreground, Color.accent)
+  property color foreground: Commons.Color.foreground
+  property color urgent: Commons.Color.urgent
+  property color fill: Style.hoverFillFor(foreground, Commons.Color.accent)
   property string fontFamily: Style.font.family
 
   signal cursorRequested(int index)
@@ -123,7 +124,7 @@ Column {
       width: parent.width
       implicitHeight: healthContent.implicitHeight + Style.space(20)
       color: "transparent"
-      borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+      borderSpec: Border.controlSpec("normal", root.foreground, Commons.Color.accent)
       radius: Style.cornerRadius
 
       Column {
@@ -237,7 +238,7 @@ Column {
       width: parent.width
       implicitHeight: graphContent.implicitHeight + Style.space(20)
       color: "transparent"
-      borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+      borderSpec: Border.controlSpec("normal", root.foreground, Commons.Color.accent)
       radius: Style.cornerRadius
 
       Column {
@@ -307,7 +308,7 @@ Column {
         width: parent.width
         implicitHeight: deviceContent.implicitHeight + Style.space(18)
         color: "transparent"
-        borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+        borderSpec: Border.controlSpec("normal", root.foreground, Commons.Color.accent)
         radius: Style.cornerRadius
 
         Column {

@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 
 CursorSurface {
   id: root
@@ -12,7 +13,7 @@ CursorSurface {
   required property bool microphoneMuted
   required property string error
   property string fontFamily: Style.font.family
-  property color urgent: Color.urgent
+  property color urgent: Commons.Color.urgent
 
   signal primaryActivated()
   signal discarded()

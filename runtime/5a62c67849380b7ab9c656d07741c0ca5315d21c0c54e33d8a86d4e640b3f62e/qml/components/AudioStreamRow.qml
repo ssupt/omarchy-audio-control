@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell.Services.Pipewire
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../core/Model.js" as Model
 
 // Playback and recording applications share interaction and volume controls;
@@ -194,7 +195,7 @@ CursorSurface {
               return position === "right" ? "󰅁" : "󰅂"
             }
             color: root.routeIsExplicit
-              ? Style.selectedStateColor(root.bar.foreground, Color.accent)
+              ? Style.selectedStateColor(root.bar.foreground, Commons.Color.accent)
               : Qt.darker(root.bar.foreground, 1.2)
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.body

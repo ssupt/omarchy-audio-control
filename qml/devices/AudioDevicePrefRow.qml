@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 
 CursorSurface {
   id: root
@@ -14,7 +15,7 @@ CursorSurface {
   required property string aliasValue
   required property bool busy
   property int keyboardControl: 0
-  property color urgent: Color.urgent
+  property color urgent: Commons.Color.urgent
   property string fontFamily: Style.font.family
 
   signal aliasEditStarted()
@@ -104,7 +105,7 @@ CursorSurface {
         background: Rectangle {
           color: "transparent"
           border.width: 1
-          border.color: Color.accent
+          border.color: Commons.Color.accent
           radius: Style.space(3)
         }
         onVisibleChanged: {
@@ -165,7 +166,7 @@ CursorSurface {
         visible: !root.editingAlias
         iconText: root.favorite ? "󰓎" : "󰓒"
         tooltipText: root.favorite ? "Remove from favorites" : "Add to favorites"
-        foreground: root.favorite ? Color.accent : root.foreground
+        foreground: root.favorite ? Commons.Color.accent : root.foreground
         fontFamily: root.fontFamily
         bordered: true
         enabled: root.enabled && root.interactive

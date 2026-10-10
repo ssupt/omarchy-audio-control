@@ -5,6 +5,7 @@ import Quickshell.Io
 import Quickshell.Services.Pipewire
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../core/Model.js" as Model
 import "../components"
 import "../core"
@@ -147,9 +148,9 @@ Item {
   readonly property bool outputOverdrive: !!service && !!service.stores.settings && service.stores.settings.outputOverdrive === true
   readonly property bool captureNotifications: !service || !service.stores.settings || service.stores.settings.captureNotifications !== false
 
-  readonly property color foreground: Color.foreground
-  readonly property color background: Color.background
-  readonly property color urgent: Color.urgent
+  readonly property color foreground: Commons.Color.foreground
+  readonly property color background: Commons.Color.background
+  readonly property color urgent: Commons.Color.urgent
   readonly property string fontFamily: Style.font.family
   readonly property var captureNotificationDefinition: ({
     key: "captureNotifications",
@@ -208,7 +209,7 @@ Item {
   readonly property bool policyMutationBlocked: sceneController.busy
     || profileSetPending || portSetPending || microphoneTest.busy
     || diagnosticsMutationBusy
-  readonly property color hoverFill: Style.hoverFillFor(foreground, Color.accent)
+  readonly property color hoverFill: Style.hoverFillFor(foreground, Commons.Color.accent)
   onOutputDeviceChanged: enforceOutputVolumeLimit()
 
   function pluginId() {
@@ -2348,7 +2349,7 @@ Item {
           confirmText: "Restart audio"
           background: root.background
           foreground: root.foreground
-          selectedText: Color.accent
+          selectedText: Commons.Color.accent
           fontFamily: root.fontFamily
           cornerRadius: Style.cornerRadius
           onCanceled: root.cancelRecovery()

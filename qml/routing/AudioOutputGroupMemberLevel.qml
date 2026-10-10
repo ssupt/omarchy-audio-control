@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../components"
 
 Item {
@@ -12,8 +13,8 @@ Item {
   property real maximum: 1
   property bool busy: false
   property bool hasKeyboardCursor: false
-  property color foreground: Color.foreground
-  property color urgent: Color.urgent
+  property color foreground: Commons.Color.foreground
+  property color urgent: Commons.Color.urgent
   property string fontFamily: Style.font.family
 
   signal volumeMoved(var node, real value)

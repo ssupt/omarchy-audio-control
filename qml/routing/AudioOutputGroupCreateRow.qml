@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 
 CursorSurface {
   id: root
@@ -80,7 +81,7 @@ CursorSurface {
       background: Rectangle {
         color: "transparent"
         border.width: 1
-        border.color: groupNameField.activeFocus ? Color.accent
+        border.color: groupNameField.activeFocus ? Commons.Color.accent
           : Qt.darker(root.foreground, 1.8)
         radius: Style.space(3)
       }

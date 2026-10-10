@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../components"
 
 CursorSurface {
@@ -13,7 +14,7 @@ CursorSurface {
   required property var options
   required property string currentValue
   required property bool menuEnabled
-  property color urgent: Color.urgent
+  property color urgent: Commons.Color.urgent
   property string fontFamily: Style.font.family
   property bool menuReportedOpen: false
   property int keyboardControl: 0

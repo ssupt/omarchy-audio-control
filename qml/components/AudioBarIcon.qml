@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 
 Item {
   id: root
@@ -10,9 +11,9 @@ Item {
   property bool microphoneMuted: false
   property bool microphoneClipping: false
   property real iconSize: Style.bar.iconFont
-  property color foreground: Color.foreground
-  property color urgent: Color.urgent
-  property color badgeBorder: Color.popups.background
+  property color foreground: Commons.Color.foreground
+  property color urgent: Commons.Color.urgent
+  property color badgeBorder: Commons.Color.popups.background
   property string fontFamily: Style.font.family
 
   OpticalGlyph {
@@ -45,7 +46,7 @@ Item {
       id: badgeText
       anchors.centerIn: parent
       text: root.microphoneClipping ? "!" : (root.recordingCount > 9 ? "9+" : String(root.recordingCount))
-      color: Color.background
+      color: Commons.Color.background
       font.family: root.fontFamily
       font.pixelSize: Math.max(6, Math.round(parent.height * 0.62))
       font.bold: true

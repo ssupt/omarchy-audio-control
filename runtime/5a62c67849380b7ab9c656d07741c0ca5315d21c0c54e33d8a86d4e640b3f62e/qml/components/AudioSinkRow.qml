@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../core/Model.js" as Model
 
 // Output device row — cursor target inside the "output" section. Mouse
@@ -64,7 +65,7 @@ CursorSurface {
       id: groupTag
       visible: root.outputGroup
       text: "GROUP"
-      color: Color.accent
+      color: Commons.Color.accent
       font.family: root.bar.fontFamily
       font.pixelSize: Style.font.caption
       font.bold: true

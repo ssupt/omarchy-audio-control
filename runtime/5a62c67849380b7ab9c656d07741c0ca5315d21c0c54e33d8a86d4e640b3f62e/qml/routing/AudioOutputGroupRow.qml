@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 
 CursorSurface {
   id: root
@@ -15,7 +16,7 @@ CursorSurface {
   required property bool busy
   property bool memberVolumeBusy: false
   property real volumeMaximum: 1
-  property color urgent: Color.urgent
+  property color urgent: Commons.Color.urgent
   property string fontFamily: Style.font.family
 
   signal membersChosen(var values)

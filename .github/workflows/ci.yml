@@ -71,7 +71,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: basecamp/omarchy
-          ref: 7be59e1f4b7451d352d4673c560168290792590f
+          ref: b83d3df0840504299d3099ebf391eb8110527edd # Qualify shell palette references for Qt 6.12
           path: omarchy
           sparse-checkout: shell
       - name: Check out the original 0.8.0 plugin for upgrade coverage

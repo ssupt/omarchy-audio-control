@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 
 CursorSurface {
   id: root
@@ -8,7 +9,7 @@ CursorSurface {
   required property string sceneName
   required property string summary
   required property bool actionEnabled
-  property color urgent: Color.urgent
+  property color urgent: Commons.Color.urgent
   property string fontFamily: Style.font.family
 
   signal activated()

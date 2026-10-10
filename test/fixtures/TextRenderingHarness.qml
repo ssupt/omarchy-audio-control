@@ -1,22 +1,12 @@
 import QtQuick
 import QtQuick.Window
 import Quickshell
-import qs.Commons as Commons
 
 ShellRoot {
   id: root
   property string pluginRoot: ROOT_URL
   property string server: SERVER_URL
   property var labels: []
-
-  Component.onCompleted: {
-    // Initialize the shell palette before loading themed components.
-    var colors = Commons.Color
-    Qt.callLater(function() {
-      if (!colors.popups) { console.error("Shell palette unavailable"); Qt.exit(1); return }
-      window.createRows()
-    })
-  }
 
   function payload(path) { return '<img src="' + server + '/' + path + '"> Speaker & <b>name</b>' }
   function create(path, parent, properties) {
@@ -51,7 +41,7 @@ ShellRoot {
       width: parent.width
       Text { text: '<img src="' + root.server + '/control">'; textFormat: Text.AutoText }
     }
-    function createRows() {
+    Component.onCompleted: {
       var profile = root.create("qml/devices/AudioProfileRow.qml", rows, {
         card: {bluetooth: true, label: root.payload("profile")}, rowIndex: 0,
         currentProfile: "a2dp", options: [{value: "a2dp", label: "A2DP"}], menuEnabled: true
@@ -68,6 +58,9 @@ ShellRoot {
   Timer {
     interval: 1500; running: true
     onTriggered: {
+      if (root.labels.length !== 3) {
+        console.error("Themed controls were not created"); Qt.exit(1); return
+      }
       for (var i = 0; i < root.labels.length; i++) {
         if (!root.containsLabel(root.labels[i].item, root.labels[i].text)) {
           console.error("Original label was lost", root.labels[i].text); Qt.exit(1); return
