@@ -8,6 +8,7 @@ All clients, files, audio sockets and the compositor are private to this test.
 import json
 import os
 from pathlib import Path
+import re
 import select
 import shutil
 import signal
@@ -72,6 +73,14 @@ with tempfile.TemporaryDirectory(prefix='audio-upgrade-') as temporary:
             destination.parent.mkdir(parents=True, exist_ok=True)
             replacement = destination.with_name('.'+destination.name+'.incoming')
             shutil.copy2(path, replacement)
+            if legacy and source == PREVIOUS and path.suffix == '.qml':
+                # The historical UI predates Qt 6.12's Color type. Adapt its
+                # palette references in the disposable copy used by this test.
+                text = replacement.read_text()
+                if 'import qs.Commons\n' in text and re.search(r'(?<![\w.])Color\.', text):
+                    text = text.replace('import qs.Commons\n',
+                                        'import qs.Commons\nimport qs.Commons as LegacyCommons\n', 1)
+                    replacement.write_text(re.sub(r'(?<![\w.])Color\.', 'LegacyCommons.Color.', text))
             replacement.replace(destination)
         for path in list(plugin.rglob('*')):
             if path.is_file() and path.relative_to(plugin) not in names:
