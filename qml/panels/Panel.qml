@@ -56,17 +56,13 @@ Panel {
   readonly property var audioPreferences: audioService && audioService.stores.preferences ? audioService.stores.preferences : Model.parseAudioPreferences("")
   readonly property bool audioPreferencesLoaded: !!audioService && audioService.ready && !!audioService.stores.preferences
   readonly property bool outputOverdrive: !!audioService && !!audioService.stores.settings && audioService.stores.settings.outputOverdrive === true
-  readonly property bool captureNotifications: !audioService || !audioService.stores.settings || audioService.stores.settings.captureNotifications !== false
   readonly property bool audioControlSettingsLoaded: !!audioService && audioService.ready && !!audioService.stores.settings
-  property bool notificationsAvailable: false
   readonly property var audioScenes: audioService && audioService.stores.scenes ? audioService.stores.scenes.scenes : []
   readonly property bool audioScenesLoaded: !!audioService && audioService.ready && !!audioService.stores.scenes
   readonly property var audioRules: rulesStore.rules
   readonly property bool rulesLoaded: rulesStore.loaded
   property string sceneFeedback: ""
   property bool sceneFeedbackIsError: false
-  property var observedRecordingLabels: []
-  property bool recordingObservationReady: false
   property real inputPeakHold: 0
   property bool inputClipping: false
   readonly property real outputVolumeMaximum: outputOverdrive ? 1.5 : 1.0
@@ -91,28 +87,6 @@ Panel {
     } catch (_error) {
       return false
     }
-  }
-
-
-  function observeRecordingApplications() {
-    var current = listSnapshot(activeRecordingLabels)
-    var additions = Model.addedRecordingStreamLabels(observedRecordingLabels, current)
-    observedRecordingLabels = current
-    if (!captureNotifications || additions.length === 0 || !notificationsAvailable) return
-
-    var summary = "Microphone access started"
-    var body = additions.length === 1
-      ? additions[0] + " is now using the microphone."
-      : additions.length + " applications started using the microphone: " + additions.join(", ")
-    Quickshell.execDetached([
-      "notify-send",
-      "--app-name", "Advanced Audio Control",
-      "--icon", "audio-input-microphone-symbolic",
-      "--urgency", "normal",
-      "--expire-time", "8000",
-      summary,
-      body
-    ])
   }
 
   property var cachedAudioSinks: []
@@ -230,10 +204,6 @@ Panel {
     var state = inputMuted ? "Microphone muted"
       : (inputClipping ? "Microphone clipping" : "Microphone in use")
     return access + "\n" + state + (microphoneAction === "" ? "" : " · " + microphoneAction)
-  }
-  onActiveRecordingLabelsChanged: {
-    if (recordingObservationReady) recordingChangeTimer.restart()
-    else observedRecordingLabels = listSnapshot(activeRecordingLabels)
   }
   onInputPeakLevelChanged: {
     if (inputPeakLevel > inputPeakHold) {
@@ -1063,38 +1033,11 @@ Panel {
     sceneController.apply(scene)
   }
 
-  // Capture notifications are best-effort; probe once so a missing
-  // notify-send never turns into repeated spawn failures.
-  Process {
-    id: notificationProbeProc
-    running: true
-    command: ["/bin/sh", "-c", "command -v notify-send >/dev/null 2>&1"]
-    onExited: function(exitCode) { root.notificationsAvailable = exitCode === 0 }
-  }
-
   Timer {
     id: audioModelRefreshTimer
     interval: 75
     repeat: false
     onTriggered: root.refreshDisplayAudioModels()
-  }
-
-
-  Timer {
-    interval: 1500
-    running: !root.recordingObservationReady
-    repeat: false
-    onTriggered: {
-      root.observedRecordingLabels = root.listSnapshot(root.activeRecordingLabels)
-      root.recordingObservationReady = true
-    }
-  }
-
-  Timer {
-    id: recordingChangeTimer
-    interval: 150
-    repeat: false
-    onTriggered: root.observeRecordingApplications()
   }
 
   Timer {

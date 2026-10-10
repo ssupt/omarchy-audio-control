@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Services.Pipewire
 import "AudioProtocol.js" as Protocol
 import "Model.js" as Model
 import "ReleasePaths.js" as ReleasePaths
@@ -34,6 +35,51 @@ Item {
     && state.operation !== "node.audio" && state.operation !== "node.level"
   property var client: null
   property bool destroying: false
+
+  // Capture events belong to the shared service, not each monitor's panel.
+  readonly property bool captureNotifications: !stores.settings || stores.settings.captureNotifications !== false
+  property bool notificationsAvailable: false
+  property var observedRecordingLabels: []
+  property bool recordingObservationReady: false
+  readonly property var candidateRecordingStreams: Model.classifyAudioNodes(
+    Pipewire.nodes ? Pipewire.nodes.values : []).recordingStreams
+  readonly property var recordingStreams: {
+    var list = []
+    for (var i = 0; i < candidateRecordingStreams.length; i++) {
+      try {
+        if (candidateRecordingStreams[i] && candidateRecordingStreams[i].audio)
+          list.push(candidateRecordingStreams[i])
+      } catch (_error) { }
+    }
+    return list
+  }
+  readonly property var activeRecordingLabels: Model.uniqueRecordingStreamLabels(
+    Model.microphoneRecordingStreams(recordingStreams))
+  onActiveRecordingLabelsChanged: {
+    if (recordingObservationReady) recordingChangeTimer.restart()
+    else observedRecordingLabels = Model.listSnapshot(activeRecordingLabels)
+  }
+
+  function observeRecordingApplications() {
+    var current = Model.listSnapshot(activeRecordingLabels)
+    var additions = Model.addedRecordingStreamLabels(observedRecordingLabels, current)
+    observedRecordingLabels = current
+    if (!captureNotifications || additions.length === 0 || !notificationsAvailable) return
+
+    var summary = "Microphone access started"
+    var body = additions.length === 1
+      ? additions[0] + " is now using the microphone."
+      : additions.length + " applications started using the microphone: " + additions.join(", ")
+    Quickshell.execDetached([
+      "notify-send",
+      "--app-name", "Advanced Audio Control",
+      "--icon", "audio-input-microphone-symbolic",
+      "--urgency", "normal",
+      "--expire-time", "8000",
+      summary,
+      body
+    ])
+  }
 
   function request(method, params, callback, settings) {
     if (!client) {
@@ -117,6 +163,34 @@ Item {
     prepareBackend.running = false
     if (client) client.reset(Protocol.failure("disconnected", "Audio plugin closed", false))
   }
+  PwObjectTracker { objects: root.candidateRecordingStreams }
+
+  // Capture notifications are best-effort; probe once so a missing
+  // notify-send never turns into repeated spawn failures.
+  Process {
+    id: notificationProbeProc
+    running: true
+    command: ["/bin/sh", "-c", "command -v notify-send >/dev/null 2>&1"]
+    onExited: function(exitCode) { root.notificationsAvailable = exitCode === 0 }
+  }
+
+  Timer {
+    interval: 1500
+    running: !root.recordingObservationReady
+    repeat: false
+    onTriggered: {
+      root.observedRecordingLabels = Model.listSnapshot(root.activeRecordingLabels)
+      root.recordingObservationReady = true
+    }
+  }
+
+  Timer {
+    id: recordingChangeTimer
+    interval: 150
+    repeat: false
+    onTriggered: root.observeRecordingApplications()
+  }
+
   Process {
     id: prepareBackend
     command: root.backendPreparationCommand

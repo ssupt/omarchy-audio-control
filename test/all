@@ -32,6 +32,7 @@ cargo test --manifest-path "$ROOT/backend/Cargo.toml" --locked ||
 cargo clippy --manifest-path "$ROOT/backend/Cargo.toml" --locked --all-targets \
   -- -D warnings || fail "Rust backend lints"
 echo "PASS: Rust backend"
+node "$TEST_DIR/capture-notifications.js" || fail "capture notifications"
 node "$TEST_DIR/protocol.js" || fail "QML service protocol"
 python3 "$TEST_DIR/integration/native_backend.py" || fail "native backend preparation"
 

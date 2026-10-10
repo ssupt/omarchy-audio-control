@@ -11,9 +11,9 @@
     "service"
   ],
   "entryPoints": {
-    "barWidget": "runtime/3b427ced50a7f5b6ee554fb64f8f92e682b8f09aa8777112d27a84eec53d787d/qml/panels/Panel.qml",
-    "panel": "runtime/3b427ced50a7f5b6ee554fb64f8f92e682b8f09aa8777112d27a84eec53d787d/qml/panels/AdvancedAudio.qml",
-    "service": "runtime/3b427ced50a7f5b6ee554fb64f8f92e682b8f09aa8777112d27a84eec53d787d/qml/core/Service.qml"
+    "barWidget": "runtime/4a6bfaa1894041cd182b9442cc550436504a65803709db5b821aba2f48bf28fe/qml/panels/Panel.qml",
+    "panel": "runtime/4a6bfaa1894041cd182b9442cc550436504a65803709db5b821aba2f48bf28fe/qml/panels/AdvancedAudio.qml",
+    "service": "runtime/4a6bfaa1894041cd182b9442cc550436504a65803709db5b821aba2f48bf28fe/qml/core/Service.qml"
   },
   "barWidget": {
     "displayName": "Advanced Audio Control",
