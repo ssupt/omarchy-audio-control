@@ -1,12 +1,22 @@
 import QtQuick
 import QtQuick.Window
 import Quickshell
+import qs.Commons as Commons
 
 ShellRoot {
   id: root
   property string pluginRoot: ROOT_URL
   property string server: SERVER_URL
   property var labels: []
+
+  Component.onCompleted: {
+    // Initialize the shell palette before loading themed components.
+    var colors = Commons.Color
+    Qt.callLater(function() {
+      if (!colors.popups) { console.error("Shell palette unavailable"); Qt.exit(1); return }
+      window.createRows()
+    })
+  }
 
   function payload(path) { return '<img src="' + server + '/' + path + '"> Speaker & <b>name</b>' }
   function create(path, parent, properties) {
@@ -41,7 +51,7 @@ ShellRoot {
       width: parent.width
       Text { text: '<img src="' + root.server + '/control">'; textFormat: Text.AutoText }
     }
-    Component.onCompleted: {
+    function createRows() {
       var profile = root.create("qml/devices/AudioProfileRow.qml", rows, {
         card: {bluetooth: true, label: root.payload("profile")}, rowIndex: 0,
         currentProfile: "a2dp", options: [{value: "a2dp", label: "A2DP"}], menuEnabled: true
