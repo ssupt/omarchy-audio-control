@@ -1,4 +1,4 @@
-import QtQuick
+import QtQuick 6.11
 import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
@@ -860,10 +860,26 @@ Panel {
 
 
   function setDefaultDevice(node, previous, direction) {
-    if (!mutableAudioNode(node) || sceneController.busy || routeMutationBusy) return false
+    var fail = direction === "output"
+      ? function(message) { defaultOutputError = message }
+      : function(message) { defaultInputError = message }
+    if (!mutableAudioNode(node)) {
+      fail("That device just changed; wait a moment and retry")
+      return false
+    }
+    if (sceneController.busy || routeMutationBusy) {
+      fail("Audio is applying another change; retry in a moment")
+      return false
+    }
     var identity = audioService.identityForNode(node)
-    var previousIdentity = audioService.identityForNode(previous)
-    if (!identity || (previous && !previousIdentity)) return false
+    if (!identity) {
+      fail("Device snapshot is stale; wait a moment and retry")
+      return false
+    }
+    // A previous default that already left the graph cannot be resolved here.
+    // The backend recomputes it from routing state, so a stale previous must
+    // never block the whole switch.
+    var previousIdentity = previous ? audioService.identityForNode(previous) : null
     if (direction === "output") defaultOutputError = ""
     else defaultInputError = ""
     defaultSetPending = true
@@ -1427,7 +1443,7 @@ Panel {
                 preferredName: root.preferredOutputName
                 label: root.nodeLabel(sinkDelegate.node)
                 outputGroup: Model.isOutputGroupSink(sinkDelegate.node)
-                defaultSetBusy: root.sceneMutationBusy
+                defaultSetBusy: root.sceneController.busy || root.defaultSetPending
                 hasCursor: root.cursorActive && root.focusSection === "output"
                   && root.selectedIndex === sinkDelegate.rowIndex
                 onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sinkDelegate)
@@ -1564,7 +1580,7 @@ Panel {
                 bar: root.bar
                 preferredName: root.preferredInputName
                 label: root.nodeLabel(sourceDelegate.node)
-                defaultSetBusy: root.sceneMutationBusy
+                defaultSetBusy: root.sceneController.busy || root.defaultSetPending
                 hasCursor: root.cursorActive && root.focusSection === "input"
                   && root.selectedIndex === sourceDelegate.rowIndex
                 onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sourceDelegate)
