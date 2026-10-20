@@ -100,6 +100,8 @@ with tempfile.TemporaryDirectory(prefix='audio-profiles-') as temporary:
             change('headset')
             assert time.monotonic()-started >= .08
             assert_audio()
+            # The graph subscription can trail the successful command reply.
+            client.wait_state(lambda s: any(n['name'] == 'audio_test_playback' and n['audio']['muted'] is False for n in s['nodes']))
             playback = next(n for n in client.state['nodes'] if n['name'] == 'audio_test_playback')
             assert playback['audio']['muted'] is False, 'Surviving playback stream stayed muted'
             assert original_serials.isdisjoint(n['serial'] for n in client.state['nodes']), 'Fixture did not recreate endpoints'
