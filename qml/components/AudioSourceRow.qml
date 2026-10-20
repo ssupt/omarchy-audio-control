@@ -1,4 +1,4 @@
-import QtQuick
+import QtQuick 6.11
 import qs.Ui
 import qs.Commons
 import "../core/Model.js" as Model
@@ -11,7 +11,6 @@ CursorSurface {
   required property int rowIndex
   required property var bar
   required property string preferredName
-  required property bool defaultSetBusy
   required property string label
 
   signal claimed(string section, int index)
@@ -58,9 +57,8 @@ CursorSurface {
 
   MouseArea {
     anchors.fill: parent
-    enabled: !root.defaultSetBusy
     hoverEnabled: true
-    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+    cursorShape: Qt.PointingHandCursor
     onContainsMouseChanged: if (containsMouse) root.claimed("input", root.rowIndex)
     onClicked: root.activated(root.node)
   }

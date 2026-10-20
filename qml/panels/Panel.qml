@@ -505,7 +505,7 @@ Panel {
   // — the cursor is on a discrete row, not on the slider, and silently
   // moving the global slider would surprise the user.
   function adjustVolume(delta) {
-    if (directDeviceMutationBusy) return
+    if (directDeviceMutationBusy) { defaultOutputError = "Audio is applying another change; retry in a moment"; return }
     if (focusSection === "output" && selectedIndex === -1) {
       setOutputVolume(outputVolume + delta)
       return
@@ -570,7 +570,6 @@ Panel {
   }
 
   function openAdvancedAudio() {
-    if (sceneMutationBusy) return
     controller.hide()
     if (bar && bar.shell && typeof bar.shell.summon === "function")
       bar.shell.summon("ssupt.audio-control", '{"view":"advanced"}')
@@ -706,8 +705,14 @@ Panel {
   function setStreamRoute(node, optionValue, direction) {
     var streamSerialValue = streamSerial(node)
     var route = Model.parseStreamOutputOption(optionValue)
-    if (streamSerialValue === "" || route.sink === "" || route.mode === ""
-        || sceneController.busy || routeMutationBusy) return
+    if (streamSerialValue === "" || route.sink === "" || route.mode === "") {
+      streamRouteSetError = "Stream route is stale; reopen the panel and retry"
+      return
+    }
+    if (sceneController.busy || routeMutationBusy) {
+      streamRouteSetError = "Audio is applying another change; retry in a moment"
+      return
+    }
 
     var identity = audioService.identityForNode(node)
     var targets = direction === "recording" ? candidateSources : candidateSinks
@@ -841,18 +846,23 @@ Panel {
   }
 
   function toggleOutputMute() {
-    if (!directDeviceMutationBusy) toggleAudioNodeMute(volumeSink)
+    if (directDeviceMutationBusy) { defaultOutputError = "Audio is applying another change; retry in a moment"; return }
+    toggleAudioNodeMute(volumeSink)
   }
 
   function toggleInputMute() {
-    if (!directDeviceMutationBusy) toggleAudioNodeMute(source)
+    if (directDeviceMutationBusy) { defaultInputError = "Audio is applying another change; retry in a moment"; return }
+    toggleAudioNodeMute(source)
   }
 
   // The hero switch is the whole panel's on/off, so it carries both channels
   // at once. It reads as on while anything is still audible, which keeps
   // muting a single channel from the row below flipping the master switch.
   function toggleAllMuted() {
-    if (directDeviceMutationBusy) return
+    if (directDeviceMutationBusy) {
+      defaultOutputError = "Audio is applying another change; retry in a moment"
+      return
+    }
     var mute = anyAudible
     if (hasOutput) setAudioNodeMuted(volumeSink, mute)
     if (hasInput) setAudioNodeMuted(source, mute)
@@ -1046,7 +1056,11 @@ Panel {
 
   function applySceneAt(index) {
     var scene = index >= 0 ? audioScenes[index] : null
-    if (!scene || sceneMutationBusy) return
+    if (!scene) return
+    if (sceneMutationBusy) {
+      showSceneFeedback("Audio is applying another change; retry in a moment", true)
+      return
+    }
     sceneController.apply(scene)
   }
 
@@ -1443,7 +1457,6 @@ Panel {
                 preferredName: root.preferredOutputName
                 label: root.nodeLabel(sinkDelegate.node)
                 outputGroup: Model.isOutputGroupSink(sinkDelegate.node)
-                defaultSetBusy: root.sceneController.busy || root.defaultSetPending
                 hasCursor: root.cursorActive && root.focusSection === "output"
                   && root.selectedIndex === sinkDelegate.rowIndex
                 onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sinkDelegate)
@@ -1580,7 +1593,6 @@ Panel {
                 bar: root.bar
                 preferredName: root.preferredInputName
                 label: root.nodeLabel(sourceDelegate.node)
-                defaultSetBusy: root.sceneController.busy || root.defaultSetPending
                 hasCursor: root.cursorActive && root.focusSection === "input"
                   && root.selectedIndex === sourceDelegate.rowIndex
                 onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sourceDelegate)
