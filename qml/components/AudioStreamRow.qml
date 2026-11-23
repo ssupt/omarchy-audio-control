@@ -279,6 +279,10 @@ CursorSurface {
         if (!root.mutationBlocked && root.nodeReady)
           root.volumeRequested(v)
       }
+      onReleased: function(v) {
+        if (!root.mutationBlocked && root.nodeReady)
+          root.volumeRequested(v)
+      }
       onRightClicked: {
         if (!root.mutationBlocked && root.nodeReady)
           root.muteRequested()

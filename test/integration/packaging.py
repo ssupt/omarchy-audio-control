@@ -84,4 +84,49 @@ os.execv(os.environ['AUDIO_STAGE_REAL_MV'], ['mv', *sys.argv[1:]])
     assert not libexec.exists()
     assert config.read_text() == '{"version":1,"outputOverdrive":false}'
     assert not (stage/'.config/systemd/user/omarchy-audio-control.socket').exists()
-print('PASS: staged installation, active upgrade, filesystem/activation rollback, and removal preserve user configuration')
+    # User edits made after installation are retained on uninstall.
+    assert unit.read_text() == original_unit
+
+    # Finding 8: preserve 0700 modes on existing config and systemd user directories.
+    # Finding 2: preserve a pre-existing custom unit across install, upgrade, and uninstall.
+    custom_stage = pathlib.Path(temporary) / 'custom home'
+    omarchy_dir = custom_stage / '.config/omarchy'
+    systemd_dir = custom_stage / '.config/systemd/user'
+    omarchy_dir.mkdir(parents=True)
+    systemd_dir.mkdir(parents=True)
+    omarchy_dir.chmod(0o700)
+    systemd_dir.chmod(0o700)
+    custom_service = systemd_dir / 'omarchy-audio-control.service'
+    custom_contents = '[Unit]\nDescription=User custom audio backend\n[Service]\nExecStart=/usr/local/bin/custom-audio\n'
+    custom_service.write_text(custom_contents)
+    custom_service.chmod(0o600)
+    env.pop('AUDIO_STAGE_FAIL_RESTART', None)
+    env.pop('AUDIO_STAGE_ACTIVE', None)
+    def run_custom(action, *args):
+        return subprocess.run([str(installer), action, '--stage', str(custom_stage), *args],
+                              check=True, capture_output=True, text=True, env=env)
+    # Uninstalling before any installation must never touch an unowned user unit.
+    run_custom('uninstall')
+    assert custom_service.read_text() == custom_contents
+    run_custom('install', '--binary', str(binary))
+    assert (omarchy_dir.stat().st_mode & 0o777) == 0o700, 'Installer widened ~/.config/omarchy permissions'
+    assert (systemd_dir.stat().st_mode & 0o777) == 0o700, 'Installer widened ~/.config/systemd/user permissions'
+    assert custom_service.read_text() != custom_contents
+    env['AUDIO_STAGE_ACTIVE'] = '1'
+    run_custom('install', '--binary', str(binary))
+    assert (omarchy_dir.stat().st_mode & 0o777) == 0o700
+    assert (systemd_dir.stat().st_mode & 0o777) == 0o700
+    run_custom('uninstall')
+    assert not (custom_stage / '.local/libexec/omarchy-audio-control').exists()
+    assert custom_service.read_text() == custom_contents, 'Uninstall did not restore pre-existing custom service unit'
+    assert (custom_service.stat().st_mode & 0o777) == 0o600
+    assert not (systemd_dir / 'omarchy-audio-control.socket').exists()
+
+    # Later user edits to an installed unit must be retained even when a pre-install original existed.
+    env.pop('AUDIO_STAGE_ACTIVE', None)
+    run_custom('install', '--binary', str(binary))
+    edited_contents = custom_service.read_text() + '\n# Later user edit\n'
+    custom_service.write_text(edited_contents)
+    run_custom('uninstall')
+    assert custom_service.read_text() == edited_contents, 'Uninstall overwrote later user edits'
+print('PASS: staged installation, active upgrade, rollback, directory modes, custom unit restoration, and user edit retention')

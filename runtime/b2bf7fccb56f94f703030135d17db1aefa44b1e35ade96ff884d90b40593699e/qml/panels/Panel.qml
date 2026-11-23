@@ -202,7 +202,7 @@ Panel {
       ? "Microphone access · " + activeRecordingLabels[0]
       : "Microphone access by " + recordingApplicationCount + " apps\n"
         + activeRecordingLabels.join(", ")
-    var state = inputMuted ? "Microphone muted"
+    var state = activeRecordingMuted ? "Microphone muted"
       : (inputClipping ? "Microphone clipping" : "Microphone in use")
     return access + "\n" + state + (microphoneAction === "" ? "" : " · " + microphoneAction)
   }
@@ -260,10 +260,11 @@ Panel {
       : (outputGroups.error !== "" ? outputGroups.error : rulesStore.error))
   property var pendingStreamRoute: null
   property bool defaultSetPending: false
+  property bool masterMutePending: false
   readonly property bool routeMutationBusy: !audioService || !audioService.ready || audioService.transactionBusy || defaultSetPending
-    || pendingStreamRoute !== null || rulesStore.busy || outputGroups.busy
+    || masterMutePending || pendingStreamRoute !== null || rulesStore.busy || outputGroups.busy
   readonly property bool directDeviceMutationBusy: !audioService || !audioService.ready || audioService.transactionBusy || sceneController.busy
-    || defaultSetPending
+    || defaultSetPending || masterMutePending
   onDirectDeviceMutationBusyChanged: if (!directDeviceMutationBusy)
     enforceOutputVolumeLimit()
   readonly property bool sceneMutationBusy: sceneController.busy || routeMutationBusy
@@ -405,12 +406,19 @@ Panel {
   // "header" is a virtual horizontal section for advanced settings + mute.
   readonly property bool settingsHeaderHasCursor: cursorActive && focusSection === "header" && headerIndex === 0
   readonly property bool powerHeaderHasCursor: cursorActive && focusSection === "header" && headerIndex === 1
-  // Only channels that actually exist get a vote. A box with no default source
-  // would otherwise report "input unmuted" forever, leaving the hero switch
-  // able to mute but never to unmute.
+  // Only channels that actually exist get a vote. When the backend snapshot is
+  // ready, drive both the master switch and microphone indicator from the
+  // confirmed PipeWire state across all active playback and recording targets.
   readonly property bool hasOutput: mutableAudioNode(volumeSink)
   readonly property bool hasInput: mutableAudioNode(source)
-  readonly property bool anyAudible: (hasOutput && !outputMuted) || (hasInput && !inputMuted)
+  readonly property var masterState: audioService && audioService.ready && audioService.state && audioService.state.master
+    ? audioService.state.master : null
+  readonly property bool activeRecordingMuted: masterState
+    ? masterState.recordingMuted === true
+    : inputMuted
+  readonly property bool anyAudible: masterState
+    ? masterState.anyAudible === true
+    : ((hasOutput && !outputMuted) || (hasInput && !inputMuted))
   readonly property string toggleHint: anyAudible ? "Mute" : "Unmute"
 
   readonly property color hoverFill: bar
@@ -882,19 +890,25 @@ Panel {
     clearInteractionError()
   }
 
-  // The hero switch is the whole panel's on/off, so it carries both channels
-  // at once. It reads as on while anything is still audible, which keeps
-  // muting a single channel from the row below flipping the master switch.
+  // The hero switch is the whole panel's on/off, covering active playback and
+  // recording destinations including pinned streams. It reads as on while any
+  // active destination is still audible.
   function toggleAllMuted() {
     if (directDeviceMutationBusy) {
       return rejectAudioAction("Audio is applying another change; retry in a moment")
     }
+    if (!audioService || !audioService.ready || nodeGeneration === "") {
+      return rejectAudioAction("Audio service is unavailable; retry in a moment")
+    }
     var mute = anyAudible
-    var outputOk = !hasOutput || setAudioNodeMuted(volumeSink, mute)
-    var inputOk = !hasInput || setAudioNodeMuted(source, mute)
-    if (!outputOk || !inputOk)
-      return rejectAudioAction("An audio device just changed; check its mute state and retry")
     clearInteractionError()
+    masterMutePending = true
+    audioService.request("audio.mute_all", { generation: nodeGeneration, muted: mute }, function(_result, failure) {
+      root.masterMutePending = false
+      if (failure)
+        root.rejectAudioAction(failure.message || "An audio device just changed; check its mute state and retry")
+    }, { timeout: 15000 })
+    return true
   }
 
 
@@ -1122,7 +1136,7 @@ Panel {
           anchors.fill: parent
           outputGlyph: root.outputIcon()
           recordingCount: root.recordingApplicationCount
-          microphoneMuted: root.inputMuted
+          microphoneMuted: root.recordingApplicationCount > 0 ? root.activeRecordingMuted : root.inputMuted
           microphoneClipping: root.inputClipping
           foreground: root.barForeground
           urgent: root.urgent
@@ -1454,6 +1468,7 @@ Panel {
                 enabled: root.hasOutput && !root.directDeviceMutationBusy
 
                 onMoved: function(v) { root.setOutputVolume(v) }
+                onReleased: function(v) { root.setOutputVolume(v) }
                 onRightClicked: root.toggleOutputMute()
               }
 
@@ -1566,6 +1581,7 @@ Panel {
                   enabled: root.hasInput && !root.directDeviceMutationBusy
 
                   onMoved: function(v) { root.setInputVolume(v) }
+                  onReleased: function(v) { root.setInputVolume(v) }
                   onRightClicked: root.toggleInputMute()
                 }
 

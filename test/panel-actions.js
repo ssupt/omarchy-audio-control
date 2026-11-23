@@ -2,8 +2,10 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const vm = require('node:vm')
 const Model = require('../qml/core/Model.js')
+const Protocol = require('../qml/core/AudioProtocol.js')
 
 const source = fs.readFileSync(require.resolve('../qml/panels/Panel.qml'), 'utf8')
+const serviceSource = fs.readFileSync(require.resolve('../qml/core/Service.qml'), 'utf8')
 function node(id, mediaClass = 'Audio/Sink') {
   return { id, ready: true, audio: { volume: .5, muted: false },
     properties: { 'object.serial': String(id), 'node.name': 'node_' + id, 'media.class': mediaClass } }
@@ -16,13 +18,17 @@ function panel() {
     audioStreams: [stream], recordingStreams: [], candidateSinks: [output], candidateSources: [input],
     displayAudioStreams: [stream], displayRecordingStreams: [],
     outputVolumeMaximum: 1, focusSection: 'output', selectedIndex: -1,
-    hasOutput: true, hasInput: true, anyAudible: true,
+    nodeGeneration: 'g',
+    hasOutput: true, hasInput: true, outputMuted: false, inputMuted: false,
+    outputVolume: .5, inputClipping: false,
+    activeRecordingLabels: [], recordingApplicationCount: 0,
     defaultOutputError: '', defaultInputError: '', streamRouteSetError: '', interactionError: '',
-    defaultSetPending: false, pendingStreamRoute: null, streamOutputMenuOpen: false,
+    defaultSetPending: false, masterMutePending: false, pendingStreamRoute: null, streamOutputMenuOpen: false,
     sceneController: { busy: false }, rulesStore: { busy: false }, outputGroups: { busy: false },
     interactionErrorTimer: { restart() {}, stop() {} },
     audioService: {
       ready: true, busy: false, transactionBusy: false,
+      state: { generation: 'g', master: { hasOutput: true, hasInput: true, anyAudible: true, recordingActive: false, recordingMuted: false } },
       identityForNode(n) { return n && context.nodes.includes(n) ? { generation: 'g', id: n.id, serial: String(n.id) } : null },
       request(method, params, callback) { requests.push({ method, params, callback }) },
       changeNode(n, patch) { levels.push({ node: n, patch }); return context.nodes.includes(n) }
@@ -33,10 +39,21 @@ function panel() {
   // Execute the real panel handlers; only their external services are replaced.
   for (const match of source.matchAll(/^  function \w+\([^\n]*\) \{[\s\S]*?^  \}/gm))
     vm.runInContext(match[0], context)
-  for (const name of ['routeMutationBusy', 'directDeviceMutationBusy', 'sceneMutationBusy']) {
-    const expression = source.match(new RegExp('readonly property bool ' + name + ': ([^\\n]*(?:\\n    [^\\n]*)*)'))[1]
+  for (const [kind, name] of [
+    ['bool', 'routeMutationBusy'],
+    ['bool', 'directDeviceMutationBusy'],
+    ['bool', 'sceneMutationBusy'],
+    ['var', 'masterState'],
+    ['bool', 'activeRecordingMuted'],
+    ['bool', 'anyAudible']
+  ]) {
+    const expression = source.match(new RegExp('readonly property ' + kind + ' ' + name + ': ([^\\n]*(?:\\n    [^\\n]*)*)'))[1]
     Object.defineProperty(context, name, { get: () => vm.runInContext(expression, context) })
   }
+  const tooltipBlock = source.match(/readonly property string recordingTooltip: \{([\s\S]*?)^  \}/m)[1]
+  Object.defineProperty(context, 'recordingTooltip', {
+    get: () => vm.runInContext('(function(){' + tooltipBlock + '})()', context)
+  })
   return { context, output, input, stream, requests, levels }
 }
 
@@ -67,7 +84,7 @@ function panel() {
   assert(p.interactionError)
 }
 
-for (const action of ['toggleOutputMute', 'toggleInputMute', 'toggleAllMuted', 'adjustVolume']) {
+for (const action of ['toggleOutputMute', 'toggleInputMute', 'adjustVolume']) {
   const { context: p, levels } = panel()
   p.defaultOutputError = 'Preference was not saved'
   p.audioService.transactionBusy = true
@@ -79,6 +96,129 @@ for (const action of ['toggleOutputMute', 'toggleInputMute', 'toggleAllMuted', '
   assert(levels.length > 0, action + ' must accept a retry')
   assert.equal(p.interactionError, '', action + ' must clear temporary rejection feedback')
   assert.equal(p.defaultOutputError, 'Preference was not saved', 'A mute/level retry must preserve unsaved-default errors')
+}
+
+{
+  const { context: p, requests } = panel()
+  p.defaultOutputError = 'Preference was not saved'
+  p.audioService.transactionBusy = true
+  p.toggleAllMuted()
+  assert(p.interactionError, 'toggleAllMuted must explain a busy rejection')
+  assert.equal(requests.length, 0)
+  p.audioService.transactionBusy = false
+  assert.equal(p.toggleAllMuted(), true)
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].method, 'audio.mute_all')
+  assert.equal(requests[0].params.generation, 'g')
+  assert.equal(requests[0].params.muted, true)
+  assert.equal(p.masterMutePending, true)
+  assert.equal(p.interactionError, '')
+  assert.equal(p.defaultOutputError, 'Preference was not saved')
+  assert.equal(p.toggleAllMuted(), false, 'Duplicate master mute must stay guarded')
+  requests[0].callback({ outcome: 'applied' }, null)
+  assert.equal(p.masterMutePending, false)
+  // Default mic muted while a pinned recording mic is still live must report in-use and audible.
+  p.inputMuted = true
+  p.outputMuted = true
+  p.recordingApplicationCount = 1
+  p.activeRecordingLabels = ['Recorder']
+  p.audioService.state.master = {
+    hasOutput: true, hasInput: true, anyAudible: true,
+    recordingActive: true, recordingMuted: false
+  }
+  assert.equal(p.anyAudible, true)
+  assert.equal(p.activeRecordingMuted, false)
+  assert.match(p.recordingTooltip, /Microphone in use/)
+  p.audioService.state.master = {
+    hasOutput: true, hasInput: true, anyAudible: false,
+    recordingActive: true, recordingMuted: true
+  }
+  assert.equal(p.anyAudible, false)
+  assert.equal(p.activeRecordingMuted, true)
+  assert.match(p.recordingTooltip, /Microphone muted/)
+}
+
+// Fast slider drag through the real Panel, Service, and AudioProtocol handlers
+// must coalesce in-flight updates and deliver the final released level even
+// when replies are delayed or the transport queue is saturated.
+{
+  const output = node(1)
+  const sent = [], acknowledged = []
+  const serviceContext = {
+    Model, Protocol, ready: false, error: '', state: {},
+    inFlightNodeChanges: {}, pendingNodeChanges: {}, client: null
+  }
+  serviceContext.root = serviceContext
+  vm.createContext(serviceContext)
+  for (const match of serviceSource.matchAll(/^  function \w+\([^\n]*\) \{[\s\S]*?^  \}/gm))
+    vm.runInContext(match[0], serviceContext)
+
+  const client = new Protocol.Client({
+    write: frame => sent.push(JSON.parse(frame)),
+    ready: value => {
+      serviceContext.ready = value
+      if (!value) serviceContext.clearNodeChanges()
+    },
+    state: value => { serviceContext.state = value },
+    capacity: () => serviceContext.flushNodeChanges(),
+    fault: message => { throw new Error('Unexpected protocol fault: ' + message) }
+  })
+  serviceContext.client = client
+  const reply = (req, result) => {
+    if (req.method === 'node.level') acknowledged.push(req.params.volume)
+    client.feed(JSON.stringify({ version: 1, id: req.id, result }) + '\n')
+  }
+  const event = (name, data) => client.feed(JSON.stringify({ version: 1, event: name, data }) + '\n')
+  client.open()
+  reply(sent.at(-1), {
+    name: 'omarchy-audio-service', protocolVersion: 1, epoch: 'e1', buildId: 'b1',
+    transport: 'jsonl-ascii', capabilities: ['state.subscribe', 'node.level'],
+    maxFrameBytes: Protocol.MAX_FRAME, maxSnapshotBytes: 8388608
+  })
+  reply(sent.at(-1), { subscribed: true })
+  const snap = JSON.stringify({
+    epoch: 'e1', revision: '1', graphReady: true, generation: 'g1', busy: false,
+    nodes: [{ id: 1, serial: '1' }]
+  })
+  event('snapshot.begin', { bytes: snap.length, parts: 1 })
+  event('snapshot.part', { index: 0, text: snap })
+  event('snapshot.end', {})
+  assert.equal(serviceContext.ready, true)
+
+  const { context: p } = panel()
+  p.nodes = [output]
+  p.volumeSink = output
+  p.audioService = serviceContext
+  p.audioService.transactionBusy = false
+
+  // Hold replies across 40 pointer moves ending at 100%.
+  for (let i = 1; i <= 40; i++) p.setOutputVolume(i / 40)
+  p.setOutputVolume(1.0) // release
+  assert.equal(sent.filter(r => r.method === 'node.level').length, 1,
+    'In-flight slider moves must coalesce instead of flooding the protocol queue')
+  while (sent.some(r => r.method === 'node.level' && !r._done)) {
+    const next = sent.find(r => r.method === 'node.level' && !r._done)
+    next._done = true
+    reply(next, { outcome: 'applied' })
+  }
+  assert.equal(acknowledged.at(-1), 1.0, 'Final acknowledged level must match released 100% position')
+  assert.equal(serviceContext.error, '')
+
+  // Now saturate all 32 pending slots with other requests before dragging down to 25%.
+  const fillers = []
+  for (let i = 0; i < 32; i++) {
+    assert.notEqual(serviceContext.request('health', {}, null), '')
+    fillers.push(sent.at(-1))
+  }
+  for (let i = 39; i >= 10; i--) p.setOutputVolume(i / 40)
+  assert.equal(sent.filter(r => r.method === 'node.level' && !r._done).length, 0)
+  reply(fillers.shift(), { status: 'ok' })
+  const pendingLevel = sent.find(r => r.method === 'node.level' && !r._done)
+  assert(pendingLevel, 'Queued level must transmit as soon as protocol capacity returns')
+  pendingLevel._done = true
+  reply(pendingLevel, { outcome: 'applied' })
+  assert.equal(acknowledged.at(-1), 0.25)
+  for (const filler of fillers) reply(filler, { status: 'ok' })
 }
 
 {

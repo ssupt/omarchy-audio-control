@@ -1565,7 +1565,7 @@ Item {
                 Text {
                   textFormat: Text.PlainText
                   width: parent.width
-                  text: "Scenes snapshot defaults, device volume, mute, balance, ports, and card profiles so you can restore the whole setup at once."
+                  text: "Scenes snapshot defaults, device volume, microphone mute, balance, ports, and card profiles so you can restore the whole setup at once. Applying a scene unmutes its captured outputs."
                   color: Qt.darker(root.foreground, 1.35)
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall

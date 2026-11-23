@@ -20,6 +20,12 @@ struct NodeLevel {
     balance: Option<f64>,
     muted: Option<bool>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MasterMute {
+    generation: String,
+    muted: bool,
+}
 impl Service {
     pub(super) async fn profile_request(&self, request: &Request) -> Result<Value> {
         #[derive(Deserialize)]
@@ -169,6 +175,100 @@ impl Service {
         Ok(json!({"outcome": "applied"}))
     }
 
+    pub(super) async fn master_mute_request(&self, request: &Request) -> Result<Value> {
+        let params = request.params::<MasterMute>()?;
+        let native = self
+            .native
+            .as_ref()
+            .ok_or_else(|| Failure::new("disconnected", "Native audio is unavailable"))?;
+        let _transaction = self.transaction().await?;
+        let _external_lock = FileLock::mutation().await?;
+        self.set_busy_for(true, "audio.mute_all");
+        let _busy = Busy(self);
+        let graph = native.snapshot();
+        if !graph.ready || !graph.connected || graph.generation != params.generation {
+            return Err(Failure::new(
+                "stale_graph",
+                "Audio graph changed; refresh before retrying",
+            ));
+        }
+        let targets: Vec<Identity> = {
+            let active = crate::outputs::master_targets(&graph);
+            active
+                .outputs
+                .values()
+                .chain(active.inputs.values())
+                .filter(|node| node.audio.muted != Some(params.muted))
+                .map(|node| crate::routing::identity(&graph, node))
+                .collect()
+        };
+        let mut failed: Option<Failure> = None;
+        for identity in targets {
+            if let Err(error) = native
+                .patch(
+                    identity.clone(),
+                    AudioPatch {
+                        muted: Some(params.muted),
+                        volumes: None,
+                    },
+                )
+                .await
+            {
+                let current = native.snapshot();
+                if current.generation == params.generation
+                    && !current.nodes.contains_key(&identity.id)
+                {
+                    continue;
+                }
+                if failed.is_none() || error.outcome == "unknown" {
+                    failed = Some(error);
+                }
+            }
+        }
+        // If a new active destination appeared while muting, cover it before confirming.
+        if params.muted && failed.is_none() {
+            let current = native.snapshot();
+            if current.ready && current.connected && current.generation == params.generation {
+                let remaining: Vec<Identity> = {
+                    let active = crate::outputs::master_targets(&current);
+                    active
+                        .outputs
+                        .values()
+                        .chain(active.inputs.values())
+                        .filter(|node| node.audio.muted != Some(true))
+                        .map(|node| crate::routing::identity(&current, node))
+                        .collect()
+                };
+                for identity in remaining {
+                    if let Err(error) = native
+                        .patch(
+                            identity.clone(),
+                            AudioPatch {
+                                muted: Some(true),
+                                volumes: None,
+                            },
+                        )
+                        .await
+                    {
+                        let latest = native.snapshot();
+                        if latest.generation == params.generation
+                            && !latest.nodes.contains_key(&identity.id)
+                        {
+                            continue;
+                        }
+                        failed = Some(error);
+                        break;
+                    }
+                }
+            }
+        }
+        self.publish_graph(&native.snapshot());
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        Ok(json!({"outcome": "applied"}))
+    }
+
     pub(super) async fn scene_request(&self, request: &Request) -> Result<Value> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -188,17 +288,23 @@ impl Service {
         let _lock = FileLock::mutation().await?;
         self.set_busy(true);
         let _busy = Busy(self);
-        let overdrive = self.state.borrow()["stores"]["settings"]["outputOverdrive"] == true;
+        let _ = self.reload_stores().await;
+        let snapshot = self.state.borrow().clone();
+        let overdrive = snapshot["stores"]["settings"]["outputOverdrive"] == true;
+        let rules = snapshot["stores"]["rules"]
+            .is_object()
+            .then_some(&snapshot["stores"]["rules"]);
         let result = if request.method == "scene.apply" {
             crate::scenes::apply(
                 native,
                 self.storage.as_ref(),
+                rules,
                 &request.params::<Apply>()?.scene,
                 overdrive,
             )
             .await
         } else {
-            crate::scenes::capture(native, &request.params::<Capture>()?.name, overdrive)
+            crate::scenes::capture(native, rules, &request.params::<Capture>()?.name, overdrive)
         };
         self.reload_stores().await?;
         result

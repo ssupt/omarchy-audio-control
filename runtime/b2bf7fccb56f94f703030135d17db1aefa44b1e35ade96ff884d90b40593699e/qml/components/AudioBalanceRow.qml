@@ -85,6 +85,7 @@ CursorSurface {
         value: root.balanceValue
         tickCount: 3
         onMoved: function(value) { root.balanceMoved(value) }
+        onReleased: function(value) { root.balanceMoved(value) }
       }
 
       Text {

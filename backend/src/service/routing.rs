@@ -17,6 +17,13 @@ struct CompatDefault {
     previous: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteAppRule {
+    app: String,
+    direction: String,
+}
+
 impl Service {
     pub(super) async fn routing_request(&self, request: &Request) -> Result<Value> {
         let native = self
@@ -32,6 +39,7 @@ impl Service {
                 defaults::select(native, self.storage.as_ref(), request.params()?).await
             }
             "default.compat" => self.compat_default(native, request.params()?).await,
+            "rules.delete_app" => self.delete_app_rule(native, request.params()?).await,
             _ => self.route_application(native, request.params()?).await,
         };
         self.reload_stores().await?;
@@ -117,29 +125,39 @@ impl Service {
                     .find(|r| r["app"] == app && r["direction"] == direction.name())
             })
             .cloned();
+        let had_pending = rules["pendingDefaultRoutes"]
+            .as_array()
+            .is_some_and(|pending| {
+                pending
+                    .iter()
+                    .any(|entry| entry["app"] == app && entry["direction"] == direction.name())
+            });
         routing::set(native, &params).await?;
-        if let Some(previous_rule) = previous_rule {
+        if previous_rule.is_some() || had_pending {
             let saved = tokio::task::spawn_blocking(move || {
                 storage.update(Kind::Rules, |store| {
-                    let rules = store["appRules"].as_array_mut().unwrap();
-                    let current = rules
-                        .iter()
-                        .find(|r| r["app"] == app && r["direction"] == direction.name());
-                    // Preserve external edits, including removal of the rule.
-                    if current.is_some_and(|r| r != &previous_rule) {
-                        return Err(Failure::new(
-                            "conflict",
-                            "Application rule changed during routing",
-                        ));
+                    if let Some(previous_rule) = previous_rule {
+                        let rules = store["appRules"].as_array_mut().unwrap();
+                        let current = rules
+                            .iter()
+                            .find(|r| r["app"] == app && r["direction"] == direction.name());
+                        // Preserve external edits, including removal of the rule.
+                        if current.is_some_and(|r| r != &previous_rule) {
+                            return Err(Failure::new(
+                                "conflict",
+                                "Application rule changed during routing",
+                            ));
+                        }
+                        if params.mode == routing::Mode::Default {
+                            rules.retain(|r| r["app"] != app || r["direction"] != direction.name());
+                        } else if let Some(rule) = rules
+                            .iter_mut()
+                            .find(|r| r["app"] == app && r["direction"] == direction.name())
+                        {
+                            rule["target"] = json!(target);
+                        }
                     }
-                    if params.mode == routing::Mode::Default {
-                        rules.retain(|r| r["app"] != app || r["direction"] != direction.name());
-                    } else if let Some(rule) = rules
-                        .iter_mut()
-                        .find(|r| r["app"] == app && r["direction"] == direction.name())
-                    {
-                        rule["target"] = json!(target);
-                    }
+                    crate::storage::set_pending_default(store, &app, direction.name(), false);
                     Ok(())
                 })
             })
@@ -151,5 +169,117 @@ impl Service {
             }
         }
         Ok(json!({"outcome":"applied"}))
+    }
+
+    async fn delete_app_rule(
+        &self,
+        native: &native::Handle,
+        params: DeleteAppRule,
+    ) -> Result<Value> {
+        let app = crate::storage::label(&json!(params.app), 120).to_ascii_lowercase();
+        if app.is_empty() {
+            return Err(Failure::new(
+                "invalid_params",
+                "Invalid audio configuration change",
+            ));
+        }
+        let direction = match params.direction.as_str() {
+            "playback" => routing::Direction::Playback,
+            "recording" => routing::Direction::Recording,
+            _ => {
+                return Err(Failure::new(
+                    "invalid_params",
+                    "Invalid audio configuration change",
+                ));
+            }
+        };
+        let storage = self.storage.clone().ok_or_else(|| {
+            Failure::new("configuration_error", "Application rules are unavailable")
+        })?;
+        let app_for_delete = app.clone();
+        let writer = storage.clone();
+        let had_rule = tokio::task::spawn_blocking(move || {
+            let mut existed = false;
+            writer.update(Kind::Rules, |store| {
+                let rules = store["appRules"].as_array_mut().unwrap();
+                let before = rules.len();
+                rules.retain(|r| r["app"] != app_for_delete || r["direction"] != direction.name());
+                existed = rules.len() != before;
+                if existed {
+                    crate::storage::set_pending_default(
+                        store,
+                        &app_for_delete,
+                        direction.name(),
+                        true,
+                    );
+                }
+                Ok(())
+            })?;
+            Ok::<_, Failure>(existed)
+        })
+        .await
+        .map_err(|_| Failure::unknown("Store operation stopped unexpectedly"))??;
+
+        let graph = native.snapshot();
+        if graph.ready && graph.connected {
+            let default_target = routing::default_name(&graph, direction).and_then(|name| {
+                let mut matches = graph.nodes.values().filter(|n| {
+                    routing::endpoint_direction(n) == Some(direction)
+                        && n.name == name
+                        && !n.serial.is_empty()
+                });
+                let target = matches.next()?;
+                matches
+                    .next()
+                    .is_none()
+                    .then(|| routing::identity(&graph, target))
+            });
+            let matching_streams: Vec<_> = graph
+                .nodes
+                .values()
+                .filter(|n| {
+                    routing::stream_direction(n) == Some(direction)
+                        && !n.serial.is_empty()
+                        && crate::automation::app(n) == app
+                })
+                .map(|n| routing::identity(&graph, n))
+                .collect();
+            if let Some(target) = default_target {
+                if !matching_streams.is_empty() {
+                    let mut cleared_any = false;
+                    let mut all_cleared = true;
+                    for stream in matching_streams {
+                        let set = routing::Set {
+                            identity: stream.clone(),
+                            target: target.clone(),
+                            mode: routing::Mode::Default,
+                        };
+                        match routing::set(native, &set).await {
+                            Ok(()) => cleared_any = true,
+                            Err(error)
+                                if error.code == "stale_node"
+                                    && !native.snapshot().nodes.contains_key(&stream.id) => {}
+                            Err(_) => all_cleared = false,
+                        }
+                    }
+                    if cleared_any && all_cleared && had_rule {
+                        let app_for_clear = app.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            storage.update(Kind::Rules, |store| {
+                                crate::storage::set_pending_default(
+                                    store,
+                                    &app_for_clear,
+                                    direction.name(),
+                                    false,
+                                );
+                                Ok(())
+                            })
+                        })
+                        .await;
+                    }
+                }
+            }
+        }
+        Ok(json!({"outcome": "applied"}))
     }
 }

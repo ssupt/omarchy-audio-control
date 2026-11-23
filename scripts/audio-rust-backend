@@ -27,7 +27,28 @@ else
 fi
 [[ $INSTALL_BASE == /* && $INSTALL_BASE != / && $CONFIG_BASE == /* && $CONFIG_BASE != / ]] || exit 2
 LIBEXEC_DIR="$INSTALL_BASE/.local/libexec/omarchy-audio-control"
+UNIT_STATE_DIR="$LIBEXEC_DIR/unit-state"
 UNIT_DIR="$CONFIG_BASE/systemd/user"
+
+ensure_dir() {
+  local dir=${1%/} mode=$2
+  [[ -n $dir ]] || dir=/
+  if [[ -d $dir ]]; then
+    return 0
+  fi
+  if [[ -e $dir || -L $dir ]]; then
+    echo "Refusing to use non-directory path: $dir" >&2
+    return 1
+  fi
+  ensure_dir "${dir%/*}" "$mode"
+  mkdir -m "$mode" -- "$dir"
+}
+
+file_sha256() {
+  local sum _rest
+  read -r sum _rest < <(sha256sum -- "$1")
+  printf '%s\n' "$sum"
+}
 
 build() {
   local artifacts
@@ -77,6 +98,18 @@ rollback_install() {
     else
       rm -f -- "$UNIT_DIR/$unit" || restored=false
     fi
+    if [[ -f $release/previous-units/$unit.installed.sha256 ]]; then
+      if cp -p -- "$release/previous-units/$unit.installed.sha256" "$UNIT_STATE_DIR/.$unit.installed.sha256.$$"; then
+        mv -Tf -- "$UNIT_STATE_DIR/.$unit.installed.sha256.$$" "$UNIT_STATE_DIR/$unit.installed.sha256" || restored=false
+      else
+        restored=false
+      fi
+    else
+      rm -f -- "$UNIT_STATE_DIR/$unit.installed.sha256" || restored=false
+    fi
+    if [[ -f $release/previous-units/$unit.created-original ]]; then
+      rm -f -- "$UNIT_STATE_DIR/$unit.original" || restored=false
+    fi
   done
   rm -f -- "$link" || restored=false
   if [[ -n $previous ]]; then
@@ -92,7 +125,8 @@ rollback_install() {
   if [[ -n $previous ]] && $was_active; then
     manager restart "$SERVICE" || restored=false
   fi
-  rm -rf -- "$unit_stage"
+  rm -rf -- "$unit_stage" "${state_stage:-}"
+  rmdir -- "$UNIT_STATE_DIR" 2>/dev/null || true
   if $restored; then
     echo "Backend installation failed; the previous installation was restored" >&2
   else
@@ -115,7 +149,10 @@ case $ACTION in
     [[ ! -e $LIBEXEC_DIR/current || -L $LIBEXEC_DIR/current ]] || {
       echo "Refusing to replace an unmanaged current release" >&2; exit 1;
     }
-    install -d -m 755 -- "$LIBEXEC_DIR/releases" "$UNIT_DIR" "$CONFIG_BASE/omarchy"
+    ensure_dir "$LIBEXEC_DIR/releases" 755
+    ensure_dir "$UNIT_STATE_DIR" 700
+    ensure_dir "$UNIT_DIR" 755
+    ensure_dir "$CONFIG_BASE/omarchy" 755
     release=$(mktemp -d "$LIBEXEC_DIR/releases/release.XXXXXXXX")
     chmod 755 -- "$release"
     install -m 755 -- "$BINARY" "$release/omarchy-audio-service"
@@ -124,19 +161,35 @@ case $ACTION in
     was_active=false
     if { [[ -z $STAGE ]] || [[ -n ${AUDIO_BACKEND_STAGE_SYSTEMCTL:-} ]]; } &&
         manager is-active --quiet "$SERVICE"; then was_active=true; fi
-    install -d -m 700 -- "$release/previous-units"
+    mkdir -m 700 -- "$release/previous-units"
     for unit in "$SERVICE" "$SOCKET"; do
       if [[ -e $UNIT_DIR/$unit || -L $UNIT_DIR/$unit ]]; then
         [[ -f $UNIT_DIR/$unit && ! -L $UNIT_DIR/$unit ]] || {
           echo "Refusing to replace a non-regular user unit" >&2; exit 1;
         }
+      fi
+    done
+    for unit in "$SERVICE" "$SOCKET"; do
+      if [[ -e $UNIT_DIR/$unit ]]; then
         cp -p -- "$UNIT_DIR/$unit" "$release/previous-units/$unit"
+      fi
+      if [[ -f $UNIT_STATE_DIR/$unit.installed.sha256 && ! -L $UNIT_STATE_DIR/$unit.installed.sha256 ]]; then
+        cp -p -- "$UNIT_STATE_DIR/$unit.installed.sha256" "$release/previous-units/$unit.installed.sha256"
+      elif [[ -f $release/previous-units/$unit ]]; then
+        if [[ -z $previous ]] || ! cmp -s -- "$release/previous-units/$unit" "$ROOT/packaging/systemd/$unit"; then
+          cp -p -- "$release/previous-units/$unit" "$UNIT_STATE_DIR/$unit.original"
+          touch "$release/previous-units/$unit.created-original"
+        fi
       fi
     done
     unit_stage=$(mktemp -d "$UNIT_DIR/.audio-backend.XXXXXXXX")
-    trap 'rm -rf -- "$unit_stage"' EXIT
+    state_stage=$(mktemp -d "$UNIT_STATE_DIR/.stage.XXXXXXXX")
+    trap 'rm -rf -- "$unit_stage" "$state_stage"' EXIT
     install -m 644 -- "$ROOT/packaging/systemd/$SERVICE" "$unit_stage/$SERVICE"
     install -m 644 -- "$ROOT/packaging/systemd/$SOCKET" "$unit_stage/$SOCKET"
+    file_sha256 "$unit_stage/$SERVICE" >"$state_stage/$SERVICE.installed.sha256"
+    file_sha256 "$unit_stage/$SOCKET" >"$state_stage/$SOCKET.installed.sha256"
+    chmod 600 -- "$state_stage/$SERVICE.installed.sha256" "$state_stage/$SOCKET.installed.sha256"
     link="$LIBEXEC_DIR/.current.$$"
     ln -s -- "releases/${release##*/}" "$link"
     trap 'rollback_install "$?"' EXIT
@@ -145,6 +198,8 @@ case $ACTION in
     trap 'exit 143' TERM
     mv -Tf -- "$unit_stage/$SERVICE" "$UNIT_DIR/$SERVICE"
     mv -Tf -- "$unit_stage/$SOCKET" "$UNIT_DIR/$SOCKET"
+    mv -Tf -- "$state_stage/$SERVICE.installed.sha256" "$UNIT_STATE_DIR/$SERVICE.installed.sha256"
+    mv -Tf -- "$state_stage/$SOCKET.installed.sha256" "$UNIT_STATE_DIR/$SOCKET.installed.sha256"
     mv -Tf -- "$link" "$LIBEXEC_DIR/current"
     activated=false
     if manager daemon-reload && manager enable --now "$SOCKET"; then
@@ -154,13 +209,35 @@ case $ACTION in
       exit 1
     fi
     trap - EXIT HUP INT TERM
-    rm -rf -- "$unit_stage"
+    rm -rf -- "$unit_stage" "$state_stage"
     echo "Installed $LIBEXEC_DIR/current"
     ;;
   uninstall)
-    manager disable --now "$SOCKET"
-    manager stop "$SERVICE"
-    rm -f -- "$UNIT_DIR/$SERVICE" "$UNIT_DIR/$SOCKET" "$LIBEXEC_DIR/current"
+    if [[ -f $UNIT_STATE_DIR/$SOCKET.installed.sha256 || -L $LIBEXEC_DIR/current ]]; then
+      manager disable --now "$SOCKET"
+    fi
+    if [[ -f $UNIT_STATE_DIR/$SERVICE.installed.sha256 || -L $LIBEXEC_DIR/current ]]; then
+      manager stop "$SERVICE"
+    fi
+    for unit in "$SERVICE" "$SOCKET"; do
+      if [[ -f $UNIT_STATE_DIR/$unit.installed.sha256 && ! -L $UNIT_STATE_DIR/$unit.installed.sha256 ]]; then
+        expected_sha=$(<"$UNIT_STATE_DIR/$unit.installed.sha256")
+        if [[ -f $UNIT_DIR/$unit && ! -L $UNIT_DIR/$unit ]]; then
+          current_sha=$(file_sha256 "$UNIT_DIR/$unit")
+          if [[ $current_sha == "$expected_sha" ]]; then
+            if [[ -f $UNIT_STATE_DIR/$unit.original && ! -L $UNIT_STATE_DIR/$unit.original ]]; then
+              restore_tmp=$(mktemp "$UNIT_DIR/.audio-backend-restore.XXXXXXXX")
+              cp -p -- "$UNIT_STATE_DIR/$unit.original" "$restore_tmp"
+              mv -Tf -- "$restore_tmp" "$UNIT_DIR/$unit"
+            else
+              rm -f -- "$UNIT_DIR/$unit"
+            fi
+          fi
+        fi
+      fi
+    done
+    rm -f -- "$LIBEXEC_DIR/current"
+    rm -rf -- "$UNIT_STATE_DIR"
     for release in "$LIBEXEC_DIR"/releases/release.*; do
       [[ -d $release && ! -L $release && -f $release/.audio-control-release ]] || continue
       rm -rf -- "$release"

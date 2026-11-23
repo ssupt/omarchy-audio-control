@@ -88,7 +88,7 @@ impl Service {
                 let next_groups = crate::automation::group_signature(&graph, rules);
                 let routes = crate::automation::routes(&graph, rules);
                 let keys: std::collections::BTreeSet<_> =
-                    routes.iter().map(|(key, _)| key.clone()).collect();
+                    routes.iter().map(|route| route.key.clone()).collect();
                 attempted.retain(|key| keys.contains(key));
                 let reconcile = next_groups != groups
                     && (rules["outputGroups"]
@@ -98,7 +98,7 @@ impl Service {
                             .nodes
                             .values()
                             .any(|n| crate::storage::group_sink(&n.name)));
-                if !reconcile && routes.iter().all(|(key, _)| attempted.contains(key)) {
+                if !reconcile && routes.iter().all(|route| attempted.contains(&route.key)) {
                     signature = next_signature;
                     groups = next_groups;
                     continue;
@@ -151,32 +151,87 @@ impl Service {
                 groups = next_groups;
                 service.set_busy(true);
                 let _busy = Busy(&service);
-                if reconcile
-                    && service
+                if reconcile {
+                    match service
                         .change_groups(crate::groups::Change::Reconcile)
                         .await
-                        .is_err()
-                {
-                    service.update_state(|s| {
-                        s["automationError"] = json!("Some output groups could not be restored")
-                    });
+                    {
+                        Ok(result) => {
+                            let pending = result
+                                .get("pendingGroups")
+                                .cloned()
+                                .unwrap_or_else(|| json!([]));
+                            let has_pending =
+                                pending.as_array().is_some_and(|items| !items.is_empty());
+                            service.update_state(|s| {
+                                s["pendingGroups"] = pending;
+                                if has_pending {
+                                    s["automationError"] = json!(
+                                        "An output group change is pending while the group is in use"
+                                    );
+                                } else {
+                                    s["automationError"] = json!("");
+                                }
+                            });
+                        }
+                        Err(_) => {
+                            service.update_state(|s| {
+                                s["automationError"] =
+                                    json!("Some output groups could not be restored")
+                            });
+                        }
+                    }
                 }
                 let started = std::time::Instant::now();
-                for (key, params) in routes {
+                let mut cleared_pending = Vec::new();
+                for route in routes {
                     if *users.borrow() == 0 || started.elapsed().as_secs() > 60 {
                         break;
                     }
-                    if !attempted.insert(key) {
+                    if attempted.contains(&route.key) {
                         continue;
                     }
-                    if let Err(error) = crate::routing::set(native, &params).await {
-                        service.update_state(|s| {
-                            s["automationError"] = json!("An application rule could not be applied")
-                        });
-                        if error.outcome == "unknown" {
-                            break;
+                    match crate::routing::set(native, &route.set).await {
+                        Ok(()) => {
+                            if let Some(entry) = route.clear_pending {
+                                cleared_pending.push(entry);
+                            }
+                        }
+                        Err(error) => {
+                            attempted.insert(route.key);
+                            service.update_state(|s| {
+                                s["automationError"] =
+                                    json!("An application rule could not be applied")
+                            });
+                            if error.outcome == "unknown" {
+                                break;
+                            }
                         }
                     }
+                }
+                if !cleared_pending.is_empty() {
+                    if let Some(storage) = service.storage.clone() {
+                        let _ = tokio::task::spawn_blocking(move || {
+                            storage.update(crate::storage::Kind::Rules, |store| {
+                                for (app, direction) in &cleared_pending {
+                                    crate::storage::set_pending_default(
+                                        store, app, direction, false,
+                                    );
+                                }
+                                Ok(())
+                            })
+                        })
+                        .await;
+                        let _ = service.reload_stores().await;
+                    }
+                }
+                let final_graph = native.snapshot();
+                let final_snapshot = service.state.borrow().clone();
+                if final_graph.ready && final_snapshot["stores"]["rules"].is_object() {
+                    signature = crate::automation::signature(
+                        &final_graph,
+                        &final_snapshot["stores"]["rules"],
+                    );
                 }
             }
         });

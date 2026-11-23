@@ -24,6 +24,15 @@ impl Service {
         self.set_busy_for(true, &request.method);
         let _busy = Busy(self);
         let result = self.change_groups(change).await;
+        if let Ok(value) = &result {
+            if let Some(id) = value.get("id").and_then(Value::as_str) {
+                self.update_state(|state| {
+                    if let Some(pending) = state["pendingGroups"].as_array_mut() {
+                        pending.retain(|item| item != id);
+                    }
+                });
+            }
+        }
         self.reload_stores().await?;
         result
     }

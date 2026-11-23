@@ -224,6 +224,7 @@ impl Storage {
                         json!({"app": app, "direction": params.direction, "target": params.target}),
                     );
                     keep_last(rules, 64);
+                    set_pending_default(store, &app, &params.direction, false);
                     Ok(())
                 })?
             }
@@ -493,6 +494,27 @@ fn strings(value: &Value, max: usize) -> Value {
     ))
 }
 
+pub fn set_pending_default(store: &mut Value, app: &str, direction: &str, pending: bool) {
+    let Some(object) = store.as_object_mut() else {
+        return;
+    };
+    let mut entries = object
+        .get("pendingDefaultRoutes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    entries.retain(|entry| entry["app"] != app || entry["direction"] != direction);
+    if pending {
+        entries.push(json!({"app": app, "direction": direction}));
+        keep_last(&mut entries, 64);
+    }
+    if entries.is_empty() {
+        object.shift_remove("pendingDefaultRoutes");
+    } else {
+        object.insert("pendingDefaultRoutes".into(), Value::Array(entries));
+    }
+}
+
 pub fn normalize(kind: Kind, raw: &Value) -> Value {
     match kind {
         Kind::Settings => {
@@ -550,8 +572,37 @@ pub fn normalize(kind: Kind, raw: &Value) -> Value {
                     aliases.entry(node).or_insert(json!(label));
                 }
             }
-            json!({"version": 1, "appRules": rules, "outputGroups": normalize_groups(&raw["outputGroups"]),
-                "devices": {"aliases": aliases, "favorites": strings(&raw["devices"]["favorites"],64), "hidden": strings(&raw["devices"]["hidden"],64)}})
+            let rule_keys: BTreeSet<String> = rules
+                .iter()
+                .filter_map(|r| {
+                    Some(format!(
+                        "{}:{}",
+                        r["direction"].as_str()?,
+                        r["app"].as_str()?
+                    ))
+                })
+                .collect();
+            let pending = unique(
+                array(&raw["pendingDefaultRoutes"], 256).filter_map(|entry| {
+                    let app = label(&entry["app"], 120).to_ascii_lowercase();
+                    let direction = entry["direction"].as_str().unwrap_or("");
+                    if app.is_empty() || require_direction(direction, true).is_err() {
+                        return None;
+                    }
+                    let key = format!("{direction}:{app}");
+                    if rule_keys.contains(&key) {
+                        return None;
+                    }
+                    Some((key, json!({"app": app, "direction": direction})))
+                }),
+                64,
+            );
+            let mut normalized = json!({"version": 1, "appRules": rules, "outputGroups": normalize_groups(&raw["outputGroups"]),
+                "devices": {"aliases": aliases, "favorites": strings(&raw["devices"]["favorites"],64), "hidden": strings(&raw["devices"]["hidden"],64)}});
+            if !pending.is_empty() {
+                normalized["pendingDefaultRoutes"] = Value::Array(pending);
+            }
+            normalized
         }
         Kind::Scenes => {
             json!({"version": 1, "scenes": unique(array(&raw["scenes"], 96).filter_map(normalize_scene)

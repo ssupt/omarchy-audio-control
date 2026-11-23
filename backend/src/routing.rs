@@ -145,6 +145,12 @@ pub fn default_name(graph: &Graph, direction: Direction) -> Option<String> {
         .as_str()
         .map(str::to_owned)
 }
+pub fn configured_default_name(graph: &Graph, direction: Direction) -> Option<String> {
+    let raw = metadata::value(graph, "default", direction.configured_key())?;
+    serde_json::from_str::<Value>(&raw.value).ok()?["name"]
+        .as_str()
+        .map(str::to_owned)
+}
 pub fn target<'a>(
     graph: &'a Graph,
     stream: &Node,

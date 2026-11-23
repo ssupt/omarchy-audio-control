@@ -247,13 +247,30 @@ with tempfile.TemporaryDirectory(prefix='audio-groups-') as temporary, ExitStack
         assert all((work/'config/omarchy'/name).read_bytes() == data for name, data in documents.items())
         print('PASS: reconnect restores the selected group and playback without rewriting saved settings', flush=True)
 
+        # Finding 6: scenes capture and restore a healthy owned output group,
+        # and report it as skipped when the saved group is unavailable.
+        captured_group_scene = client.request('scene.capture', dict(name='Group Scene'))
+        assert captured_group_scene['defaults']['output'] == group_name, captured_group_scene
+        left_node = next(n for n in client.state['nodes'] if n['name'] == 'audio_test_left')
+        assert client.request('default.set', dict(identity=dict(generation=client.state['generation'],
+            id=left_node['id'], serial=left_node['serial'])))['outcome'] == 'applied'
+        until(lambda: run('pactl', 'get-default-sink').strip() == 'audio_test_left')
+        applied_group_scene = client.request('scene.apply', dict(scene=captured_group_scene))
+        assert applied_group_scene['outcome'] == 'applied' and not applied_group_scene['errors'], applied_group_scene
+        assert not applied_group_scene['skipped'], applied_group_scene
+        until(lambda: run('pactl', 'get-default-sink').strip() == group_name
+              and player_sink() == group['index'])
+
         stop(right)
         until(lambda: all(s['name'] != group_name for s in sinks()))
+        skipped_group_scene = client.request('scene.apply', dict(scene=captured_group_scene))
+        assert group_name in skipped_group_scene['skipped'], skipped_group_scene
+        print('PASS: scenes round-trip an owned output group and skip it when unavailable', flush=True)
         # An explicit selection during fallback replaces the remembered group.
         run('pactl', 'set-default-sink', 'audio_test_output')
         other = next(s for s in sinks() if s['name'] == 'audio_test_output')
         until(lambda: player_sink() == other['index'])
-        member('audio_test_right')
+        right = member('audio_test_right')
         until(lambda: any(s['name'] == group_name for s in sinks()))
         assert run('pactl', 'get-default-sink').strip() == other['name']
         assert player_sink() == other['index'] and player.poll() is None
@@ -270,6 +287,80 @@ with tempfile.TemporaryDirectory(prefix='audio-groups-') as temporary, ExitStack
         assert group_name not in final_rules['devices']['aliases']
         assert group_name not in final_rules['devices']['favorites']
         assert group_name not in final_rules['devices']['hidden']
+
+        # Finding 4: explicitly selecting the current fallback output after a
+        # preferred device disconnects must replace WirePlumber's configured default.
+        dock = member('audio_test_dock')
+        until(lambda: any(s['name'] == 'audio_test_dock' for s in sinks()))
+        client.wait_state(lambda s: any(n['name'] == 'audio_test_dock' and n['state'] for n in s['nodes']))
+        dock_node = next(n for n in client.state['nodes'] if n['name'] == 'audio_test_dock')
+        assert client.request('default.set', dict(identity=dict(generation=client.state['generation'],
+            id=dock_node['id'], serial=dock_node['serial'])))['outcome'] == 'applied'
+        until(lambda: run('pactl', 'get-default-sink').strip() == 'audio_test_dock')
+        stop(dock)
+        until(lambda: all(s['name'] != 'audio_test_dock' for s in sinks()))
+        until(lambda: run('pactl', 'get-default-sink').strip() != 'audio_test_dock')
+        fallback_name = run('pactl', 'get-default-sink').strip()
+        client.wait_state(lambda s: json.loads(s['metadata']['default']['0:default.audio.sink']['value'])['name'] == fallback_name)
+        assert json.loads(client.state['metadata']['default']['0:default.configured.audio.sink']['value'])['name'] == 'audio_test_dock'
+        fallback_node = next(n for n in client.state['nodes'] if n['name'] == fallback_name)
+        assert client.request('default.set', dict(identity=dict(generation=client.state['generation'],
+            id=fallback_node['id'], serial=fallback_node['serial'])))['outcome'] == 'applied'
+        client.wait_state(lambda s: json.loads(s['metadata']['default']['0:default.configured.audio.sink']['value'])['name'] == fallback_name)
+        dock = member('audio_test_dock')
+        until(lambda: any(s['name'] == 'audio_test_dock' for s in sinks()))
+        time.sleep(0.5)
+        assert run('pactl', 'get-default-sink').strip() == fallback_name
+        assert json.loads(client.state['metadata']['default']['0:default.configured.audio.sink']['value'])['name'] == fallback_name
+        stop(dock)
+        until(lambda: all(s['name'] != 'audio_test_dock' for s in sinks()))
+        print('PASS: explicit fallback selection replaces WirePlumber preferred default across reconnect', flush=True)
+
+        # Finding 5: restoring a rules file with changed group members must rebuild
+        # an unused group to match the actual destinations and report pending when in use.
+        third = member('audio_test_third')
+        until(lambda: any(s['name'] == 'audio_test_third' for s in sinks()))
+        client.wait_state(lambda s: any(n['name'] == 'audio_test_third' and n['state'] for n in s['nodes']))
+        def actual_group_targets(target_group_name):
+            all_sinks = sinks()
+            by_index = {s['index']: s['name'] for s in all_sinks}
+            group_sink = next((s for s in all_sinks if s['name'] == target_group_name), None)
+            if not group_sink:
+                return set()
+            streams = json.loads(run('pactl', '-f', 'json', 'list', 'sink-inputs'))
+            return {by_index.get(s['sink']) for s in streams
+                    if s['owner_module'] == str(group_sink['owner_module'])}
+        restored_id = until(lambda: change('create', name='Restored group',
+            members=['audio_test_left', 'audio_test_right']))
+        restored_name = 'omarchy_audio_group_' + restored_id
+        until(lambda: actual_group_targets(restored_name) == {'audio_test_left', 'audio_test_right'})
+        run('pactl', 'set-default-sink', 'audio_test_left')
+        until(lambda: run('pactl', 'get-default-sink').strip() == 'audio_test_left')
+        edited = json.loads(rules_path.read_text())
+        edited['outputGroups'][0]['members'] = ['audio_test_left', 'audio_test_third']
+        rules_path.write_text(json.dumps(edited))
+        until(lambda: actual_group_targets(restored_name) == {'audio_test_left', 'audio_test_third'})
+        # Now make the group active (in use) and restore rules changing members back.
+        run('pactl', 'set-default-sink', restored_name)
+        until(lambda: run('pactl', 'get-default-sink').strip() == restored_name)
+        edited['outputGroups'][0]['members'] = ['audio_test_left', 'audio_test_right']
+        rules_path.write_text(json.dumps(edited))
+        client.wait_state(lambda s: restored_id in (s.get('pendingGroups') or []))
+        assert actual_group_targets(restored_name) == {'audio_test_left', 'audio_test_third'}
+        # Submitting the displayed membership while the running module still has old members must fail while in use.
+        rejected('update', id=restored_id, name='Restored group', members=['audio_test_left', 'audio_test_right'])
+        assert actual_group_targets(restored_name) == {'audio_test_left', 'audio_test_third'}
+        # Once no longer in use, reconciliation rebuilds the group to the saved members.
+        run('pactl', 'set-default-sink', 'audio_test_left')
+        until(lambda: run('pactl', 'get-default-sink').strip() == 'audio_test_left')
+        until(lambda: actual_group_targets(restored_name) == {'audio_test_left', 'audio_test_right'})
+        client.wait_state(lambda s: restored_id not in (s.get('pendingGroups') or []))
+        change('delete', id=restored_id)
+        until(lambda: all(s['name'] != restored_name for s in sinks()))
+        stop(third)
+        until(lambda: all(s['name'] != 'audio_test_third' for s in sinks()))
+        final_rules = json.loads(rules_path.read_text())
+        print('PASS: restored group membership rebuilds unused modules and reports pending changes while in use', flush=True)
 
         for use in ('default', 'stream'):
             deferred_id = until(lambda: change('create', name='Deferred cleanup',

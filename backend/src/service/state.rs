@@ -67,6 +67,7 @@ impl Service {
             state["catalogReady"] = json!(native::catalog::ready(graph));
             state["generation"] = json!(graph.generation);
             state["error"] = json!(graph.error);
+            state["master"] = crate::outputs::master_snapshot(graph);
             state["nodes"] = json!(graph.nodes.values().collect::<Vec<_>>());
             state["devices"] = json!(graph.devices.values().collect::<Vec<_>>());
             state["links"] = links;

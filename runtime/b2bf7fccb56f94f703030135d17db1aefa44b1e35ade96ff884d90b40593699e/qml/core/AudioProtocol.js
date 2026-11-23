@@ -107,6 +107,9 @@ Client.prototype.open = function() {
     }, { mutating: false, timeout: 5000 })
   }, { mutating: false, timeout: 5000 })
 }
+Client.prototype.hasCapacity = function() {
+  return this.connected && this.ready && Object.keys(this.pending).length < MAX_PENDING
+}
 Client.prototype.request = function(method, params, callback, settings) {
   settings = settings || {}
   if (!this.connected || (!this.ready && ["hello", "health", "state.subscribe"].indexOf(method) === -1)) {
@@ -192,6 +195,7 @@ Client.prototype.line = function(line) {
   var entry = this.pending[message.id]
   delete this.pending[message.id]
   this.callback(entry.callback, own(message, "result") ? message.result : null, message.error || null)
+  if (this.connected && this.ready && this.options.capacity) this.options.capacity()
 }
 Client.prototype.event = function(name, data) {
   if (name === "snapshot.begin") {

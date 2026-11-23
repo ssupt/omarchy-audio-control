@@ -9,7 +9,7 @@ use libpulse_binding::context::introspect::SinkInfo;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt::Write,
     io::Read,
     time::{Duration, Instant},
@@ -114,9 +114,7 @@ pub fn apply(native: &native::Handle, storage: &Storage, change: Change) -> Resu
         generation: generation.clone(),
     };
     if matches!(change, Change::Reconcile) {
-        return server
-            .reconcile(&groups)
-            .map(|()| json!({"outcome":"applied"}));
+        return server.reconcile(&groups);
     }
     let (old, new) = match change {
         Change::Create(params) => {
@@ -175,9 +173,20 @@ pub fn apply(native: &native::Handle, storage: &Storage, change: Change) -> Resu
     }
     let id = old.as_ref().or(new.as_ref()).unwrap().id.clone();
     let previous = old.as_ref().map(|g| server.owned(g)).transpose()?.flatten();
+    let mismatch = previous
+        .as_ref()
+        .zip(new.as_ref())
+        .map(|(owned, new)| {
+            server
+                .destinations_match(owned, new)
+                .map(|matched| !matched)
+        })
+        .transpose()?
+        .unwrap_or(false);
     let replacing = old
         .as_ref()
-        .is_some_and(|old| new.as_ref().is_none_or(|new| new.members != old.members));
+        .is_some_and(|old| new.as_ref().is_none_or(|new| new.members != old.members))
+        || mismatch;
     if replacing {
         if let Some(old) = &old {
             server.remove(old, false)?;
@@ -232,8 +241,14 @@ pub fn apply(native: &native::Handle, storage: &Storage, change: Change) -> Resu
                 if created {
                     server.remove(new.as_ref().unwrap(), false)?;
                 }
-                if replacing && previous.is_some() {
-                    server.ensure(old.as_ref().unwrap())?;
+                if replacing {
+                    if let Some(prev_owned) = previous.as_ref() {
+                        let mut restored = old.as_ref().unwrap().clone();
+                        if let Some(actual_members) = module_members(&prev_owned.argument) {
+                            restored.members = actual_members;
+                        }
+                        server.ensure(&restored)?;
+                    }
                 }
                 Ok::<_, Failure>(())
             })();
@@ -246,6 +261,12 @@ pub fn apply(native: &native::Handle, storage: &Storage, change: Change) -> Resu
             }
         }
     }
+}
+
+struct Owned {
+    sink: SinkInfo<'static>,
+    module: u32,
+    argument: String,
 }
 
 struct Server<'a> {
@@ -279,7 +300,7 @@ impl Server<'_> {
             Err(conflict())
         }
     }
-    fn owned(&mut self, group: &Group) -> Result<Option<SinkInfo<'static>>> {
+    fn owned(&mut self, group: &Group) -> Result<Option<Owned>> {
         self.guard()?;
         let sinks = self.pulse.sinks()?;
         let modules = self.pulse.modules()?;
@@ -309,25 +330,58 @@ impl Server<'_> {
                         == sink.owner_module
                     && sink_owned(&sink, group) =>
             {
-                Ok(Some(sink))
+                Ok(Some(Owned {
+                    sink,
+                    module: owned[0].index,
+                    argument: owned[0].argument.as_deref().unwrap_or("").to_owned(),
+                }))
             }
             _ => Err(conflict()),
         }
     }
-    fn ensure(&mut self, group: &Group) -> Result<bool> {
-        self.require_members(group)?;
-        if self.owned(group)?.is_some() {
+    fn destinations_match(&mut self, owned: &Owned, group: &Group) -> Result<bool> {
+        if module_members(&owned.argument).as_deref() != Some(group.members.as_slice()) {
             return Ok(false);
         }
         self.guard()?;
+        let sinks = self.pulse.sinks()?;
+        let sink_names: BTreeMap<u32, &str> = sinks
+            .iter()
+            .filter_map(|sink| Some((sink.index, sink.name.as_deref()?)))
+            .collect();
+        let inputs: Vec<_> = self
+            .pulse
+            .sink_inputs()?
+            .into_iter()
+            .filter(|input| input.owner_module == Some(owned.module))
+            .collect();
+        if inputs.len() != group.members.len() {
+            return Ok(false);
+        }
+        let actual: BTreeSet<String> = inputs
+            .iter()
+            .filter_map(|input| sink_names.get(&input.sink).map(|name| (*name).to_owned()))
+            .collect();
+        let expected: BTreeSet<String> = group.members.iter().cloned().collect();
+        Ok(actual == expected)
+    }
+    fn ensure(&mut self, group: &Group) -> Result<bool> {
+        self.require_members(group)?;
+        if let Some(owned) = self.owned(group)? {
+            if self.destinations_match(&owned, group)? {
+                return Ok(false);
+            }
+            return Err(conflict());
+        }
+        self.guard()?;
         let module = self.pulse.load(&group.arguments())?;
-        let deadline = Instant::now() + Duration::from_secs(1);
+        let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            if self
-                .owned(group)
-                .is_ok_and(|s| s.is_some_and(|s| s.owner_module == Some(module)))
-            {
-                return Ok(true);
+            if let Ok(Some(owned)) = self.owned(group) {
+                if owned.module == module && self.destinations_match(&owned, group).unwrap_or(false)
+                {
+                    return Ok(true);
+                }
             }
             if Instant::now() >= deadline {
                 break;
@@ -361,7 +415,7 @@ impl Server<'_> {
     fn unmute_outputs(&mut self, group: &Group) -> Result<()> {
         let module = self
             .owned(group)?
-            .and_then(|sink| sink.owner_module)
+            .map(|owned| owned.module)
             .ok_or_else(conflict)?;
         // PipeWire can restore a previous mute on the combine module's
         // playback streams even while the visible group sink is unmuted.
@@ -384,14 +438,15 @@ impl Server<'_> {
         Ok(())
     }
     fn remove(&mut self, group: &Group, degraded: bool) -> Result<()> {
-        let Some(sink) = self.owned(group)? else {
+        let Some(owned) = self.owned(group)? else {
             return Ok(());
         };
         // Recheck identity immediately before unloading, including the sink serial.
         let current = self.owned(group)?.ok_or_else(conflict)?;
-        if current.index != sink.index
-            || current.owner_module != sink.owner_module
-            || current.proplist.get_str("object.serial") != sink.proplist.get_str("object.serial")
+        if current.sink.index != owned.sink.index
+            || current.module != owned.module
+            || current.sink.proplist.get_str("object.serial")
+                != owned.sink.proplist.get_str("object.serial")
         {
             return Err(conflict());
         }
@@ -399,13 +454,12 @@ impl Server<'_> {
             if self.members_present(group)? {
                 return Err(conflict());
             }
-        } else if self.pulse.in_use(&current)? {
+        } else if self.pulse.in_use(&current.sink)? {
             return Err(conflict());
         }
         self.guard()?;
-        let module = sink.owner_module.ok_or_else(conflict)?;
-        self.pulse.unload(module)?;
-        self.absent(group, module)
+        self.pulse.unload(owned.module)?;
+        self.absent(group, owned.module)
             .map_err(|_| Failure::unknown("Could not verify output group removal"))
     }
     fn absent(&mut self, group: &Group, module: u32) -> Result<()> {
@@ -427,11 +481,30 @@ impl Server<'_> {
             std::thread::sleep(Duration::from_millis(25));
         }
     }
-    fn reconcile(&mut self, groups: &[Group]) -> Result<()> {
+    fn reconcile(&mut self, groups: &[Group]) -> Result<Value> {
         let mut failed = false;
+        let mut pending = Vec::new();
         for group in groups {
-            let result = if self.members_present(group)? {
-                self.ensure(group).and_then(|_| self.unmute_outputs(group))
+            let result: Result<()> = if self.members_present(group)? {
+                match self.owned(group) {
+                    Ok(Some(owned)) => match self.destinations_match(&owned, group) {
+                        Ok(true) => self.unmute_outputs(group),
+                        Ok(false) => match self.pulse.in_use(&owned.sink) {
+                            Ok(true) => {
+                                pending.push(group.id.clone());
+                                Ok(())
+                            }
+                            Ok(false) => self
+                                .remove(group, false)
+                                .and_then(|()| self.ensure(group))
+                                .and_then(|_| self.unmute_outputs(group)),
+                            Err(error) => Err(error),
+                        },
+                        Err(error) => Err(error),
+                    },
+                    Ok(None) => self.ensure(group).and_then(|_| self.unmute_outputs(group)),
+                    Err(error) => Err(error),
+                }
             } else {
                 self.remove(group, true)
             };
@@ -475,10 +548,31 @@ impl Server<'_> {
                 "group_failed",
                 "Some output groups could not be restored",
             ))
+        } else if !pending.is_empty() {
+            Ok(json!({"outcome": "pending", "pendingGroups": pending}))
         } else {
-            Ok(())
+            Ok(json!({"outcome": "applied", "pendingGroups": []}))
         }
     }
+}
+
+fn module_members(arguments: &str) -> Option<Vec<String>> {
+    let mut matches = arguments
+        .split_ascii_whitespace()
+        .filter_map(|word| word.trim_matches(['\'', '"']).strip_prefix("sinks="));
+    let value = matches.next()?;
+    if matches.next().is_some() || value.is_empty() {
+        return None;
+    }
+    let raw: Vec<&str> = value.split(',').collect();
+    let count = raw.len();
+    if !(2..=8).contains(&count) || raw.iter().any(|m| !storage::group_member(m)) {
+        return None;
+    }
+    let mut members: Vec<String> = raw.into_iter().map(str::to_owned).collect();
+    members.sort();
+    members.dedup();
+    (members.len() == count).then_some(members)
 }
 
 fn module_owned(arguments: &str, group: &Group) -> bool {
@@ -555,5 +649,15 @@ mod tests {
             &group.arguments().replace("sink_name=", "other_sink_name="),
             &group
         ));
+        assert_eq!(
+            module_members(&group.arguments()).as_deref(),
+            Some(["a".to_string(), "b".to_string()].as_slice())
+        );
+        assert_eq!(
+            module_members(&group.arguments().replace("sinks=a,b", "sinks=a,c")).as_deref(),
+            Some(["a".to_string(), "c".to_string()].as_slice())
+        );
+        assert!(module_members(&group.arguments().replace("sinks=a,b", "sinks=a,a")).is_none());
+        assert!(module_members(&group.arguments().replace("sinks=a,b", "sinks=a")).is_none());
     }
 }
