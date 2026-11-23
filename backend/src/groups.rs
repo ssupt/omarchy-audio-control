@@ -248,6 +248,7 @@ pub fn apply(native: &native::Handle, storage: &Storage, change: Change) -> Resu
                             restored.members = actual_members;
                         }
                         server.ensure(&restored)?;
+                        server.unmute_outputs(&restored)?;
                     }
                 }
                 Ok::<_, Failure>(())
@@ -543,23 +544,26 @@ impl Server<'_> {
                 }
             }
         }
-        if failed {
-            Err(Failure::new(
-                "group_failed",
-                "Some output groups could not be restored",
-            ))
-        } else if !pending.is_empty() {
-            Ok(json!({"outcome": "pending", "pendingGroups": pending}))
-        } else {
-            Ok(json!({"outcome": "applied", "pendingGroups": []}))
-        }
+        Ok(json!({
+            "outcome": if failed {
+                "partial"
+            } else if !pending.is_empty() {
+                "pending"
+            } else {
+                "applied"
+            },
+            "pendingGroups": pending,
+            "failed": failed
+        }))
     }
 }
 
 fn module_members(arguments: &str) -> Option<Vec<String>> {
-    let mut matches = arguments
-        .split_ascii_whitespace()
-        .filter_map(|word| word.trim_matches(['\'', '"']).strip_prefix("sinks="));
+    let mut matches = arguments.split_ascii_whitespace().filter_map(|word| {
+        word.trim_matches(['\'', '"'])
+            .strip_prefix("sinks=")
+            .map(|value| value.trim_matches(['\'', '"']))
+    });
     let value = matches.next()?;
     if matches.next().is_some() || value.is_empty() {
         return None;
@@ -655,6 +659,10 @@ mod tests {
         );
         assert_eq!(
             module_members(&group.arguments().replace("sinks=a,b", "sinks=a,c")).as_deref(),
+            Some(["a".to_string(), "c".to_string()].as_slice())
+        );
+        assert_eq!(
+            module_members(&group.arguments().replace("sinks=a,b", "sinks=\"a,c\"")).as_deref(),
             Some(["a".to_string(), "c".to_string()].as_slice())
         );
         assert!(module_members(&group.arguments().replace("sinks=a,b", "sinks=a,a")).is_none());

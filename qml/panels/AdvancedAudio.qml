@@ -489,7 +489,7 @@ Item {
     var node = selectedIndex === outputBalanceIndex ? outputDevice
       : (selectedIndex === inputBalanceIndex ? inputDevice : null)
     if (!node) return false
-    return setBalance(node, balanceFor(node) + delta * 0.1)
+    return setBalance(node, Math.max(-1, Math.min(1, balanceFor(node) + delta * 0.1)))
   }
 
   function clampCursor() {

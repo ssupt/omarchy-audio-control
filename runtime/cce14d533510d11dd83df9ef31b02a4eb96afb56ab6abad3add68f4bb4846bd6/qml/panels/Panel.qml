@@ -190,10 +190,15 @@ Panel {
   }
   readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
   readonly property string recordingTooltip: {
-    var microphoneAction = hasInput
-      ? "Middle-click to " + (inputMuted ? "unmute" : "mute") + " microphone"
+    var activeRecording = recordingApplicationCount > 0
+    var canMuteMicrophone = activeRecording
+      ? (masterState ? masterState.hasInput === true : hasInput)
+      : hasInput
+    var microphoneCurrentlyMuted = activeRecording ? activeRecordingMuted : inputMuted
+    var microphoneAction = canMuteMicrophone
+      ? "Middle-click to " + (microphoneCurrentlyMuted ? "unmute" : "mute") + " microphone"
       : ""
-    if (recordingApplicationCount === 0) {
+    if (!activeRecording) {
       var outputStatus = outputMuted ? "Output muted" : "Output " + Math.round(outputVolume * 100) + "%"
       return microphoneAction === "" ? outputStatus : outputStatus + "\n" + microphoneAction
     }
@@ -582,7 +587,7 @@ Panel {
       if (row && row.routeMenuAvailable) row.toggleOutputMenu()
       else {
         var st = displayAudioStreams[selectedIndex]
-        if (!sceneController.busy) toggleAudioNodeMute(st)
+        if (!directDeviceMutationBusy) toggleAudioNodeMute(st)
       }
       return
     }
@@ -591,7 +596,7 @@ Panel {
       if (recordingRow && recordingRow.routeMenuAvailable) recordingRow.toggleOutputMenu()
       else {
         var recordingStream = displayRecordingStreams[selectedIndex]
-        if (!sceneController.busy) toggleAudioNodeMute(recordingStream)
+        if (!directDeviceMutationBusy) toggleAudioNodeMute(recordingStream)
       }
     }
   }
@@ -890,6 +895,31 @@ Panel {
     clearInteractionError()
   }
 
+  function toggleBarInputMute() {
+    if (recordingApplicationCount > 0 && masterState && masterState.hasInput === true) {
+      if (directDeviceMutationBusy) {
+        return rejectAudioAction("Audio is applying another change; retry in a moment")
+      }
+      if (!audioService || !audioService.ready || nodeGeneration === "") {
+        return rejectAudioAction("Audio service is unavailable; retry in a moment")
+      }
+      var mute = !activeRecordingMuted
+      clearInteractionError()
+      masterMutePending = true
+      audioService.request("audio.mute_all", {
+        generation: nodeGeneration,
+        muted: mute,
+        scope: "inputs"
+      }, function(_result, failure) {
+        root.masterMutePending = false
+        if (failure)
+          root.rejectAudioAction(failure.message || "That microphone just changed; retry in a moment")
+      }, { timeout: 15000 })
+      return true
+    }
+    return toggleInputMute()
+  }
+
   // The hero switch is the whole panel's on/off, covering active playback and
   // recording destinations including pinned streams. It reads as on while any
   // active destination is still audible.
@@ -1146,7 +1176,7 @@ Panel {
     }
     onPressed: function(b) {
       if (b === Qt.RightButton) root.toggleAllMuted()
-      else if (b === Qt.MiddleButton) root.toggleInputMute()
+      else if (b === Qt.MiddleButton) root.toggleBarInputMute()
       else root.toggle()
     }
 
@@ -1196,7 +1226,7 @@ Panel {
               ? root.displayRecordingStreams : root.displayAudioStreams
             if (root.selectedIndex >= streams.length) return
             var s = streams[root.selectedIndex]
-            if (!sceneController.busy) root.toggleAudioNodeMute(s)
+            if (!root.directDeviceMutationBusy) root.toggleAudioNodeMute(s)
           } else if (root.focusSection === "input") {
             root.toggleInputMute()
           } else if (root.focusSection !== "scenes") {
@@ -1692,10 +1722,8 @@ Panel {
                   : root.streamLabel(streamDelegate.node)
                 iconSource: root.streamIconSource(streamDelegate.node)
                 routeAvailable: root.streamSerial(streamDelegate.node) !== ""
-                routeSetBusy: root.pendingStreamRoute !== null
-                  || defaultSetPending
-                  || root.pendingStreamRoute !== null || rulesStore.busy
-                mutationBlocked: sceneController.busy
+                routeSetBusy: root.routeMutationBusy
+                mutationBlocked: root.directDeviceMutationBusy
                 hasCursor: root.cursorActive
                   && root.focusSection === (streamDelegate.recording ? "recording" : "streams")
                   && root.selectedIndex === streamDelegate.rowIndex
@@ -1708,9 +1736,13 @@ Panel {
                   root.selectedIndex = index
                 }
                 onVolumeRequested: function(value) {
-                  root.setAudioNodeVolume(streamDelegate.node, value, streamDelegate.volumeMaximum)
+                  if (!root.directDeviceMutationBusy)
+                    root.setAudioNodeVolume(streamDelegate.node, value, streamDelegate.volumeMaximum)
                 }
-                onMuteRequested: root.toggleAudioNodeMute(streamDelegate.node)
+                onMuteRequested: {
+                  if (!root.directDeviceMutationBusy)
+                    root.toggleAudioNodeMute(streamDelegate.node)
+                }
                 onRouteChosen: function(route) {
                   root.setStreamRoute(streamDelegate.node, route,
                     streamDelegate.recording ? "recording" : "playback")
@@ -1766,10 +1798,8 @@ Panel {
                   : root.streamLabel(recordingStreamDelegate.node)
                 iconSource: root.streamIconSource(recordingStreamDelegate.node)
                 routeAvailable: root.streamSerial(recordingStreamDelegate.node) !== ""
-                routeSetBusy: root.pendingStreamRoute !== null
-                  || defaultSetPending
-                  || root.pendingStreamRoute !== null || rulesStore.busy
-                mutationBlocked: sceneController.busy
+                routeSetBusy: root.routeMutationBusy
+                mutationBlocked: root.directDeviceMutationBusy
                 hasCursor: root.cursorActive
                   && root.focusSection === (recordingStreamDelegate.recording ? "recording" : "streams")
                   && root.selectedIndex === recordingStreamDelegate.rowIndex
@@ -1782,9 +1812,13 @@ Panel {
                   root.selectedIndex = index
                 }
                 onVolumeRequested: function(value) {
-                  root.setAudioNodeVolume(recordingStreamDelegate.node, value, recordingStreamDelegate.volumeMaximum)
+                  if (!root.directDeviceMutationBusy)
+                    root.setAudioNodeVolume(recordingStreamDelegate.node, value, recordingStreamDelegate.volumeMaximum)
                 }
-                onMuteRequested: root.toggleAudioNodeMute(recordingStreamDelegate.node)
+                onMuteRequested: {
+                  if (!root.directDeviceMutationBusy)
+                    root.toggleAudioNodeMute(recordingStreamDelegate.node)
+                }
                 onRouteChosen: function(route) {
                   root.setStreamRoute(recordingStreamDelegate.node, route,
                     recordingStreamDelegate.recording ? "recording" : "playback")

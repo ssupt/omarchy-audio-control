@@ -195,7 +195,7 @@ Client.prototype.line = function(line) {
   var entry = this.pending[message.id]
   delete this.pending[message.id]
   this.callback(entry.callback, own(message, "result") ? message.result : null, message.error || null)
-  if (this.connected && this.ready && this.options.capacity) this.options.capacity()
+  if (this.connected && this.ready && this.options.capacity) this.callback(this.options.capacity)
 }
 Client.prototype.event = function(name, data) {
   if (name === "snapshot.begin") {

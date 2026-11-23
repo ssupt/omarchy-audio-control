@@ -185,6 +185,36 @@ function fixture(expectedBuildId) {
   assert.equal(f.client.request('node.audio', {}, (_result, error) => rejected = error), '')
   assert.equal(rejected.code, 'busy')
 }
+{
+  const sent = [], callbacks = [], results = []
+  const client = new Client({
+    now: () => 1000,
+    write: frame => sent.push(JSON.parse(frame)),
+    ready: () => {},
+    state: () => {},
+    capacity: () => { throw new Error('capacity boom') },
+    fault: message => { throw new Error('Unexpected fault: ' + message) },
+    callbackError: () => callbacks.push('threw')
+  })
+  client.open()
+  const reply = (req, result) => JSON.stringify({ version: 1, id: req.id, result }) + '\n'
+  client.feed(reply(sent.at(-1), {
+    name: 'omarchy-audio-service', protocolVersion: 1, epoch: 'e', buildId: 'b',
+    transport: 'jsonl-ascii', capabilities: ['state.subscribe'],
+    maxFrameBytes: MAX_FRAME, maxSnapshotBytes: 8388608
+  }))
+  client.feed(reply(sent.at(-1), { subscribed: true }))
+  const snap = JSON.stringify({ epoch: 'e', revision: '1', nodes: [], busy: false })
+  client.feed(JSON.stringify({ version: 1, event: 'snapshot.begin', data: { bytes: snap.length, parts: 1 } }) + '\n'
+    + JSON.stringify({ version: 1, event: 'snapshot.part', data: { index: 0, text: snap } }) + '\n'
+    + JSON.stringify({ version: 1, event: 'snapshot.end', data: {} }) + '\n')
+  const firstId = client.request('health', {}, r => results.push(r), { mutating: false })
+  const secondId = client.request('health', {}, r => results.push(r), { mutating: false })
+  client.feed(JSON.stringify({ version: 1, id: firstId, result: { n: 1 } }) + '\n'
+    + JSON.stringify({ version: 1, id: secondId, result: { n: 2 } }) + '\n')
+  assert.deepEqual(results, [{ n: 1 }, { n: 2 }], 'capacity callback failure must not drop subsequent frames')
+  assert.equal(callbacks.length, 2)
+}
 for (const value of ['ascii', 'Cuffie 🎧', '日本語', '\u0000', '\n', '\\uD83C']) {
   assert.equal(utf8Length(value), Buffer.byteLength(value))
 }

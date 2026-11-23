@@ -20,11 +20,20 @@ struct NodeLevel {
     balance: Option<f64>,
     muted: Option<bool>,
 }
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum MasterScope {
+    #[default]
+    All,
+    Inputs,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MasterMute {
     generation: String,
     muted: bool,
+    #[serde(default)]
+    scope: MasterScope,
 }
 impl Service {
     pub(super) async fn profile_request(&self, request: &Request) -> Result<Value> {
@@ -192,72 +201,113 @@ impl Service {
                 "Audio graph changed; refresh before retrying",
             ));
         }
-        let targets: Vec<Identity> = {
-            let active = crate::outputs::master_targets(&graph);
-            active
-                .outputs
-                .values()
-                .chain(active.inputs.values())
-                .filter(|node| node.audio.muted != Some(params.muted))
-                .map(|node| crate::routing::identity(&graph, node))
+        let collect_targets = |graph: &native::Graph, muted: bool| -> Vec<Identity> {
+            let active = crate::outputs::master_targets(graph);
+            let nodes: Box<dyn Iterator<Item = &native::Node> + '_> = match params.scope {
+                MasterScope::All => Box::new(
+                    active
+                        .outputs
+                        .values()
+                        .chain(active.inputs.values())
+                        .copied(),
+                ),
+                MasterScope::Inputs => Box::new(active.inputs.values().copied()),
+            };
+            nodes
+                .filter(|node| node.audio.muted != Some(muted))
+                .map(|node| crate::routing::identity(graph, node))
                 .collect()
         };
+        let node_gone = |graph: &native::Graph, identity: &Identity| {
+            graph.generation == params.generation
+                && graph
+                    .nodes
+                    .get(&identity.id)
+                    .is_none_or(|node| node.serial != identity.serial)
+        };
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let targets = collect_targets(&graph, params.muted);
+        let mut attempted = std::collections::BTreeSet::new();
         let mut failed: Option<Failure> = None;
         for identity in targets {
-            if let Err(error) = native
-                .patch(
+            if tokio::time::Instant::now() >= deadline {
+                failed = Some(Failure::unknown(
+                    "Audio change was not confirmed by PipeWire",
+                ));
+                break;
+            }
+            attempted.insert((identity.id, identity.serial.clone()));
+            match tokio::time::timeout_at(
+                deadline,
+                native.patch(
                     identity.clone(),
                     AudioPatch {
                         muted: Some(params.muted),
                         volumes: None,
                     },
-                )
-                .await
+                ),
+            )
+            .await
             {
-                let current = native.snapshot();
-                if current.generation == params.generation
-                    && !current.nodes.contains_key(&identity.id)
-                {
-                    continue;
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    if node_gone(&native.snapshot(), &identity) {
+                        continue;
+                    }
+                    if failed.is_none() || error.outcome == "unknown" {
+                        failed = Some(error);
+                    }
                 }
-                if failed.is_none() || error.outcome == "unknown" {
-                    failed = Some(error);
+                Err(_) => {
+                    failed = Some(Failure::unknown(
+                        "Audio change was not confirmed by PipeWire",
+                    ));
+                    break;
                 }
             }
         }
         // If a new active destination appeared while muting, cover it before confirming.
-        if params.muted && failed.is_none() {
+        if params.muted && tokio::time::Instant::now() < deadline {
             let current = native.snapshot();
             if current.ready && current.connected && current.generation == params.generation {
-                let remaining: Vec<Identity> = {
-                    let active = crate::outputs::master_targets(&current);
-                    active
-                        .outputs
-                        .values()
-                        .chain(active.inputs.values())
-                        .filter(|node| node.audio.muted != Some(true))
-                        .map(|node| crate::routing::identity(&current, node))
-                        .collect()
-                };
+                let remaining: Vec<Identity> = collect_targets(&current, true)
+                    .into_iter()
+                    .filter(|identity| !attempted.contains(&(identity.id, identity.serial.clone())))
+                    .collect();
                 for identity in remaining {
-                    if let Err(error) = native
-                        .patch(
+                    if tokio::time::Instant::now() >= deadline {
+                        failed = Some(Failure::unknown(
+                            "Audio change was not confirmed by PipeWire",
+                        ));
+                        break;
+                    }
+                    match tokio::time::timeout_at(
+                        deadline,
+                        native.patch(
                             identity.clone(),
                             AudioPatch {
                                 muted: Some(true),
                                 volumes: None,
                             },
-                        )
-                        .await
+                        ),
+                    )
+                    .await
                     {
-                        let latest = native.snapshot();
-                        if latest.generation == params.generation
-                            && !latest.nodes.contains_key(&identity.id)
-                        {
-                            continue;
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            if node_gone(&native.snapshot(), &identity) {
+                                continue;
+                            }
+                            if failed.is_none() || error.outcome == "unknown" {
+                                failed = Some(error);
+                            }
                         }
-                        failed = Some(error);
-                        break;
+                        Err(_) => {
+                            failed = Some(Failure::unknown(
+                                "Audio change was not confirmed by PipeWire",
+                            ));
+                            break;
+                        }
                     }
                 }
             }

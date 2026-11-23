@@ -180,10 +180,13 @@ impl Service {
                 let native = native.clone();
                 // The saved group is gone even when its old combine module is
                 // still briefly in use; reconciliation removes it once safe.
-                let _ = tokio::task::spawn_blocking(move || {
+                if let Ok(reconciled) = tokio::task::spawn_blocking(move || {
                     crate::groups::apply(&native, &storage, crate::groups::Change::Reconcile)
                 })
-                .await;
+                .await
+                {
+                    self.apply_reconcile_state(reconciled);
+                }
             }
         }
         let value =

@@ -90,14 +90,17 @@ impl Service {
                 let keys: std::collections::BTreeSet<_> =
                     routes.iter().map(|route| route.key.clone()).collect();
                 attempted.retain(|key| keys.contains(key));
-                let reconcile = next_groups != groups
-                    && (rules["outputGroups"]
-                        .as_array()
-                        .is_some_and(|g| !g.is_empty())
-                        || graph
-                            .nodes
-                            .values()
-                            .any(|n| crate::storage::group_sink(&n.name)));
+                let has_group_work = rules["outputGroups"]
+                    .as_array()
+                    .is_some_and(|g| !g.is_empty())
+                    || graph
+                        .nodes
+                        .values()
+                        .any(|n| crate::storage::group_sink(&n.name));
+                if !has_group_work {
+                    service.clear_pending_groups();
+                }
+                let reconcile = next_groups != groups && has_group_work;
                 if !reconcile && routes.iter().all(|route| attempted.contains(&route.key)) {
                     signature = next_signature;
                     groups = next_groups;
@@ -139,76 +142,72 @@ impl Service {
                 }
                 signature = crate::automation::signature(&graph, rules);
                 let next_groups = crate::automation::group_signature(&graph, rules);
-                let reconcile = next_groups != groups
-                    && (rules["outputGroups"]
-                        .as_array()
-                        .is_some_and(|g| !g.is_empty())
-                        || graph
-                            .nodes
-                            .values()
-                            .any(|n| crate::storage::group_sink(&n.name)));
+                let has_group_work = rules["outputGroups"]
+                    .as_array()
+                    .is_some_and(|g| !g.is_empty())
+                    || graph
+                        .nodes
+                        .values()
+                        .any(|n| crate::storage::group_sink(&n.name));
+                if !has_group_work {
+                    service.clear_pending_groups();
+                }
+                let reconcile = next_groups != groups && has_group_work;
                 let routes = crate::automation::routes(&graph, rules);
                 groups = next_groups;
                 service.set_busy(true);
                 let _busy = Busy(&service);
                 if reconcile {
-                    match service
+                    let result = service
                         .change_groups(crate::groups::Change::Reconcile)
-                        .await
-                    {
-                        Ok(result) => {
-                            let pending = result
-                                .get("pendingGroups")
-                                .cloned()
-                                .unwrap_or_else(|| json!([]));
-                            let has_pending =
-                                pending.as_array().is_some_and(|items| !items.is_empty());
-                            service.update_state(|s| {
-                                s["pendingGroups"] = pending;
-                                if has_pending {
-                                    s["automationError"] = json!(
-                                        "An output group change is pending while the group is in use"
-                                    );
-                                } else {
-                                    s["automationError"] = json!("");
-                                }
-                            });
-                        }
-                        Err(_) => {
-                            service.update_state(|s| {
-                                s["automationError"] =
-                                    json!("Some output groups could not be restored")
-                            });
-                        }
-                    }
+                        .await;
+                    service.apply_reconcile_state(result);
                 }
                 let started = std::time::Instant::now();
-                let mut cleared_pending = Vec::new();
-                for route in routes {
+                let mut pending_tracker = PendingClearTracker::default();
+                let mut route_iter = routes.into_iter();
+                while let Some(route) = route_iter.next() {
                     if *users.borrow() == 0 || started.elapsed().as_secs() > 60 {
+                        pending_tracker.record_incomplete(route.clear_pending);
+                        for remaining in route_iter {
+                            pending_tracker.record_incomplete(remaining.clear_pending);
+                        }
                         break;
                     }
                     if attempted.contains(&route.key) {
+                        pending_tracker.record_incomplete(route.clear_pending);
                         continue;
                     }
                     match crate::routing::set(native, &route.set).await {
                         Ok(()) => {
-                            if let Some(entry) = route.clear_pending {
-                                cleared_pending.push(entry);
-                            }
+                            pending_tracker.record_success(route.clear_pending);
                         }
+                        Err(error)
+                            if error.code == "stale_node"
+                                && native
+                                    .snapshot()
+                                    .nodes
+                                    .get(&route.set.identity.id)
+                                    .is_none_or(|node| {
+                                        node.serial != route.set.identity.serial
+                                    }) => {}
                         Err(error) => {
+                            pending_tracker.record_incomplete(route.clear_pending);
                             attempted.insert(route.key);
                             service.update_state(|s| {
                                 s["automationError"] =
                                     json!("An application rule could not be applied")
                             });
                             if error.outcome == "unknown" {
+                                for remaining in route_iter {
+                                    pending_tracker.record_incomplete(remaining.clear_pending);
+                                }
                                 break;
                             }
                         }
                     }
                 }
+                let cleared_pending = pending_tracker.finish();
                 if !cleared_pending.is_empty() {
                     if let Some(storage) = service.storage.clone() {
                         let _ = tokio::task::spawn_blocking(move || {
@@ -228,12 +227,122 @@ impl Service {
                 let final_graph = native.snapshot();
                 let final_snapshot = service.state.borrow().clone();
                 if final_graph.ready && final_snapshot["stores"]["rules"].is_object() {
-                    signature = crate::automation::signature(
-                        &final_graph,
-                        &final_snapshot["stores"]["rules"],
-                    );
+                    let final_rules = &final_snapshot["stores"]["rules"];
+                    if should_advance_signature(&final_graph, final_rules, &attempted) {
+                        signature = crate::automation::signature(&final_graph, final_rules);
+                    }
                 }
             }
         });
+    }
+}
+
+#[derive(Default)]
+struct PendingClearTracker {
+    succeeded: std::collections::BTreeSet<(String, String)>,
+    incomplete: std::collections::BTreeSet<(String, String)>,
+}
+
+impl PendingClearTracker {
+    fn record_success(&mut self, entry: Option<(String, String)>) {
+        if let Some(entry) = entry {
+            self.succeeded.insert(entry);
+        }
+    }
+
+    fn record_incomplete(&mut self, entry: Option<(String, String)>) {
+        if let Some(entry) = entry {
+            self.incomplete.insert(entry);
+        }
+    }
+
+    fn finish(self) -> Vec<(String, String)> {
+        self.succeeded
+            .into_iter()
+            .filter(|entry| !self.incomplete.contains(entry))
+            .collect()
+    }
+}
+
+fn should_advance_signature(
+    graph: &crate::native::Graph,
+    rules: &serde_json::Value,
+    attempted: &std::collections::BTreeSet<String>,
+) -> bool {
+    crate::automation::routes(graph, rules)
+        .iter()
+        .all(|route| attempted.contains(&route.key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::native::{Graph, MetadataValue, Node};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn pending_clear_tracker_requires_every_stream_for_an_app_to_succeed() {
+        let mut tracker = PendingClearTracker::default();
+        tracker.record_success(Some(("firefox".into(), "playback".into())));
+        tracker.record_incomplete(Some(("firefox".into(), "playback".into())));
+        tracker.record_success(Some(("vlc".into(), "playback".into())));
+        assert_eq!(tracker.finish(), vec![("vlc".into(), "playback".into())]);
+    }
+
+    #[test]
+    fn signature_does_not_advance_when_new_streams_have_unattempted_routes() {
+        let mut graph = Graph {
+            connected: true,
+            ready: true,
+            generation: "test".into(),
+            ..Graph::default()
+        };
+        graph.nodes.insert(
+            1,
+            Node {
+                id: 1,
+                serial: "101".into(),
+                name: "output_a".into(),
+                state: "Idle".into(),
+                properties: BTreeMap::from([("media.class".into(), "Audio/Sink".into())]),
+                ..Node::default()
+            },
+        );
+        graph.nodes.insert(
+            2,
+            Node {
+                id: 2,
+                serial: "102".into(),
+                name: "vlc".into(),
+                state: "Running".into(),
+                properties: BTreeMap::from([
+                    ("media.class".into(), "Stream/Output/Audio".into()),
+                    ("application.name".into(), "VLC".into()),
+                ]),
+                ..Node::default()
+            },
+        );
+        graph.metadata_ids.insert("default".into(), 10);
+        graph.metadata.insert(
+            "default".into(),
+            BTreeMap::from([(
+                "0:default.audio.sink".into(),
+                MetadataValue {
+                    subject: 0,
+                    key: "default.audio.sink".into(),
+                    type_: "Spa:String:JSON".into(),
+                    value: json!({"name": "output_a"}).to_string(),
+                },
+            )]),
+        );
+        let rules = json!({
+            "appRules": [{"app": "vlc", "direction": "playback", "target": "output_a"}],
+            "outputGroups": []
+        });
+        let mut attempted = BTreeSet::new();
+        assert!(!should_advance_signature(&graph, &rules, &attempted));
+        let key = crate::automation::routes(&graph, &rules)[0].key.clone();
+        attempted.insert(key);
+        assert!(should_advance_signature(&graph, &rules, &attempted));
     }
 }

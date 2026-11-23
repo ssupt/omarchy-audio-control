@@ -33,10 +33,12 @@ Item {
   readonly property bool busy: state.busy === true
   readonly property bool transactionBusy: busy
     && state.operation !== "node.audio" && state.operation !== "node.level"
+  onTransactionBusyChanged: if (!transactionBusy) flushNodeChanges()
   property var client: null
   property bool destroying: false
   property var inFlightNodeChanges: ({})
   property var pendingNodeChanges: ({})
+  property int activeTransactions: 0
 
   // The quick mixer and advanced window share one audio control session.
   signal quickPanelOpened()
@@ -86,12 +88,30 @@ Item {
     ])
   }
 
+  function isNonLevelMutation(method, settings) {
+    if (settings && settings.mutating === false) return false
+    return ["hello", "health", "state.subscribe", "store.read",
+      "diagnostics.refresh", "diagnostics.copy", "node.audio", "node.level"].indexOf(method) === -1
+  }
   function request(method, params, callback, settings) {
     if (!client) {
       if (callback) callback(null, Protocol.failure("not_ready", "Audio service is starting", false))
       return ""
     }
-    return client.request(method, params || {}, callback, settings)
+    var transactional = isNonLevelMutation(method, settings)
+    var wrapped = callback
+    if (transactional) {
+      // Drop queued slider/mute tails before starting a whole-graph command
+      // so stale pre-click patches cannot flush behind it and overwrite it.
+      pendingNodeChanges = ({})
+      activeTransactions = (activeTransactions || 0) + 1
+      wrapped = function(result, failure) {
+        root.activeTransactions = Math.max(0, (root.activeTransactions || 0) - 1)
+        try { if (callback) callback(result, failure) }
+        finally { root.flushNodeChanges() }
+      }
+    }
+    return client.request(method, params || {}, wrapped, settings)
   }
   function identityForNode(node) {
     if (!ready || !state.graphReady || !node) return null
@@ -107,6 +127,7 @@ Item {
   function clearNodeChanges() {
     inFlightNodeChanges = ({})
     pendingNodeChanges = ({})
+    activeTransactions = 0
   }
   function patchesEqual(a, b) {
     if (!a || !b) return false
@@ -120,7 +141,7 @@ Item {
     return true
   }
   function flushNodeChanges() {
-    if (!client || !client.hasCapacity()) return
+    if (!client || !client.hasCapacity() || transactionBusy || (activeTransactions || 0) > 0) return
     var generation = String(state && state.generation || "")
     var keys = Object.keys(pendingNodeChanges)
     for (var i = 0; i < keys.length; i++) {

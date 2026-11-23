@@ -129,6 +129,15 @@ for (const action of ['toggleOutputMute', 'toggleInputMute', 'adjustVolume']) {
   assert.equal(p.anyAudible, true)
   assert.equal(p.activeRecordingMuted, false)
   assert.match(p.recordingTooltip, /Microphone in use/)
+  assert.match(p.recordingTooltip, /Middle-click to mute microphone/)
+  assert.equal(p.toggleBarInputMute(), true)
+  assert.equal(requests.length, 2)
+  assert.equal(requests[1].method, 'audio.mute_all')
+  assert.equal(requests[1].params.generation, 'g')
+  assert.equal(requests[1].params.muted, true)
+  assert.equal(requests[1].params.scope, 'inputs')
+  requests[1].callback({ outcome: 'applied' }, null)
+  assert.equal(p.masterMutePending, false)
   p.audioService.state.master = {
     hasOutput: true, hasInput: true, anyAudible: false,
     recordingActive: true, recordingMuted: true
@@ -136,6 +145,13 @@ for (const action of ['toggleOutputMute', 'toggleInputMute', 'adjustVolume']) {
   assert.equal(p.anyAudible, false)
   assert.equal(p.activeRecordingMuted, true)
   assert.match(p.recordingTooltip, /Microphone muted/)
+  assert.match(p.recordingTooltip, /Middle-click to unmute microphone/)
+  assert.equal(p.toggleBarInputMute(), true)
+  assert.equal(requests.length, 3)
+  assert.equal(requests[2].params.generation, 'g')
+  assert.equal(requests[2].params.muted, false)
+  assert.equal(requests[2].params.scope, 'inputs')
+  requests[2].callback({ outcome: 'applied' }, null)
 }
 
 // Fast slider drag through the real Panel, Service, and AudioProtocol handlers
@@ -145,8 +161,8 @@ for (const action of ['toggleOutputMute', 'toggleInputMute', 'adjustVolume']) {
   const output = node(1)
   const sent = [], acknowledged = []
   const serviceContext = {
-    Model, Protocol, ready: false, error: '', state: {},
-    inFlightNodeChanges: {}, pendingNodeChanges: {}, client: null
+    Model, Protocol, ready: false, error: '', state: {}, transactionBusy: false,
+    inFlightNodeChanges: {}, pendingNodeChanges: {}, activeTransactions: 0, client: null
   }
   serviceContext.root = serviceContext
   vm.createContext(serviceContext)
@@ -219,6 +235,26 @@ for (const action of ['toggleOutputMute', 'toggleInputMute', 'adjustVolume']) {
   reply(pendingLevel, { outcome: 'applied' })
   assert.equal(acknowledged.at(-1), 0.25)
   for (const filler of fillers) reply(filler, { status: 'ok' })
+
+  // A transactional command started while a node.level reply is still in flight
+  // must discard stale queued slider/mute tails so they cannot flush afterward.
+  p.setOutputVolume(0.4)
+  p.setOutputVolume(0.95)
+  const inFlightLevel = sent.find(r => r.method === 'node.level' && !r._done)
+  assert(inFlightLevel)
+  assert.equal(Object.keys(serviceContext.pendingNodeChanges).length, 1)
+  let muteApplied = false
+  assert.notEqual(serviceContext.request('audio.mute_all', { generation: 'g1', muted: true }, () => { muteApplied = true }), '')
+  const muteReq = sent.at(-1)
+  assert.equal(Object.keys(serviceContext.pendingNodeChanges).length, 0)
+  inFlightLevel._done = true
+  reply(inFlightLevel, { outcome: 'applied' })
+  assert.equal(sent.filter(r => r.method === 'node.level' && !r._done).length, 0,
+    'Stale queued node.level must not flush behind audio.mute_all')
+  reply(muteReq, { outcome: 'applied' })
+  assert.equal(muteApplied, true)
+  assert.equal(serviceContext.activeTransactions, 0)
+  assert.equal(sent.filter(r => r.method === 'node.level' && !r._done).length, 0)
 }
 
 {

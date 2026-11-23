@@ -258,7 +258,11 @@ impl Service {
                             Ok(()) => cleared_any = true,
                             Err(error)
                                 if error.code == "stale_node"
-                                    && !native.snapshot().nodes.contains_key(&stream.id) => {}
+                                    && native
+                                        .snapshot()
+                                        .nodes
+                                        .get(&stream.id)
+                                        .is_none_or(|node| node.serial != stream.serial) => {}
                             Err(_) => all_cleared = false,
                         }
                     }

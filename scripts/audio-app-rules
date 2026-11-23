@@ -100,10 +100,24 @@ read_rules() {
                 | .members[$memberKey] = true
                 | .values += [$group] end)
         | .values;
+      def normalized_pending_defaults($rules):
+        (reduce $rules[] as $rule ({}; .[$rule.direction + ":" + $rule.app] = true)) as $rule_keys
+        | reduce ([((if (.pendingDefaultRoutes | type) == "array" then .pendingDefaultRoutes else [] end)[:256][]?
+          | select(type == "object")
+          | ((.app // "") | clean(120) | ascii_downcase) as $app
+          | select($app != "" and (.direction == "playback" or .direction == "recording"))
+          | {app: $app, direction: .direction})][]) as $entry
+          ({seen: {}, values: []};
+            ($entry.direction + ":" + $entry.app) as $key
+            | if ($rule_keys | has($key)) or (.seen | has($key)) or (.values | length) >= 64 then .
+              else .seen[$key] = true | .values += [$entry] end)
+        | .values;
       .[0]
+      | normalized_rules as $rules
+      | normalized_pending_defaults($rules) as $pending
       | {
         version: 1,
-        appRules: normalized_rules,
+        appRules: $rules,
         outputGroups: normalized_groups,
         devices: {
           aliases: normalized_aliases,
@@ -113,6 +127,7 @@ read_rules() {
             (raw_devices | if (.hidden | type) == "array" then .hidden else [] end); 64)
         }
       }
+      | if ($pending | length) > 0 then .pendingDefaultRoutes = $pending else . end
     ' "$rules_file"
   elif jq -se 'length == 1 and (.[0] | type) == "object"' \
       "$rules_file" >/dev/null 2>&1; then
@@ -195,6 +210,10 @@ case "$action" in
           + [{app: $app, direction: $direction, target: $target}]
           | .[-64:]
         )
+      | ((.pendingDefaultRoutes // [])
+          | map(select(.direction != $direction or .app != $app))) as $pending
+      | if ($pending | length) > 0 then .pendingDefaultRoutes = $pending
+        else del(.pendingDefaultRoutes) end
     ' --arg app "$app" --arg direction "$direction" --arg target "$target"
     ;;
   del-app)
@@ -203,10 +222,20 @@ case "$action" in
     direction=$3
     [[ -n $app ]] || usage
     [[ $direction == playback || $direction == recording ]] || usage
-    write_rules '.version = 1
+    write_rules '
+      .version = 1
+      | (.appRules | any(.direction == $direction and .app == $app)) as $existed
       | .appRules |= map(select(.direction != $direction
-        or .app != $app))' \
-      --arg app "$app" --arg direction "$direction"
+          or .app != $app))
+      | if $existed then
+          .pendingDefaultRoutes = (
+            ((.pendingDefaultRoutes // [])
+              | map(select(.direction != $direction or .app != $app)))
+            + [{app: $app, direction: $direction}]
+            | .[-64:]
+          )
+        else . end
+    ' --arg app "$app" --arg direction "$direction"
     ;;
   set-alias)
     (( $# == 3 )) || usage

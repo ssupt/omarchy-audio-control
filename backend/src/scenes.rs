@@ -63,6 +63,51 @@ fn resolve<'a>(graph: &'a Graph, direction: &str, name: &str) -> Option<&'a Node
         Some(node)
     }
 }
+fn physical_group_member(node: &Node) -> bool {
+    crate::routing::endpoint_direction(node) == Some(crate::routing::Direction::Playback)
+        && !crate::storage::group_sink(&node.name)
+        && node
+            .properties
+            .get("application.id")
+            .is_none_or(|v| v != "ssupt.audio-control")
+        && !node
+            .properties
+            .get("node.virtual")
+            .is_some_and(|v| matches!(v.as_str(), "true" | "1"))
+        && !node
+            .properties
+            .get("device.class")
+            .is_some_and(|v| matches!(v.as_str(), "filter" | "monitor"))
+        && !node
+            .properties
+            .get("factory.name")
+            .is_some_and(|v| matches!(v.as_str(), "support.null-audio-sink" | "filter-chain"))
+}
+fn group_members_ready(graph: &Graph, id: &str, sink_name: &str, rules: Option<&Value>) -> bool {
+    let Some(rules) = rules else {
+        return false;
+    };
+    let Some(group) = rules["outputGroups"].as_array().and_then(|groups| {
+        groups
+            .iter()
+            .find(|g| g["id"] == id && g["sink"] == sink_name)
+    }) else {
+        return false;
+    };
+    let Some(members) = group["members"].as_array().filter(|m| m.len() >= 2) else {
+        return false;
+    };
+    members.iter().all(|member| {
+        let Some(member_name) = member.as_str() else {
+            return false;
+        };
+        let mut matches = graph
+            .nodes
+            .values()
+            .filter(|n| n.name == member_name && physical_group_member(n));
+        matches.next().is_some() && matches.next().is_none()
+    })
+}
 fn owned_group_available(graph: &Graph, node: &Node, rules: Option<&Value>) -> bool {
     let Some(id) = node
         .name
@@ -83,34 +128,7 @@ fn owned_group_available(graph: &Graph, node: &Node, rules: Option<&Value>) -> b
             .properties
             .get("node.virtual")
             .is_some_and(|v| matches!(v.as_str(), "true" | "1"));
-    if !owned {
-        return false;
-    }
-    let Some(rules) = rules else {
-        return true;
-    };
-    let Some(group) = rules["outputGroups"].as_array().and_then(|groups| {
-        groups
-            .iter()
-            .find(|g| g["id"] == id && g["sink"] == node.name)
-    }) else {
-        return false;
-    };
-    let Some(members) = group["members"].as_array().filter(|m| m.len() >= 2) else {
-        return false;
-    };
-    members.iter().all(|member| {
-        let Some(member_name) = member.as_str() else {
-            return false;
-        };
-        let mut matches = graph.nodes.values().filter(|n| {
-            n.name == member_name
-                && crate::routing::endpoint_direction(n)
-                    == Some(crate::routing::Direction::Playback)
-                && !crate::storage::group_sink(&n.name)
-        });
-        matches.next().is_some() && matches.next().is_none()
-    })
+    owned && group_members_ready(graph, id, &node.name, rules)
 }
 fn resolve_default<'a>(
     graph: &'a Graph,
@@ -306,9 +324,56 @@ pub async fn apply(
                     Ok(StepOutcome::Skipped)
                 }
             } else {
-                let graph = native.snapshot();
-                let Some(node) = resolve_default(&graph, text(step, "direction"), name, rules)
-                else {
+                let direction = text(step, "direction");
+                let mut graph = native.snapshot();
+                if direction == "output"
+                    && resolve_default(&graph, direction, name, rules).is_none()
+                    && started.elapsed() <= Duration::from_secs(70)
+                {
+                    if let (Some(storage), Some(group_id)) = (
+                        storage,
+                        name.strip_prefix("omarchy_audio_group_")
+                            .filter(|id| crate::storage::group_id(id)),
+                    ) {
+                        if group_members_ready(&graph, group_id, name, rules) {
+                            let native_for_reconcile = native.clone();
+                            let storage_for_reconcile = storage.clone();
+                            if matches!(
+                                tokio::task::spawn_blocking(move || {
+                                    crate::groups::apply(
+                                        &native_for_reconcile,
+                                        &storage_for_reconcile,
+                                        crate::groups::Change::Reconcile,
+                                    )
+                                })
+                                .await,
+                                Ok(Ok(_))
+                            ) {
+                                let mut state = native.subscribe();
+                                let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                                    loop {
+                                        if resolve_default(
+                                            &state.borrow_and_update(),
+                                            direction,
+                                            name,
+                                            rules,
+                                        )
+                                        .is_some()
+                                        {
+                                            break;
+                                        }
+                                        if state.changed().await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                })
+                                .await;
+                                graph = native.snapshot();
+                            }
+                        }
+                    }
+                }
+                let Some(node) = resolve_default(&graph, direction, name, rules) else {
                     result["skipped"].as_array_mut().unwrap().push(json!(name));
                     continue;
                 };
@@ -489,8 +554,25 @@ mod tests {
             }]
         });
         assert!(resolve_default(&graph, "output", &group_sink, Some(&rules)).is_some());
+        // Missing rules must fail closed instead of accepting an unverified group sink.
+        assert!(resolve_default(&graph, "output", &group_sink, None).is_none());
         // Physical device-volume capture still excludes the virtual group sink.
         assert!(resolve(&graph, "output", &group_sink).is_none());
+
+        // Virtual/null-sink member does not qualify as a healthy physical group member.
+        graph
+            .nodes
+            .get_mut(&2)
+            .unwrap()
+            .properties
+            .insert("factory.name".into(), "support.null-audio-sink".into());
+        assert!(resolve_default(&graph, "output", &group_sink, Some(&rules)).is_none());
+        graph
+            .nodes
+            .get_mut(&2)
+            .unwrap()
+            .properties
+            .remove("factory.name");
 
         // Missing member degrades the group, so scene default skips it.
         graph.nodes.remove(&2);

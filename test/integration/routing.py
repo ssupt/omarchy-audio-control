@@ -401,6 +401,14 @@ with tempfile.TemporaryDirectory(prefix='audio-routing-') as temporary, ExitStac
             if any(after_unmute):
                 break
         assert any(after_unmute), 'Expected tone to resume after master unmute'
+        # Input-scoped mute silences pinned recording microphones while leaving outputs audible.
+        assert client.request('audio.mute_all', dict(generation=client.state['generation'], muted=True, scope='inputs'))['outcome'] == 'applied'
+        client.wait_state(lambda s: s.get('master', {}).get('recordingMuted') is True
+                          and s.get('master', {}).get('anyAudible') is True)
+        assert node('audio_test_other_input')['audio']['muted'] is True
+        assert node('audio_test_other_output')['audio']['muted'] is False
+        assert client.request('audio.mute_all', dict(generation=client.state['generation'], muted=False, scope='inputs'))['outcome'] == 'applied'
+        client.wait_state(lambda s: s.get('master', {}).get('recordingMuted') is False)
         stop(tone_capture)
         client.wait_state(lambda s: all(n['name'] != 'test_pinned_tone' for n in s['nodes']))
         print('PASS: master mute silences pinned non-default microphones and drives confirmed indicators', flush=True)
