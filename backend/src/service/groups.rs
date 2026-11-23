@@ -4,9 +4,61 @@ use crate::{
     files::FileLock,
     groups::{self, Change},
 };
-use serde_json::Value;
+use serde_json::{Value, json};
+
+pub(super) const PENDING_GROUP_ERROR: &str =
+    "An output group change is pending while the group is in use";
 
 impl Service {
+    pub(super) fn apply_reconcile_state(&self, result: Result<Value>) {
+        match result {
+            Ok(value) => {
+                let pending = value
+                    .get("pendingGroups")
+                    .cloned()
+                    .unwrap_or_else(|| json!([]));
+                let has_pending = pending.as_array().is_some_and(|items| !items.is_empty());
+                let failed = value
+                    .get("failed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.update_state(|state| {
+                    state["pendingGroups"] = pending;
+                    state["automationError"] = if failed {
+                        json!("Some output groups could not be restored")
+                    } else if has_pending {
+                        json!(PENDING_GROUP_ERROR)
+                    } else {
+                        json!("")
+                    };
+                });
+            }
+            Err(_) => {
+                self.update_state(|state| {
+                    state["automationError"] = json!("Some output groups could not be restored")
+                });
+            }
+        }
+    }
+
+    pub(super) fn clear_pending_groups(&self) {
+        let has_pending = self
+            .state
+            .borrow()
+            .get("pendingGroups")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty());
+        if !has_pending {
+            return;
+        }
+        self.update_state(|state| {
+            state["pendingGroups"] = json!([]);
+            if state["automationError"] == PENDING_GROUP_ERROR {
+                state["automationError"] = json!("");
+            }
+        });
+    }
+
     pub(super) async fn group_request(&self, request: &Request) -> Result<Value> {
         let change = match request.method.as_str() {
             "groups.create" => Change::Create(request.params()?),
@@ -24,6 +76,22 @@ impl Service {
         self.set_busy_for(true, &request.method);
         let _busy = Busy(self);
         let result = self.change_groups(change).await;
+        if let Ok(value) = &result {
+            if let Some(id) = value.get("id").and_then(Value::as_str) {
+                self.update_state(|state| {
+                    let cleared = if let Some(pending) = state["pendingGroups"].as_array_mut() {
+                        let before = pending.len();
+                        pending.retain(|item| item != id);
+                        before != pending.len() && pending.is_empty()
+                    } else {
+                        false
+                    };
+                    if cleared && state["automationError"] == PENDING_GROUP_ERROR {
+                        state["automationError"] = json!("");
+                    }
+                });
+            }
+        }
         self.reload_stores().await?;
         result
     }

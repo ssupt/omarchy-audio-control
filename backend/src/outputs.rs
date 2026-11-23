@@ -57,6 +57,38 @@ struct View<'a> {
     forward: BTreeMap<u32, BTreeSet<u32>>,
 }
 impl<'a> View<'a> {
+    fn build(graph: &'a Graph) -> (Self, BTreeMap<&'a str, usize>) {
+        let mut names = BTreeMap::<&str, usize>::new();
+        for node in graph.nodes.values() {
+            *names.entry(&node.name).or_default() += 1;
+        }
+        let sinks: BTreeMap<_, _> = graph
+            .nodes
+            .values()
+            .filter(|n| sink(n) && names[n.name.as_str()] == 1)
+            .take(512)
+            .map(|n| (n.name.as_str(), n))
+            .collect();
+        let mut forward = BTreeMap::<u32, BTreeSet<u32>>::new();
+        for link in graph
+            .links
+            .values()
+            .filter(|l| matches!(l.state.as_str(), "Active" | "Paused"))
+        {
+            forward
+                .entry(link.output_node)
+                .or_default()
+                .insert(link.input_node);
+        }
+        (
+            Self {
+                graph,
+                sinks,
+                forward,
+            },
+            names,
+        )
+    }
     fn target(&self, value: &str) -> Option<&'a Node> {
         let mut matches = self
             .sinks
@@ -136,37 +168,139 @@ impl<'a> View<'a> {
     }
 }
 
+pub struct MasterTargets<'a> {
+    pub outputs: BTreeMap<u32, &'a Node>,
+    pub inputs: BTreeMap<u32, &'a Node>,
+    pub recording_active: bool,
+    pub recording_muted: bool,
+}
+
+fn captures_sink_monitor(node: &Node) -> bool {
+    node.properties
+        .get("stream.capture.sink")
+        .is_some_and(|v| matches!(v.as_str(), "true" | "1"))
+}
+
+pub fn master_targets(graph: &Graph) -> MasterTargets<'_> {
+    let mut outputs = BTreeMap::new();
+    let mut inputs = BTreeMap::new();
+    if !graph.ready || !graph.connected || graph.nodes.len() > 4096 || graph.links.len() > 8192 {
+        return MasterTargets {
+            outputs,
+            inputs,
+            recording_active: false,
+            recording_muted: false,
+        };
+    }
+    let (view, names) = View::build(graph);
+    if let Some(default_sink) = routing::default_name(graph, routing::Direction::Playback)
+        .and_then(|name| view.sinks.get(name.as_str()).copied())
+    {
+        let volume = view.volume(default_sink);
+        if !volume.serial.is_empty() {
+            outputs.insert(volume.id, volume);
+        }
+    }
+    let default_source =
+        routing::default_name(graph, routing::Direction::Recording).and_then(|name| {
+            (names.get(name.as_str()).copied() == Some(1)).then(|| {
+                graph.nodes.values().find(|n| {
+                    n.name == name
+                        && routing::endpoint_direction(n) == Some(routing::Direction::Recording)
+                        && !n.serial.is_empty()
+                })
+            })?
+        });
+    if let Some(source) = default_source {
+        inputs.insert(source.id, source);
+    }
+    for stream in graph.nodes.values() {
+        if routing::stream_direction(stream) != Some(routing::Direction::Playback) {
+            continue;
+        }
+        let mut linked = false;
+        for link in graph.links.values().filter(|l| {
+            l.output_node == stream.id && matches!(l.state.as_str(), "Active" | "Paused")
+        }) {
+            if let Some(target) = graph.nodes.get(&link.input_node).filter(|n| {
+                routing::endpoint_direction(n) == Some(routing::Direction::Playback)
+                    && !n.serial.is_empty()
+            }) {
+                let volume = view.volume(target);
+                if !volume.serial.is_empty() {
+                    outputs.insert(volume.id, volume);
+                    linked = true;
+                }
+            }
+        }
+        if !linked && !stream.serial.is_empty() {
+            outputs.insert(stream.id, stream);
+        }
+    }
+    let mut recording_active = false;
+    let mut all_recording_silenced = true;
+    for stream in graph.nodes.values() {
+        if routing::stream_direction(stream) != Some(routing::Direction::Recording)
+            || captures_sink_monitor(stream)
+        {
+            continue;
+        }
+        recording_active = true;
+        let mut sources = Vec::new();
+        for link in graph.links.values().filter(|l| {
+            l.input_node == stream.id && matches!(l.state.as_str(), "Active" | "Paused")
+        }) {
+            if let Some(target) = graph.nodes.get(&link.output_node).filter(|n| {
+                routing::endpoint_direction(n) == Some(routing::Direction::Recording)
+                    && !n.serial.is_empty()
+            }) {
+                inputs.insert(target.id, target);
+                sources.push(target);
+            }
+        }
+        if sources.is_empty() && !stream.serial.is_empty() {
+            inputs.insert(stream.id, stream);
+        }
+        let stream_silenced = stream.audio.muted == Some(true)
+            || (!sources.is_empty() && sources.iter().all(|s| s.audio.muted == Some(true)));
+        if !stream_silenced {
+            all_recording_silenced = false;
+        }
+    }
+    let recording_muted = if recording_active {
+        all_recording_silenced
+    } else {
+        default_source.is_some_and(|n| n.audio.muted == Some(true))
+    };
+    MasterTargets {
+        outputs,
+        inputs,
+        recording_active,
+        recording_muted,
+    }
+}
+
+pub fn master_snapshot(graph: &Graph) -> Value {
+    let targets = master_targets(graph);
+    let any_audible = targets
+        .outputs
+        .values()
+        .chain(targets.inputs.values())
+        .any(|node| node.audio.muted != Some(true));
+    json!({
+        "hasOutput": !targets.outputs.is_empty(),
+        "hasInput": !targets.inputs.is_empty(),
+        "anyAudible": any_audible,
+        "recordingActive": targets.recording_active,
+        "recordingMuted": targets.recording_muted,
+    })
+}
+
 pub fn snapshot(graph: &Graph) -> Value {
     if !graph.ready || !graph.connected || graph.nodes.len() > 4096 || graph.links.len() > 8192 {
         return json!({"availability":{}, "volume":null});
     }
-    let mut names = BTreeMap::<&str, usize>::new();
-    for node in graph.nodes.values() {
-        *names.entry(&node.name).or_default() += 1;
-    }
-    let sinks: BTreeMap<_, _> = graph
-        .nodes
-        .values()
-        .filter(|n| sink(n) && names[n.name.as_str()] == 1)
-        .take(512)
-        .map(|n| (n.name.as_str(), n))
-        .collect();
-    let mut forward = BTreeMap::<u32, BTreeSet<u32>>::new();
-    for link in graph
-        .links
-        .values()
-        .filter(|l| matches!(l.state.as_str(), "Active" | "Paused"))
-    {
-        forward
-            .entry(link.output_node)
-            .or_default()
-            .insert(link.input_node);
-    }
-    let view = View {
-        graph,
-        sinks,
-        forward,
-    };
+    let (view, names) = View::build(graph);
     let mut availability: BTreeMap<&str, bool> = graph
         .nodes
         .values()
@@ -346,5 +480,47 @@ mod tests {
         assert_eq!(snapshot(&g)["volume"]["target"]["id"], 1);
         g.links.values_mut().for_each(|l| l.state = "Error".into());
         assert_eq!(snapshot(&g)["volume"]["target"]["id"], 5);
+    }
+    #[test]
+    fn master_targets_cover_pinned_playback_and_recording_destinations() {
+        let mut g = graph();
+        select(&mut g, "alsa_output.speakers");
+        add(&mut g, 10, "mic_default", "Audio/Source");
+        add(&mut g, 11, "mic_pinned", "Audio/Source");
+        add(&mut g, 12, "recorder", "Stream/Input/Audio");
+        add(&mut g, 13, "player", "Stream/Output/Audio");
+        g.metadata.entry("default".into()).or_default().insert(
+            "0:default.audio.source".into(),
+            MetadataValue {
+                subject: 0,
+                key: "default.audio.source".into(),
+                type_: "Spa:String:JSON".into(),
+                value: json!({"name":"mic_default"}).to_string(),
+            },
+        );
+        // Mute default output and default mic; leave pinned mic and pinned output live.
+        g.nodes.get_mut(&1).unwrap().audio.muted = Some(true);
+        g.nodes.get_mut(&10).unwrap().audio.muted = Some(true);
+        g.nodes.get_mut(&2).unwrap().audio.muted = Some(false);
+        g.nodes.get_mut(&11).unwrap().audio.muted = Some(false);
+        link(&mut g, 11, 12);
+        link(&mut g, 13, 2);
+
+        let targets = master_targets(&g);
+        assert!(targets.outputs.contains_key(&1));
+        assert!(targets.outputs.contains_key(&2));
+        assert!(targets.inputs.contains_key(&10));
+        assert!(targets.inputs.contains_key(&11));
+        assert!(targets.recording_active);
+        assert!(!targets.recording_muted);
+        assert_eq!(master_snapshot(&g)["anyAudible"], true);
+        assert_eq!(master_snapshot(&g)["recordingMuted"], false);
+
+        g.nodes.get_mut(&11).unwrap().audio.muted = Some(true);
+        assert_eq!(master_snapshot(&g)["recordingMuted"], true);
+        assert_eq!(master_snapshot(&g)["anyAudible"], true);
+
+        g.nodes.get_mut(&2).unwrap().audio.muted = Some(true);
+        assert_eq!(master_snapshot(&g)["anyAudible"], false);
     }
 }

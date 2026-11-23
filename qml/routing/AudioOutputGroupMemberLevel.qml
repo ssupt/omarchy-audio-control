@@ -82,6 +82,7 @@ Item {
       hasCursor: root.hasKeyboardCursor
       opacity: enabled ? 1 : 0.45
       onMoved: function(value) { root.volumeMoved(root.node, value) }
+      onReleased: function(value) { root.volumeMoved(root.node, value) }
     }
   }
 }

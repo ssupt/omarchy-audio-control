@@ -253,6 +253,48 @@ with tempfile.TemporaryDirectory(prefix='audio-routing-') as temporary, ExitStac
         assert all(r['app'] != 'test_follow' for r in client.state['stores']['rules']['appRules'])
         print('PASS: automatic rules use native routing; manual changes update or remove existing rules', flush=True)
 
+        # Finding 3: deleting a saved rule (Advanced "Follow default") must clear
+        # WirePlumber's stream override both for live applications and when an
+        # offline application next appears.
+        assert default('playback') == 'audio_test_output'
+        client.request('rules.set_app', dict(app='test_follow', direction='playback', target='audio_test_other_output'))
+        until(lambda: linked('test_follow', 'audio_test_other_output'))
+        assert client.request('rules.delete_app', dict(app='test_follow', direction='playback'))['outcome'] == 'applied'
+        assert all(r['app'] != 'test_follow' for r in client.state['stores']['rules']['appRules'])
+        until(lambda: linked('test_follow', 'audio_test_output'))
+        follow_serial = node('test_follow')['serial']
+        client.wait_state(lambda s: s.get('routes', {}).get('playback', {}).get(follow_serial, {}).get('mode') == 'default')
+        stop(follow)
+        client.wait_state(lambda s: all(n['name'] != 'test_follow' for n in s['nodes']))
+        follow = start_stream('test_follow')
+        until(lambda: linked('test_follow', 'audio_test_output'))
+        assert select('audio_test_other_output')['outcome'] == 'applied'
+        until(lambda: linked('test_follow', 'audio_test_other_output'))
+        assert select('audio_test_output')['outcome'] == 'applied'
+        until(lambda: linked('test_follow', 'audio_test_output'))
+
+        # Offline rule deletion: pin while live, stop app, delete rule while offline,
+        # recreate app, verify automation clears the pin and future defaults follow.
+        client.request('rules.set_app', dict(app='test_follow', direction='playback', target='audio_test_other_output'))
+        until(lambda: linked('test_follow', 'audio_test_other_output'))
+        stop(follow)
+        client.wait_state(lambda s: all(n['name'] != 'test_follow' for n in s['nodes']))
+        assert client.request('rules.delete_app', dict(app='test_follow', direction='playback'))['outcome'] == 'applied'
+        follow = start_stream('test_follow')
+        until(lambda: linked('test_follow', 'audio_test_output'))
+        follow_serial = node('test_follow')['serial']
+        client.wait_state(lambda s: s.get('routes', {}).get('playback', {}).get(follow_serial, {}).get('mode') == 'default'
+                          and not s['stores']['rules'].get('pendingDefaultRoutes'))
+        stop(follow)
+        client.wait_state(lambda s: all(n['name'] != 'test_follow' for n in s['nodes']))
+        follow = start_stream('test_follow')
+        until(lambda: linked('test_follow', 'audio_test_output'))
+        assert select('audio_test_other_output')['outcome'] == 'applied'
+        until(lambda: linked('test_follow', 'audio_test_other_output'))
+        assert select('audio_test_output')['outcome'] == 'applied'
+        until(lambda: linked('test_follow', 'audio_test_output'))
+        print('PASS: deleting a saved rule clears WirePlumber pins for both live and offline applications', flush=True)
+
         prefs = work/'config/omarchy/audio-preferences.json'
         saved = prefs.read_bytes()
         prefs.write_text('{broken')
@@ -309,6 +351,67 @@ with tempfile.TemporaryDirectory(prefix='audio-routing-') as temporary, ExitStac
         assert node('test_module')['serial'] not in client.state['routes']['playback']
         stop(module)
         print('PASS: capture selection can leave a sink monitor; module-owned streams reject application routes', flush=True)
+
+        # Finding 1: master mute must silence a recorder pinned to a non-default
+        # tone microphone and drive master/recording indicators from confirmed state.
+        assert default('recording') == 'audio_test_input'
+        tone_capture = subprocess.Popen(
+            ['pw-record', '--raw', '--rate=48000', '--channels=1', '--format=s16',
+             '--target=audio_test_other_input',
+             '--properties=node.name=test_pinned_tone application.name=test_pinned_tone', '-'],
+            env=env, stdout=subprocess.PIPE, stderr=log)
+        cleanup.callback(stop, tone_capture)
+        def read_exact(stream, size):
+            chunks = bytearray()
+            while len(chunks) < size:
+                part = stream.read(size - len(chunks))
+                if not part:
+                    raise AssertionError('Tone recorder stopped unexpectedly')
+                chunks.extend(part)
+            return bytes(chunks)
+        until(lambda: linked('test_pinned_tone', 'audio_test_other_input'))
+        # Ensure live signal arrives from the second tone source before muting.
+        before_mute = b''
+        for _ in range(5):
+            before_mute = read_exact(tone_capture.stdout, 9600)
+            if any(before_mute):
+                break
+        assert any(before_mute), 'Expected non-silent tone before master mute'
+        # Muting only the default devices must leave master audible and recording unmuted.
+        client.request('node.level', dict(identity=identity('audio_test_other_output'), muted=True))
+        client.request('node.level', dict(identity=identity('audio_test_input'), muted=True))
+        client.wait_state(lambda s: s.get('master', {}).get('anyAudible') is True
+                          and s.get('master', {}).get('recordingMuted') is False)
+        # Master mute covers all active playback and recording destinations.
+        assert client.request('audio.mute_all', dict(generation=client.state['generation'], muted=True))['outcome'] == 'applied'
+        client.wait_state(lambda s: s.get('master', {}).get('anyAudible') is False
+                          and s.get('master', {}).get('recordingMuted') is True)
+        assert node('audio_test_other_input')['audio']['muted'] is True
+        # Drain buffered audio already in flight, then assert pure silence.
+        _ = read_exact(tone_capture.stdout, 9600 * 4)
+        after_mute = read_exact(tone_capture.stdout, 9600)
+        nonzero = sum(1 for byte in after_mute if byte != 0)
+        assert nonzero == 0, f'Pinned second microphone stayed live after master mute ({nonzero}/9600 nonzero bytes)'
+        assert client.request('audio.mute_all', dict(generation=client.state['generation'], muted=False))['outcome'] == 'applied'
+        client.wait_state(lambda s: s.get('master', {}).get('anyAudible') is True
+                          and s.get('master', {}).get('recordingMuted') is False)
+        after_unmute = b''
+        for _ in range(5):
+            after_unmute = read_exact(tone_capture.stdout, 9600)
+            if any(after_unmute):
+                break
+        assert any(after_unmute), 'Expected tone to resume after master unmute'
+        # Input-scoped mute silences pinned recording microphones while leaving outputs audible.
+        assert client.request('audio.mute_all', dict(generation=client.state['generation'], muted=True, scope='inputs'))['outcome'] == 'applied'
+        client.wait_state(lambda s: s.get('master', {}).get('recordingMuted') is True
+                          and s.get('master', {}).get('anyAudible') is True)
+        assert node('audio_test_other_input')['audio']['muted'] is True
+        assert node('audio_test_other_output')['audio']['muted'] is False
+        assert client.request('audio.mute_all', dict(generation=client.state['generation'], muted=False, scope='inputs'))['outcome'] == 'applied'
+        client.wait_state(lambda s: s.get('master', {}).get('recordingMuted') is False)
+        stop(tone_capture)
+        client.wait_state(lambda s: all(n['name'] != 'test_pinned_tone' for n in s['nodes']))
+        print('PASS: master mute silences pinned non-default microphones and drives confirmed indicators', flush=True)
 
         # The real policy checks above cover user behavior. A second private
         # graph owns its metadata in PipeWire and keeps fixed links, allowing

@@ -73,6 +73,7 @@ pub async fn select(native: &Handle, storage: Option<&Storage>, params: Set) -> 
     let node = routing::endpoint(&graph, &params.identity, direction)?;
     let name = node.name.clone();
     let previous_name = routing::default_name(&graph, direction);
+    let configured_name = routing::configured_default_name(&graph, direction);
     let mut old_nodes = graph
         .nodes
         .values()
@@ -98,35 +99,39 @@ pub async fn select(native: &Handle, storage: Option<&Storage>, params: Set) -> 
     }
     let mut followers = Vec::new();
     let mut changes = Vec::new();
-    if previous_name.as_deref() != Some(&name) {
-        for stream in graph
-            .nodes
-            .values()
-            .filter(|n| routing::stream_direction(n) == Some(direction))
-        {
-            if stream
-                .properties
-                .get("application.name")
-                .is_some_and(|v| v == "EasyEffects")
+    let effective_changed = previous_name.as_deref() != Some(&name);
+    let configured_changed = configured_name.as_deref() != Some(&name);
+    if effective_changed || configured_changed {
+        if effective_changed {
+            for stream in graph
+                .nodes
+                .values()
+                .filter(|n| routing::stream_direction(n) == Some(direction))
             {
-                continue;
+                if stream
+                    .properties
+                    .get("application.name")
+                    .is_some_and(|v| v == "EasyEffects")
+                {
+                    continue;
+                }
+                if routing::explicit(&graph, stream)? {
+                    continue;
+                }
+                if routing::target(&graph, stream, direction)?
+                    .is_some_and(|n| previous.as_ref().is_some_and(|p| n.id == p.id))
+                {
+                    routing::movable(&graph, stream)?;
+                    followers.push(routing::identity(&graph, stream));
+                    changes.extend(routing::route_changes(&graph, stream, node, Mode::Default)?);
+                }
             }
-            if routing::explicit(&graph, stream)? {
-                continue;
+            if followers.len() > 512 {
+                return Err(Failure::new(
+                    "unsupported",
+                    "Too many applications to change the default safely",
+                ));
             }
-            if routing::target(&graph, stream, direction)?
-                .is_some_and(|n| previous.as_ref().is_some_and(|p| n.id == p.id))
-            {
-                routing::movable(&graph, stream)?;
-                followers.push(routing::identity(&graph, stream));
-                changes.extend(routing::route_changes(&graph, stream, node, Mode::Default)?);
-            }
-        }
-        if followers.len() > 512 {
-            return Err(Failure::new(
-                "unsupported",
-                "Too many applications to change the default safely",
-            ));
         }
         changes.push(routing::change(
             &graph,
@@ -135,7 +140,11 @@ pub async fn select(native: &Handle, storage: Option<&Storage>, params: Set) -> 
             Some(("Spa:String:JSON", json!({"name":name}).to_string())),
         )?);
         let mut nodes = vec![params.identity.clone()];
-        nodes.extend(previous.iter().cloned());
+        if let Some(prev) = previous.as_ref() {
+            if prev.id != params.identity.id {
+                nodes.push(prev.clone());
+            }
+        }
         nodes.extend(followers.iter().cloned());
         let batch = Batch {
             generation: graph.generation.clone(),

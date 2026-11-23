@@ -33,8 +33,12 @@ Item {
   readonly property bool busy: state.busy === true
   readonly property bool transactionBusy: busy
     && state.operation !== "node.audio" && state.operation !== "node.level"
+  onTransactionBusyChanged: if (!transactionBusy) flushNodeChanges()
   property var client: null
   property bool destroying: false
+  property var inFlightNodeChanges: ({})
+  property var pendingNodeChanges: ({})
+  property int activeTransactions: 0
 
   // The quick mixer and advanced window share one audio control session.
   signal quickPanelOpened()
@@ -84,12 +88,30 @@ Item {
     ])
   }
 
+  function isNonLevelMutation(method, settings) {
+    if (settings && settings.mutating === false) return false
+    return ["hello", "health", "state.subscribe", "store.read",
+      "diagnostics.refresh", "diagnostics.copy", "node.audio", "node.level"].indexOf(method) === -1
+  }
   function request(method, params, callback, settings) {
     if (!client) {
       if (callback) callback(null, Protocol.failure("not_ready", "Audio service is starting", false))
       return ""
     }
-    return client.request(method, params || {}, callback, settings)
+    var transactional = isNonLevelMutation(method, settings)
+    var wrapped = callback
+    if (transactional) {
+      // Drop queued slider/mute tails before starting a whole-graph command
+      // so stale pre-click patches cannot flush behind it and overwrite it.
+      pendingNodeChanges = ({})
+      activeTransactions = (activeTransactions || 0) + 1
+      wrapped = function(result, failure) {
+        root.activeTransactions = Math.max(0, (root.activeTransactions || 0) - 1)
+        try { if (callback) callback(result, failure) }
+        finally { root.flushNodeChanges() }
+      }
+    }
+    return client.request(method, params || {}, wrapped, settings)
   }
   function identityForNode(node) {
     if (!ready || !state.graphReady || !node) return null
@@ -102,17 +124,75 @@ Item {
     }
     return found ? { generation: state.generation, id: Number(id), serial: serial } : null
   }
+  function clearNodeChanges() {
+    inFlightNodeChanges = ({})
+    pendingNodeChanges = ({})
+    activeTransactions = 0
+  }
+  function patchesEqual(a, b) {
+    if (!a || !b) return false
+    var keysA = Object.keys(a)
+    var keysB = Object.keys(b)
+    if (keysA.length !== keysB.length) return false
+    for (var i = 0; i < keysA.length; i++) {
+      var key = keysA[i]
+      if (!Model.hasOwn(b, key) || a[key] !== b[key]) return false
+    }
+    return true
+  }
+  function flushNodeChanges() {
+    if (!client || !client.hasCapacity() || transactionBusy || (activeTransactions || 0) > 0) return
+    var generation = String(state && state.generation || "")
+    var keys = Object.keys(pendingNodeChanges)
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i]
+      var entry = pendingNodeChanges[key]
+      if (!entry || (generation !== "" && entry.identity.generation !== generation)) {
+        delete pendingNodeChanges[key]
+        continue
+      }
+      if (Model.hasOwn(inFlightNodeChanges, key)) continue
+      if (!client.hasCapacity()) break
+      delete pendingNodeChanges[key]
+      inFlightNodeChanges[key] = entry.patch
+      var params = { identity: entry.identity }
+      for (var field in entry.patch)
+        if (Model.hasOwn(entry.patch, field)) params[field] = entry.patch[field]
+      ;(function(nodeKey) {
+        request("node.level", params, function(_result, failure) {
+          delete root.inFlightNodeChanges[nodeKey]
+          // A route change can briefly reject a level request while its device
+          // parameters settle. The slider already reads back the observed value;
+          // this retryable conflict is not a panel error.
+          root.error = failure && failure.code !== "busy" ? failure.message : ""
+          root.flushNodeChanges()
+        })
+      })(key)
+    }
+  }
   function changeNode(node, patch) {
     var identity = identityForNode(node)
-    if (!identity) return false
-    var params = { identity: identity }
-    for (var key in patch) if (Model.hasOwn(patch, key)) params[key] = patch[key]
-    request("node.level", params, function(_result, failure) {
-      // A route change can briefly reject a level request while its device
-      // parameters settle. The slider already reads back the observed value;
-      // this retryable conflict is not a panel error.
-      root.error = failure && failure.code !== "busy" ? failure.message : ""
-    })
+    if (!identity || !patch || typeof patch !== "object") return false
+    var key = identity.generation + ":" + identity.id + ":" + identity.serial
+    var clean = ({})
+    for (var field in patch)
+      if (Model.hasOwn(patch, field)) clean[field] = patch[field]
+    if (Object.keys(clean).length === 0) return false
+    if (!Model.hasOwn(pendingNodeChanges, key)
+        && Model.hasOwn(inFlightNodeChanges, key)
+        && patchesEqual(inFlightNodeChanges[key], clean)) {
+      return true
+    }
+    var merged = ({})
+    if (Model.hasOwn(pendingNodeChanges, key)) {
+      var previous = pendingNodeChanges[key].patch
+      for (var prevKey in previous)
+        if (Model.hasOwn(previous, prevKey)) merged[prevKey] = previous[prevKey]
+    }
+    for (var nextKey in clean)
+      if (Model.hasOwn(clean, nextKey)) merged[nextKey] = clean[nextKey]
+    pendingNodeChanges[key] = { identity: identity, patch: merged }
+    flushNodeChanges()
     return true
   }
   function scheduleReconnect() {
@@ -136,7 +216,9 @@ Item {
         root.backendVersion = info ? String(info.version || "") : ""
         root.capabilities = info ? info.capabilities : []
         if (value) root.error = ""
+        else root.clearNodeChanges()
       },
+      capacity: function() { root.flushNodeChanges() },
       state: function(value) {
         if (JSON.stringify(root.stores) !== JSON.stringify(value.stores || {})) root.stores = value.stores || {}
         if (JSON.stringify(root.storeErrors) !== JSON.stringify(value.storeErrors || {})) root.storeErrors = value.storeErrors || {}

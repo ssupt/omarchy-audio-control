@@ -152,7 +152,7 @@ impl Service {
                     "buildId": crate::launch::BUILD_ID, "pid": std::process::id(),
                     "transport": "jsonl-ascii",
                     "capabilities": [
-                        "health", "state.subscribe", "node.audio", "node.level",
+                        "health", "state.subscribe", "node.audio", "node.level", "audio.mute_all",
                         "store.read", "settings.set", "preferences.default", "preferences.profile",
                         "rules.set_app", "rules.delete_app", "devices.alias", "devices.flag", "devices.forget",
                         "scenes.save", "scenes.delete", "scene.apply", "scene.capture",
@@ -170,9 +170,11 @@ impl Service {
                 Ok(json!({"subscribed": true, "epoch": self.epoch}))
             }
             "node.audio" | "node.level" => self.audio_request(request).await,
+            "audio.mute_all" => self.master_mute_request(request).await,
             "microphone.start" => self.start_microphone(request).await,
             "microphone.stop" => self.stop_microphone_request(request).await,
             "default.set" | "default.compat" | "route.set" => self.routing_request(request).await,
+            "rules.delete_app" if self.native.is_some() => self.routing_request(request).await,
             "profile.set" => self.profile_request(request).await,
             "port.set" => self.port_request(request).await,
             "policy.set" => self.policy_request(request).await,

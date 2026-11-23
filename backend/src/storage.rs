@@ -224,6 +224,7 @@ impl Storage {
                         json!({"app": app, "direction": params.direction, "target": params.target}),
                     );
                     keep_last(rules, 64);
+                    set_pending_default(store, &app, &params.direction, false);
                     Ok(())
                 })?
             }
@@ -235,10 +236,12 @@ impl Storage {
                 }
                 require_direction(&params.direction, true)?;
                 self.update(Kind::Rules, |store| {
-                    store["appRules"]
-                        .as_array_mut()
-                        .unwrap()
-                        .retain(|r| r["app"] != app || r["direction"] != params.direction);
+                    let rules = store["appRules"].as_array_mut().unwrap();
+                    let before = rules.len();
+                    rules.retain(|r| r["app"] != app || r["direction"] != params.direction);
+                    if rules.len() != before {
+                        set_pending_default(store, &app, &params.direction, true);
+                    }
                     Ok(())
                 })?
             }
@@ -424,10 +427,21 @@ fn forget_bluetooth_device(rules: &mut Value, address: &str) {
             }
             !contains_device
         });
+    let mut removed_rules = Vec::new();
     rules["appRules"].as_array_mut().unwrap().retain(|rule| {
         let target = rule["target"].as_str().unwrap_or("");
-        !bluetooth_node_matches(target, address) && !removed_sinks.contains(target)
+        let keep = !bluetooth_node_matches(target, address) && !removed_sinks.contains(target);
+        if !keep {
+            if let (Some(app), Some(direction)) = (rule["app"].as_str(), rule["direction"].as_str())
+            {
+                removed_rules.push((app.to_owned(), direction.to_owned()));
+            }
+        }
+        keep
     });
+    for (app, direction) in removed_rules {
+        set_pending_default(rules, &app, &direction, true);
+    }
     rules["devices"]["aliases"]
         .as_object_mut()
         .unwrap()
@@ -493,6 +507,27 @@ fn strings(value: &Value, max: usize) -> Value {
     ))
 }
 
+pub fn set_pending_default(store: &mut Value, app: &str, direction: &str, pending: bool) {
+    let Some(object) = store.as_object_mut() else {
+        return;
+    };
+    let mut entries = object
+        .get("pendingDefaultRoutes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    entries.retain(|entry| entry["app"] != app || entry["direction"] != direction);
+    if pending {
+        entries.push(json!({"app": app, "direction": direction}));
+        keep_last(&mut entries, 64);
+    }
+    if entries.is_empty() {
+        object.shift_remove("pendingDefaultRoutes");
+    } else {
+        object.insert("pendingDefaultRoutes".into(), Value::Array(entries));
+    }
+}
+
 pub fn normalize(kind: Kind, raw: &Value) -> Value {
     match kind {
         Kind::Settings => {
@@ -550,8 +585,37 @@ pub fn normalize(kind: Kind, raw: &Value) -> Value {
                     aliases.entry(node).or_insert(json!(label));
                 }
             }
-            json!({"version": 1, "appRules": rules, "outputGroups": normalize_groups(&raw["outputGroups"]),
-                "devices": {"aliases": aliases, "favorites": strings(&raw["devices"]["favorites"],64), "hidden": strings(&raw["devices"]["hidden"],64)}})
+            let rule_keys: BTreeSet<String> = rules
+                .iter()
+                .filter_map(|r| {
+                    Some(format!(
+                        "{}:{}",
+                        r["direction"].as_str()?,
+                        r["app"].as_str()?
+                    ))
+                })
+                .collect();
+            let pending = unique(
+                array(&raw["pendingDefaultRoutes"], 256).filter_map(|entry| {
+                    let app = label(&entry["app"], 120).to_ascii_lowercase();
+                    let direction = entry["direction"].as_str().unwrap_or("");
+                    if app.is_empty() || require_direction(direction, true).is_err() {
+                        return None;
+                    }
+                    let key = format!("{direction}:{app}");
+                    if rule_keys.contains(&key) {
+                        return None;
+                    }
+                    Some((key, json!({"app": app, "direction": direction})))
+                }),
+                64,
+            );
+            let mut normalized = json!({"version": 1, "appRules": rules, "outputGroups": normalize_groups(&raw["outputGroups"]),
+                "devices": {"aliases": aliases, "favorites": strings(&raw["devices"]["favorites"],64), "hidden": strings(&raw["devices"]["hidden"],64)}});
+            if !pending.is_empty() {
+                normalized["pendingDefaultRoutes"] = Value::Array(pending);
+            }
+            normalized
         }
         Kind::Scenes => {
             json!({"version": 1, "scenes": unique(array(&raw["scenes"], 96).filter_map(normalize_scene)
@@ -769,6 +833,11 @@ mod tests {
         forget_bluetooth_device(&mut rules, "aabbccddeeff");
         assert_eq!(rules["appRules"].as_array().unwrap().len(), 1);
         assert_eq!(rules["appRules"][0]["app"], "other");
+        let pending = rules["pendingDefaultRoutes"].as_array().unwrap();
+        assert_eq!(pending.len(), 3);
+        assert!(pending.contains(&json!({"app":"music","direction":"playback"})));
+        assert!(pending.contains(&json!({"app":"call","direction":"recording"})));
+        assert!(pending.contains(&json!({"app":"video","direction":"playback"})));
         assert!(rules["outputGroups"].as_array().unwrap().is_empty());
         assert_eq!(rules["devices"]["aliases"].as_object().unwrap().len(), 1);
         assert_eq!(
@@ -781,6 +850,56 @@ mod tests {
         );
         assert!(canonical_bluetooth_address("AA:BB:CC:DD:EE:FF;rm").is_none());
         assert_ne!(rules, unchanged);
+    }
+    #[test]
+    fn deleting_app_rule_records_pending_default_and_setting_clears_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage {
+            directory: directory.path().into(),
+        };
+        let request = |method: &str, params: Value| {
+            storage.handle(&Request {
+                version: 1,
+                id: "rule-test".into(),
+                method: method.into(),
+                params,
+            })
+        };
+        request(
+            "rules.set_app",
+            json!({"app":"Firefox", "direction":"playback", "target":"speakers"}),
+        )
+        .unwrap();
+        request(
+            "rules.delete_app",
+            json!({"app":"FIREFOX", "direction":"playback"}),
+        )
+        .unwrap();
+        let stored = storage.read(Kind::Rules).unwrap();
+        assert_eq!(stored["appRules"], json!([]));
+        assert_eq!(
+            stored["pendingDefaultRoutes"],
+            json!([{"app":"firefox", "direction":"playback"}])
+        );
+        // Deleting a non-existent rule must not create a spurious pending reset.
+        request(
+            "rules.delete_app",
+            json!({"app":"missing", "direction":"playback"}),
+        )
+        .unwrap();
+        let stored = storage.read(Kind::Rules).unwrap();
+        assert_eq!(
+            stored["pendingDefaultRoutes"],
+            json!([{"app":"firefox", "direction":"playback"}])
+        );
+        // Re-pinning clears the pending default reset.
+        request(
+            "rules.set_app",
+            json!({"app":"firefox", "direction":"playback", "target":"headphones"}),
+        )
+        .unwrap();
+        let stored = storage.read(Kind::Rules).unwrap();
+        assert!(stored.get("pendingDefaultRoutes").is_none());
     }
     #[test]
     fn invalid_or_future_configuration_is_not_overwritten() {

@@ -169,6 +169,10 @@ Item {
     var virtualInfo = liveTargetInfo(group.sink)
     if (virtualInfo.count !== 1 || virtualInfo.direction !== "playback")
       return base + " · restoring…"
+    var pending = service && service.state && Array.isArray(service.state.pendingGroups)
+      ? service.state.pendingGroups : []
+    if (pending.indexOf(group.id) !== -1)
+      return base + " · update pending while in use"
     return base
   }
 

@@ -792,9 +792,15 @@ jq -e '(.appRules | length) == 1
   and .appRules[0] == {"app":"firefox","direction":"playback","target":"headphones"}' \
   "$rules_file" >/dev/null || fail "mixed-case application rule replacement"
 "$ROOT/scripts/audio-app-rules" del-app FIREFOX playback
-jq -e '(.appRules | length) == 0' "$rules_file" >/dev/null ||
+jq -e '(.appRules | length) == 0
+  and .pendingDefaultRoutes == [{"app":"firefox","direction":"playback"}]' "$rules_file" >/dev/null ||
   fail "mixed-case application rule deletion"
+"$ROOT/scripts/audio-app-rules" set-alias speakers "Desk Speakers"
+jq -e '.pendingDefaultRoutes == [{"app":"firefox","direction":"playback"}]' "$rules_file" >/dev/null ||
+  fail "device preference write dropped pendingDefaultRoutes"
 "$ROOT/scripts/audio-app-rules" set-app "Firefox" playback speakers
+jq -e '(.pendingDefaultRoutes // []) == []' "$rules_file" >/dev/null ||
+  fail "set-app did not clear pendingDefaultRoutes"
 "$ROOT/scripts/audio-app-rules" set-app firefox recording usb-microphone
 jq -e '(.appRules | length) == 2 and .appRules[0].target == "speakers"' "$rules_file" >/dev/null ||
   fail "application rule upsert"
