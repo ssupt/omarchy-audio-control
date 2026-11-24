@@ -159,6 +159,49 @@ Panel {
   readonly property string preferredInputName: Model.preferredAudioNodeName(
     audioPreferences, "input", source, audioSources)
 
+  // Compact layout (advanced window setting): each device list collapses to
+  // one picker row naming the current device until it is opened.
+  readonly property bool compactDevices: !!audioService && !!audioService.stores
+    && !!audioService.stores.settings && audioService.stores.settings.compactDevices === true
+  property bool outputDevicesExpanded: false
+  property bool inputDevicesExpanded: false
+  readonly property bool outputDevicesCollapsed: compactDevices && !outputDevicesExpanded
+    && displayAudioSinks.length > 0
+  readonly property bool inputDevicesCollapsed: compactDevices && !inputDevicesExpanded
+    && displayAudioSources.length > 0
+  readonly property var activeOutputRowNode: activeDisplayNode(displayAudioSinks, preferredOutputName, sink)
+  readonly property var activeInputRowNode: activeDisplayNode(displayAudioSources, preferredInputName, source)
+  // Shared by every slider row so percentages line up down the panel.
+  readonly property real percentColumnWidth: Style.space(36)
+  onCompactDevicesChanged: {
+    outputDevicesExpanded = false
+    inputDevicesExpanded = false
+    clampCursor()
+  }
+  onOutputDevicesCollapsedChanged: clampCursor()
+  onInputDevicesCollapsedChanged: clampCursor()
+
+  function activeDisplayNode(list, preferredName, fallback) {
+    if (preferredName !== "") {
+      for (var i = 0; i < list.length; i++)
+        if (Model.nodeName(list[i]) === preferredName) return list[i]
+    }
+    return fallback || null
+  }
+
+  function toggleDeviceList(section) {
+    var expanding = section === "output" ? !outputDevicesExpanded : !inputDevicesExpanded
+    var list = section === "output" ? displayAudioSinks : displayAudioSources
+    var active = section === "output" ? activeOutputRowNode : activeInputRowNode
+    if (section === "output") outputDevicesExpanded = expanding
+    else if (section === "input") inputDevicesExpanded = expanding
+    else return
+    cursorActive = true
+    focusSection = section
+    // Opening lands on the current device so Enter alone keeps it.
+    selectedIndex = expanding ? Math.max(0, list.indexOf(active)) : 0
+  }
+
   readonly property var audioStreams: {
     var list = []
     for (var i = 0; i < candidateStreams.length; i++) {
@@ -435,8 +478,8 @@ Panel {
 
   function sectionCount(section) {
     if (section === "scenes") return audioScenes.length
-    if (section === "output") return displayAudioSinks.length
-    if (section === "input") return displayAudioSources.length
+    if (section === "output") return outputDevicesCollapsed ? 1 : displayAudioSinks.length
+    if (section === "input") return inputDevicesCollapsed ? 1 : displayAudioSources.length
     if (section === "streams") return displayAudioStreams.length
     if (section === "recording") return displayRecordingStreams.length
     return 0
@@ -572,14 +615,22 @@ Panel {
     }
     if (focusSection === "output") {
       if (selectedIndex === -1) { toggleOutputMute(); return }
+      if (outputDevicesCollapsed) { toggleDeviceList("output"); return }
       var sink = displayAudioSinks[selectedIndex]
-      if (sink) setDefaultSink(sink)
+      if (sink) {
+        setDefaultSink(sink)
+        if (compactDevices) { outputDevicesExpanded = false; selectedIndex = 0 }
+      }
       return
     }
     if (focusSection === "input") {
       if (selectedIndex === -1) { toggleInputMute(); return }
+      if (inputDevicesCollapsed) { toggleDeviceList("input"); return }
       var src = displayAudioSources[selectedIndex]
-      if (src) setDefaultSource(src)
+      if (src) {
+        setDefaultSource(src)
+        if (compactDevices) { inputDevicesExpanded = false; selectedIndex = 0 }
+      }
       return
     }
     if (focusSection === "streams" && selectedIndex >= 0) {
@@ -632,6 +683,8 @@ Panel {
       Qt.callLater(resetScroll)
     } else {
       streamOutputMenuCount = 0
+      outputDevicesExpanded = false
+      inputDevicesExpanded = false
       audioModelRefreshTimer.stop()
     }
   }
@@ -1213,7 +1266,17 @@ Panel {
         else if (dx !== 0) root.adjustCursorHorizontal(dx)
       }
       onActivateRequested: if (root.cursorActive) root.activateCursor()
-      onCloseRequested: root.close()
+      onCloseRequested: {
+        // In the compact layout Escape first folds an open device list.
+        if (root.compactDevices && (root.outputDevicesExpanded || root.inputDevicesExpanded)) {
+          var section = root.outputDevicesExpanded && root.focusSection === "output" ? "output"
+            : root.inputDevicesExpanded && root.focusSection === "input" ? "input"
+            : (root.outputDevicesExpanded ? "output" : "input")
+          root.toggleDeviceList(section)
+          return
+        }
+        root.close()
+      }
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
         // 'm' mutes whatever the cursor is on: focused section's slider
@@ -1249,7 +1312,7 @@ Panel {
           background: Item { }
           contentItem: Rectangle {
             implicitWidth: Style.space(3)
-            radius: width / 2
+            radius: 0
             color: root.bar.foreground
             opacity: panelScrollBar.active ? 0.55 : 0.25
           }
@@ -1447,32 +1510,11 @@ Panel {
             width: parent.width
             spacing: Style.space(6)
 
-            Item {
-              width: parent.width
-              implicitHeight: Math.max(outputHeader.implicitHeight, outputPercent.implicitHeight)
-
-              PanelSectionHeader {
-                id: outputHeader
-                text: "OUTPUT"
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-              }
-
-              Text {
-                textFormat: Text.PlainText
-                id: outputPercent
-                text: Math.round((outputSlider.dragging ? outputSlider.liveValue : root.outputVolume) * 100) + "%"
-                color: Qt.darker(root.bar.foreground, 1.4)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
-                anchors.right: parent.right
-                anchors.rightMargin: Style.space(6)
-                anchors.verticalCenter: parent.verticalCenter
-                opacity: root.outputMuted ? 0.5 : 1.0
-              }
+            PanelSectionHeader {
+              id: outputHeader
+              text: "OUTPUT"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
             }
 
             CursorSurface {
@@ -1484,12 +1526,31 @@ Panel {
               foreground: root.bar.foreground
               outline: true
 
+              Text {
+                textFormat: Text.PlainText
+                id: outputPercent
+                text: Math.round((outputSlider.dragging ? outputSlider.liveValue : root.outputVolume) * 100) + "%"
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                width: root.percentColumnWidth
+                horizontalAlignment: Text.AlignRight
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+                opacity: root.outputMuted ? 0.5 : 1.0
+              }
+
               AudioSlider {
                 id: outputSlider
                 bar: root.bar
-                anchors.fill: parent
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                anchors.left: parent.left
+                anchors.right: outputPercent.left
                 anchors.leftMargin: Style.space(6)
-                anchors.rightMargin: Style.space(6)
+                anchors.rightMargin: Style.space(4)
                 minimum: 0
                 maximum: root.outputVolumeMaximum
                 step: 0.05
@@ -1511,6 +1572,27 @@ Panel {
               }
             }
 
+            AudioDevicePickerRow {
+              id: outputPicker
+              visible: root.outputDevicesCollapsed
+              width: panelColumn.width
+              bar: root.bar
+              section: "output"
+              glyph: Model.sinkGlyph(root.activeOutputRowNode)
+              label: root.activeOutputRowNode ? root.nodeLabel(root.activeOutputRowNode) : "No output"
+              deviceCount: root.displayAudioSinks.length
+              hasCursor: root.cursorActive && root.focusSection === "output" && root.selectedIndex === 0
+              onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(outputPicker)
+              foreground: root.bar.foreground
+              fill: root.hoverFill
+              onClaimed: function(section, index) {
+                root.cursorActive = true
+                root.focusSection = section
+                root.selectedIndex = index
+              }
+              onActivated: root.toggleDeviceList("output")
+            }
+
             Repeater {
               model: sinkRows
 
@@ -1518,6 +1600,7 @@ Panel {
                 id: sinkDelegate
                 required property int index
                 required property string nodeKey
+                visible: !root.outputDevicesCollapsed
                 width: panelColumn.width
                 node: sinkRows.nodeForKey(nodeKey)
                 rowIndex: index
@@ -1536,7 +1619,10 @@ Panel {
                   root.focusSection = section
                   root.selectedIndex = index
                 }
-                onActivated: function(node) { root.setDefaultSink(node) }
+                onActivated: function(node) {
+                  root.setDefaultSink(node)
+                  root.outputDevicesExpanded = false
+                }
               }
             }
           }
@@ -1554,7 +1640,7 @@ Panel {
 
             Item {
               width: parent.width
-              implicitHeight: Math.max(microphoneHeader.implicitHeight, microphonePercent.implicitHeight)
+              implicitHeight: Math.max(microphoneHeader.implicitHeight, microphoneClipping.implicitHeight)
 
               PanelSectionHeader {
                 id: microphoneHeader
@@ -1567,18 +1653,16 @@ Panel {
 
               Text {
                 textFormat: Text.PlainText
-                id: microphonePercent
-                text: root.inputClipping
-                  ? "CLIPPING"
-                  : Math.round((inputSlider.dragging ? inputSlider.liveValue : root.inputVolume) * 100) + "%"
-                color: root.inputClipping ? root.urgent : Qt.darker(root.bar.foreground, 1.4)
+                id: microphoneClipping
+                visible: root.inputClipping
+                text: "CLIPPING"
+                color: root.urgent
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
                 anchors.right: parent.right
                 anchors.rightMargin: Style.space(6)
                 anchors.verticalCenter: parent.verticalCenter
-                opacity: root.inputMuted ? 0.5 : 1.0
               }
             }
 
@@ -1586,58 +1670,54 @@ Panel {
               id: inputSliderRow
               visible: root.hasInput
               width: parent.width
-              height: inputControls.implicitHeight + Style.spacing.controlGap
+              height: inputSlider.implicitHeight + Style.spacing.controlGap
               hasCursor: root.cursorActive && root.focusSection === "input" && root.selectedIndex === -1
               onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(inputSliderRow)
               foreground: root.bar.foreground
               outline: true
 
-              Column {
-                id: inputControls
-                anchors.fill: parent
-                anchors.leftMargin: Style.space(6)
+              Text {
+                textFormat: Text.PlainText
+                id: microphonePercent
+                text: Math.round((inputSlider.dragging ? inputSlider.liveValue : root.inputVolume) * 100) + "%"
+                color: root.inputClipping ? root.urgent : Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                width: root.percentColumnWidth
+                horizontalAlignment: Text.AlignRight
+                anchors.right: parent.right
                 anchors.rightMargin: Style.space(6)
-                spacing: Style.space(5)
+                anchors.verticalCenter: parent.verticalCenter
+                opacity: root.inputMuted ? 0.5 : 1.0
+              }
 
-                AudioSlider {
-                  id: inputSlider
-                  bar: root.bar
-                  width: parent.width
-                  minimum: 0
-                  maximum: 1
-                  step: 0.05
-                  value: root.inputVolume
-                  opacity: root.inputMuted ? 0.5 : 1.0
-                  enabled: root.hasInput && !root.directDeviceMutationBusy
+              // The meter shares the slider track: the solid bar is the live
+              // microphone level, the dimmed fill and knob are the gain.
+              AudioSlider {
+                id: inputSlider
+                bar: root.bar
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                anchors.left: parent.left
+                anchors.right: microphonePercent.left
+                anchors.leftMargin: Style.space(6)
+                anchors.rightMargin: Style.space(4)
+                minimum: 0
+                maximum: 1
+                step: 0.05
+                value: root.inputVolume
+                opacity: root.inputMuted ? 0.5 : 1.0
+                enabled: root.hasInput && !root.directDeviceMutationBusy
+                meterEnabled: root.inputPeakSupported
+                meterLevel: root.inputPeakLevel
+                meterHold: root.inputPeakHold
+                meterAlert: root.inputClipping
+                meterAlertColor: root.urgent
 
-                  onMoved: function(v) { root.setInputVolume(v) }
-                  onReleased: function(v) { root.setInputVolume(v) }
-                  onRightClicked: root.toggleInputMute()
-                }
-
-                Rectangle {
-                  width: parent.width
-                  height: Math.max(Style.space(5), Style.spacing.xs)
-                  color: Util.alpha(root.bar.foreground, 0.18)
-                  opacity: root.inputMuted ? 0.35 : 1.0
-
-                  Rectangle {
-                    height: parent.height
-                    width: parent.width * root.inputPeakLevel
-                    color: root.inputClipping ? root.urgent : root.bar.foreground
-                    Behavior on width { NumberAnimation { duration: 70 } }
-                  }
-
-                  Rectangle {
-                    visible: root.inputPeakHold > 0.02
-                    width: Math.max(1, Style.space(2))
-                    height: parent.height + Style.space(4)
-                    x: Math.max(0, Math.min(parent.width - width,
-                      parent.width * root.inputPeakHold - width / 2))
-                    anchors.verticalCenter: parent.verticalCenter
-                    color: root.inputPeakHold >= 0.98 ? root.urgent : root.bar.foreground
-                  }
-                }
+                onMoved: function(v) { root.setInputVolume(v) }
+                onReleased: function(v) { root.setInputVolume(v) }
+                onRightClicked: root.toggleInputMute()
               }
 
               HoverHandler {
@@ -1649,6 +1729,27 @@ Panel {
               }
             }
 
+            AudioDevicePickerRow {
+              id: inputPicker
+              visible: root.inputDevicesCollapsed
+              width: panelColumn.width
+              bar: root.bar
+              section: "input"
+              glyph: Model.sourceGlyph(root.activeInputRowNode)
+              label: root.activeInputRowNode ? root.nodeLabel(root.activeInputRowNode) : "No input"
+              deviceCount: root.displayAudioSources.length
+              hasCursor: root.cursorActive && root.focusSection === "input" && root.selectedIndex === 0
+              onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(inputPicker)
+              foreground: root.bar.foreground
+              fill: root.hoverFill
+              onClaimed: function(section, index) {
+                root.cursorActive = true
+                root.focusSection = section
+                root.selectedIndex = index
+              }
+              onActivated: root.toggleDeviceList("input")
+            }
+
             Repeater {
               model: sourceRows
 
@@ -1656,6 +1757,7 @@ Panel {
                 id: sourceDelegate
                 required property int index
                 required property string nodeKey
+                visible: !root.inputDevicesCollapsed
                 width: panelColumn.width
                 node: sourceRows.nodeForKey(nodeKey)
                 rowIndex: index
@@ -1673,7 +1775,10 @@ Panel {
                   root.focusSection = section
                   root.selectedIndex = index
                 }
-                onActivated: function(node) { root.setDefaultSource(node) }
+                onActivated: function(node) {
+                  root.setDefaultSource(node)
+                  root.inputDevicesExpanded = false
+                }
               }
             }
           }

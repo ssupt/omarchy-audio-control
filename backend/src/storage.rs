@@ -180,7 +180,9 @@ impl Storage {
             "store.read" => self.read(request.params::<Read>()?.store)?,
             "settings.set" => {
                 let params = request.params::<Setting>()?;
-                if !["outputOverdrive", "captureNotifications"].contains(&params.key.as_str()) {
+                if !["outputOverdrive", "captureNotifications", "compactDevices"]
+                    .contains(&params.key.as_str())
+                {
                     return Err(invalid());
                 }
                 self.update(Kind::Settings, |store| {
@@ -535,6 +537,7 @@ pub fn normalize(kind: Kind, raw: &Value) -> Value {
             value["version"] = json!(1);
             value["outputOverdrive"] = json!(raw["outputOverdrive"] == true);
             value["captureNotifications"] = json!(raw["captureNotifications"] != false);
+            value["compactDevices"] = json!(raw["compactDevices"] == true);
             value
         }
         Kind::Preferences => {
@@ -808,6 +811,35 @@ mod tests {
         assert_eq!(identifier(&json!("  exact name  "), 160), "  exact name  ");
         assert_eq!(identifier(&json!("spoof\u{202e}name"), 160), "");
         assert_eq!(label(&json!("\n Display   Name \t"), 80), "Display Name");
+    }
+    #[test]
+    fn compact_device_layout_is_an_opt_in_boolean_setting() {
+        assert_eq!(
+            normalize(Kind::Settings, &json!({}))["compactDevices"],
+            false
+        );
+        assert_eq!(
+            normalize(Kind::Settings, &json!({"compactDevices": "yes"}))["compactDevices"],
+            false
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage {
+            directory: directory.path().into(),
+        };
+        let request = |key: &str, value: bool| {
+            storage.handle(&Request {
+                version: 1,
+                id: "settings-test".into(),
+                method: "settings.set".into(),
+                params: json!({"key": key, "value": value}),
+            })
+        };
+        request("compactDevices", true).unwrap();
+        assert_eq!(
+            storage.read(Kind::Settings).unwrap()["compactDevices"],
+            true
+        );
+        assert!(request("unknownLayout", true).is_err());
     }
     #[test]
     fn forgetting_bluetooth_removes_only_that_devices_saved_routes() {

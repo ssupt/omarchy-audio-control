@@ -83,7 +83,7 @@ CursorSurface {
         border.width: 1
         border.color: groupNameField.activeFocus ? Commons.Color.accent
           : Qt.darker(root.foreground, 1.8)
-        radius: Style.space(3)
+        radius: 0
       }
       onTextEdited: root.nameEdited(text)
       onAccepted: {

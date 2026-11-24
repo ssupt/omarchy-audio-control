@@ -147,6 +147,7 @@ Item {
 
   readonly property bool outputOverdrive: !!service && !!service.stores.settings && service.stores.settings.outputOverdrive === true
   readonly property bool captureNotifications: !service || !service.stores.settings || service.stores.settings.captureNotifications !== false
+  readonly property bool compactDevices: !!service && !!service.stores.settings && service.stores.settings.compactDevices === true
 
   readonly property color foreground: Commons.Color.foreground
   readonly property color background: Commons.Color.background
@@ -156,6 +157,11 @@ Item {
     key: "captureNotifications",
     label: "Capture-start notifications",
     description: "Notify when a new application begins using the microphone. Respects Do Not Disturb and ignores existing captures at shell startup."
+  })
+  readonly property var compactDevicesDefinition: ({
+    key: "compactDevices",
+    label: "Compact device lists",
+    description: "Show only the current output and microphone in the quick mixer; select one to choose another device."
   })
   readonly property var availablePolicyCore: policy.availableCore
   readonly property var availablePolicyVolumes: policy.availableVolumes
@@ -175,19 +181,21 @@ Item {
   readonly property bool inputBalanceAvailable: balanceAvailable(inputDevice)
   readonly property int audioPortStartIndex: 1
   readonly property int deviceProfileStartIndex: audioPortStartIndex + audioPorts.length
-  readonly property int balanceStartIndex: deviceProfileStartIndex + deviceCards.length
+  readonly property int compactDevicesIndex: deviceProfileStartIndex + deviceCards.length
+  readonly property int balanceStartIndex: compactDevicesIndex + 1
   readonly property int outputBalanceIndex: outputBalanceAvailable ? balanceStartIndex : -1
   readonly property int inputBalanceIndex: inputBalanceAvailable
     ? balanceStartIndex + (outputBalanceAvailable ? 1 : 0) : -1
   readonly property int deviceItemCount: balanceStartIndex
     + (outputBalanceAvailable ? 1 : 0) + (inputBalanceAvailable ? 1 : 0)
   readonly property int microphoneTestIndex: inputDevice ? deviceItemCount : -1
-  readonly property int policyVolumeStartIndex: availablePolicyCore.length
-  readonly property int policyExperimentalStartIndex: policyVolumeStartIndex + availablePolicyVolumes.length
-  readonly property int wireplumberPolicyItemCount: policyExperimentalStartIndex
+  readonly property int policyExperimentalStartIndex: availablePolicyCore.length
+  readonly property int captureNotificationIndex: policyExperimentalStartIndex
     + availablePolicyExperimental.length
-  readonly property int captureNotificationIndex: wireplumberPolicyItemCount
-  readonly property int policyItemCount: wireplumberPolicyItemCount + 1
+  readonly property int policyVolumeStartIndex: captureNotificationIndex + 1
+  readonly property int wireplumberPolicyItemCount: availablePolicyCore.length
+    + availablePolicyExperimental.length + availablePolicyVolumes.length
+  readonly property int policyItemCount: policyVolumeStartIndex + availablePolicyVolumes.length
   readonly property int outputGroupCreateIndex: 0
   readonly property int outputGroupStartIndex: 1
   readonly property int newRuleAppIndex: outputGroupStartIndex + audioRules.outputGroups.length
@@ -408,9 +416,14 @@ Item {
     setAudioControlSetting("captureNotifications", enabled)
   }
 
+  function setCompactDevices(enabled) {
+    setAudioControlSetting("compactDevices", enabled)
+  }
+
   function setAudioControlSetting(key, value) {
     if (!audioControlSettingsWritable || audioControlWritePending
-        || (key !== "outputOverdrive" && key !== "captureNotifications")) return
+        || (key !== "outputOverdrive" && key !== "captureNotifications"
+          && key !== "compactDevices")) return
     if (!service || !service.ready) return
     audioControlWritePending = true
     settingsSaveError = ""
@@ -645,6 +658,10 @@ Item {
     }
     if (activeTab === 0 && selectedIndex === 0) {
       setOutputOverdrive(!outputOverdrive)
+      return
+    }
+    if (activeTab === 0 && selectedIndex === compactDevicesIndex) {
+      setCompactDevices(!compactDevices)
       return
     }
     if (activeTab === 0
@@ -1040,6 +1057,7 @@ Item {
               spacing: Style.space(14)
 
               Text {
+                id: headerIcon
                 textFormat: Text.PlainText
                 text: ""
                 color: root.foreground
@@ -1049,7 +1067,8 @@ Item {
               }
 
               Column {
-                width: parent.width - parent.children[0].width - parent.spacing
+                width: Math.max(0, parent.width - headerIcon.width - closeButton.width
+                  - parent.spacing * 2)
                 spacing: Style.space(3)
 
                 Text {
@@ -1070,6 +1089,18 @@ Item {
                   font.pixelSize: Style.font.bodySmall
                   wrapMode: Text.WordWrap
                 }
+              }
+
+              PanelActionButton {
+                id: closeButton
+                iconText: "󰅖"
+                tooltipText: "Close"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.heading
+                size: Math.round(Style.space(28)) | 1
+                anchors.top: parent.top
+                onClicked: root.requestClose()
               }
             }
 
@@ -1118,7 +1149,7 @@ Item {
               background: Item { }
               contentItem: Rectangle {
                 implicitWidth: Style.space(3)
-                radius: width / 2
+                radius: 0
                 color: root.foreground
                 opacity: advancedScrollBar.active ? 0.55 : 0.25
               }
@@ -1436,51 +1467,7 @@ Item {
 
                 PanelSeparator {
                   visible: root.availablePolicyCore.length > 0
-                    && (root.availablePolicyVolumes.length > 0
-                      || root.availablePolicyExperimental.length > 0)
-                  foreground: root.foreground
-                }
-
-                Column {
-                  visible: root.availablePolicyVolumes.length > 0
-                  width: parent.width
-                  spacing: Style.space(8)
-
-                  PanelSectionHeader {
-                    text: "STARTING VOLUMES"
-                    foreground: root.foreground
-                    fontFamily: root.fontFamily
-                  }
-
-                  Repeater {
-                    model: (root.visitedTabs & 4) ? root.availablePolicyVolumes : []
-
-                    AudioPolicyVolumeRow {
-                      id: policyVolumeRow
-                      required property var modelData
-                      required property int index
-                      readonly property int rowIndex: root.policyVolumeStartIndex + index
-                      width: parent.width
-                      definition: modelData
-                      value: Number(Model.mapValue(root.policySettings, modelData.key, 0))
-                      enabled: root.policySettingsLoaded && !policy.busy
-                        && !root.policyMutationBlocked
-                      opacity: enabled ? 1 : 0.6
-                      hasCursor: root.cursorActive && root.activeTab === 2
-                        && root.selectedIndex === rowIndex
-                      foreground: root.foreground
-                      fill: root.hoverFill
-                      fontFamily: root.fontFamily
-                      onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(policyVolumeRow)
-                      onHovered: root.setCursor(rowIndex)
-                      onCommitted: function(value) { root.setPolicySetting(modelData.key, value) }
-                    }
-                  }
-                }
-
-                PanelSeparator {
-                  visible: root.availablePolicyExperimental.length > 0
-                    && (root.availablePolicyCore.length > 0 || root.availablePolicyVolumes.length > 0)
+                    && root.availablePolicyExperimental.length > 0
                   foreground: root.foreground
                 }
 
@@ -1523,7 +1510,8 @@ Item {
                 }
 
                 PanelSeparator {
-                  visible: root.wireplumberPolicyItemCount > 0
+                  visible: root.availablePolicyCore.length > 0
+                    || root.availablePolicyExperimental.length > 0
                   foreground: root.foreground
                 }
 
@@ -1553,6 +1541,48 @@ Item {
                       root.ensureCursorVisible(captureNotificationRow)
                     onHovered: root.setCursor(root.captureNotificationIndex)
                     onActivated: root.setCaptureNotifications(!root.captureNotifications)
+                  }
+                }
+
+                PanelSeparator {
+                  visible: root.availablePolicyVolumes.length > 0
+                  foreground: root.foreground
+                }
+
+                Column {
+                  visible: root.availablePolicyVolumes.length > 0
+                  width: parent.width
+                  spacing: Style.space(8)
+
+                  PanelSectionHeader {
+                    text: "STARTING VOLUMES"
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                  }
+
+                  Repeater {
+                    model: (root.visitedTabs & 4) ? root.availablePolicyVolumes : []
+
+                    AudioPolicyVolumeRow {
+                      id: policyVolumeRow
+                      required property var modelData
+                      required property int index
+                      readonly property int rowIndex: root.policyVolumeStartIndex + index
+                      width: parent.width
+                      definition: modelData
+                      value: Number(Model.mapValue(root.policySettings, modelData.key, 0))
+                      enabled: root.policySettingsLoaded && !policy.busy
+                        && !root.policyMutationBlocked
+                      opacity: enabled ? 1 : 0.6
+                      hasCursor: root.cursorActive && root.activeTab === 2
+                        && root.selectedIndex === rowIndex
+                      foreground: root.foreground
+                      fill: root.hoverFill
+                      fontFamily: root.fontFamily
+                      onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(policyVolumeRow)
+                      onHovered: root.setCursor(rowIndex)
+                      onCommitted: function(value) { root.setPolicySetting(modelData.key, value) }
+                    }
                   }
                 }
               }
@@ -2230,6 +2260,41 @@ Item {
                         if (!open) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
                       }
                     }
+                  }
+                }
+
+                PanelSeparator {
+                  visible: root.activeTab === 0
+                  foreground: root.foreground
+                }
+
+                Column {
+                  visible: root.activeTab === 0
+                  width: parent.width
+                  spacing: Style.space(8)
+
+                  PanelSectionHeader {
+                    text: "QUICK MIXER"
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                  }
+
+                  AudioPolicyToggleRow {
+                    id: compactDevicesRow
+                    width: parent.width
+                    definition: root.compactDevicesDefinition
+                    checked: root.compactDevices
+                    enabled: root.audioControlSettingsWritable
+                      && !root.audioControlWritePending
+                    hasCursor: root.cursorActive && root.activeTab === 0
+                      && root.selectedIndex === root.compactDevicesIndex
+                    foreground: root.foreground
+                    fill: root.hoverFill
+                    fontFamily: root.fontFamily
+                    onHasCursorChanged: if (hasCursor)
+                      root.ensureCursorVisible(compactDevicesRow)
+                    onHovered: root.setCursor(root.compactDevicesIndex)
+                    onActivated: root.setCompactDevices(!root.compactDevices)
                   }
                 }
 

@@ -106,7 +106,7 @@ CursorSurface {
           color: "transparent"
           border.width: 1
           border.color: Commons.Color.accent
-          radius: Style.space(3)
+          radius: 0
         }
         onVisibleChanged: {
           if (!visible) return

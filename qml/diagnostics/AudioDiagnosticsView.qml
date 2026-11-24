@@ -193,7 +193,7 @@ Column {
             Rectangle {
               width: Style.space(6)
               height: width
-              radius: width / 2
+              radius: 0
               color: modelData.active ? root.foreground : root.urgent
               anchors.verticalCenter: parent.verticalCenter
             }
