@@ -3,6 +3,7 @@
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+source "$ROOT/scripts/.audio-common"
 MANIFEST="$ROOT/backend/Cargo.toml"
 SERVICE=omarchy-audio-control.service
 SOCKET=omarchy-audio-control.socket
@@ -20,9 +21,13 @@ while (( $# )); do
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
+valid_base_path() {
+  local p=$1
+  [[ $p == /* && $p != / && $p != */.. && $p != */../* && $p != */. && $p != */./* ]]
+}
 if [[ -n $STAGE ]]; then
   while [[ $STAGE == */ && $STAGE != / ]]; do STAGE=${STAGE%/}; done
-  [[ $STAGE == /* && $STAGE != / ]] || exit 2
+  valid_base_path "$STAGE" || exit 2
   INSTALL_BASE=$STAGE
   CONFIG_BASE="$STAGE/.config"
 else
@@ -31,7 +36,7 @@ else
 fi
 while [[ $INSTALL_BASE == */ && $INSTALL_BASE != / ]]; do INSTALL_BASE=${INSTALL_BASE%/}; done
 while [[ $CONFIG_BASE == */ && $CONFIG_BASE != / ]]; do CONFIG_BASE=${CONFIG_BASE%/}; done
-[[ $INSTALL_BASE == /* && $INSTALL_BASE != / && $CONFIG_BASE == /* && $CONFIG_BASE != / ]] || exit 2
+valid_base_path "$INSTALL_BASE" && valid_base_path "$CONFIG_BASE" || exit 2
 LIBEXEC_DIR="$INSTALL_BASE/.local/libexec/omarchy-audio-control"
 UNIT_STATE_DIR="$LIBEXEC_DIR/unit-state"
 UNIT_DIR="$CONFIG_BASE/systemd/user"
@@ -51,16 +56,25 @@ ensure_dir() {
   mkdir -m "$mode" -- "$dir"
 }
 
+acquire_install_lock() {
+  local sum
+  audio_prepare_private_runtime || return 1
+  sum=$(printf '%s' "$LIBEXEC_DIR" | sha256sum) || return 1
+  audio_open_lock_path \
+    "$AUDIO_CONTROL_PRIVATE_RUNTIME_DIR/audio-backend-install-${sum:0:24}.lock" 9 \
+    "Another audio backend installation is already in progress"
+}
+
 file_sha256() {
-  local sum _rest
-  read -r sum _rest < <(sha256sum -- "$1")
-  printf '%s\n' "$sum"
+  local out
+  out=$(sha256sum < "$1") || return 1
+  printf '%s\n' "${out%% *}"
 }
 
 is_known_shipped_unit() {
   local path=$1 unit=$2 sha
   cmp -s -- "$path" "$ROOT/packaging/systemd/$unit" && return 0
-  sha=$(file_sha256 "$path")
+  sha=$(file_sha256 "$path") || return 1
   case $unit in
     "$SERVICE") [[ $sha == "$LEGACY_SERVICE_SHA256" ]] ;;
     "$SOCKET") [[ $sha == "$LEGACY_SOCKET_SHA256" ]] ;;
@@ -102,11 +116,19 @@ rollback_install() {
   local status=$1 restored=true unit
   trap - EXIT HUP INT TERM
   set +e
-  if [[ -z $previous ]]; then
-    if [[ ! -f $release/previous-units/$SOCKET ]]; then
-      manager disable --now "$SOCKET" || restored=false
+  if $daemon_touched && [[ -z $previous ]]; then
+    if ! $socket_was_enabled; then
+      if ! manager disable --now "$SOCKET" 2>/dev/null; then
+        if manager is-active --quiet "$SOCKET" 2>/dev/null; then
+          restored=false
+        fi
+      fi
     fi
-    manager stop "$SERVICE" || restored=false
+    if [[ -f $release/previous-units/$SERVICE ]]; then
+      manager stop "$SERVICE" || restored=false
+    elif manager is-active --quiet "$SERVICE" 2>/dev/null; then
+      manager stop "$SERVICE" || restored=false
+    fi
   fi
   for unit in "$SERVICE" "$SOCKET"; do
     if [[ -f $release/previous-units/$unit ]]; then
@@ -131,23 +153,30 @@ rollback_install() {
       rm -f -- "$UNIT_STATE_DIR/$unit.original" || restored=false
     fi
   done
-  rm -f -- "$link" || restored=false
+  rm -rf -- "${link_dir:-}" || restored=false
   if [[ -n $previous ]]; then
-    if ln -s -- "$previous" "$link"; then
-      mv -Tf -- "$link" "$LIBEXEC_DIR/current" || restored=false
+    local restore_link_dir
+    if restore_link_dir=$(mktemp -d "$LIBEXEC_DIR/.current.XXXXXXXX") &&
+        ln -s -- "$previous" "$restore_link_dir/current"; then
+      mv -Tf -- "$restore_link_dir/current" "$LIBEXEC_DIR/current" || restored=false
     else
       restored=false
     fi
+    rm -rf -- "${restore_link_dir:-}"
   else
     rm -f -- "$LIBEXEC_DIR/current" || restored=false
   fi
-  manager daemon-reload || restored=false
+  if $daemon_touched || [[ -n $previous ]]; then
+    manager daemon-reload || restored=false
+  fi
   if $was_active && { [[ -n $previous ]] || [[ -f $release/previous-units/$SERVICE ]]; }; then
     manager restart "$SERVICE" || restored=false
   fi
-  rm -rf -- "$unit_stage" "${state_stage:-}"
+  rm -rf -- "${unit_stage:-}" "${state_stage:-}"
   rmdir -- "$UNIT_STATE_DIR" 2>/dev/null || true
   if $restored; then
+    rm -rf -- "$release"
+    rmdir -- "$LIBEXEC_DIR/releases" "$LIBEXEC_DIR" 2>/dev/null || true
     echo "Backend installation failed; the previous installation was restored" >&2
   else
     echo "Backend installation failed; rollback was incomplete (backup: $release/previous-units)" >&2
@@ -162,29 +191,23 @@ case $ACTION in
     echo "$BINARY"
     ;;
   install)
+    acquire_install_lock
     if [[ -z $BINARY ]]; then build; fi
     [[ $BINARY == /* && -f $BINARY && -x $BINARY ]] || {
       echo "--binary requires an absolute executable path" >&2; exit 2;
     }
+    [[ ! -L $LIBEXEC_DIR ]] || {
+      echo "Refusing to use symlinked libexec directory" >&2; exit 1;
+    }
+    [[ ! -L $LIBEXEC_DIR/releases ]] || {
+      echo "Refusing to use symlinked releases directory" >&2; exit 1;
+    }
+    [[ ! -L $UNIT_STATE_DIR ]] || {
+      echo "Refusing to use symlinked unit state directory" >&2; exit 1;
+    }
     [[ ! -e $LIBEXEC_DIR/current || -L $LIBEXEC_DIR/current ]] || {
       echo "Refusing to replace an unmanaged current release" >&2; exit 1;
     }
-    ensure_dir "$LIBEXEC_DIR/releases" 755
-    ensure_dir "$UNIT_STATE_DIR" 700
-    [[ -d $UNIT_STATE_DIR && ! -L $UNIT_STATE_DIR ]] || {
-      echo "Refusing to use symlinked unit state directory" >&2; exit 1;
-    }
-    ensure_dir "$UNIT_DIR" 755
-    ensure_dir "$CONFIG_BASE/omarchy" 755
-    release=$(mktemp -d "$LIBEXEC_DIR/releases/release.XXXXXXXX")
-    chmod 755 -- "$release"
-    install -m 755 -- "$BINARY" "$release/omarchy-audio-service"
-    touch "$release/.audio-control-release"
-    previous=$(readlink -- "$LIBEXEC_DIR/current" || true)
-    was_active=false
-    if { [[ -z $STAGE ]] || [[ -n ${AUDIO_BACKEND_STAGE_SYSTEMCTL:-} ]]; } &&
-        manager is-active --quiet "$SERVICE"; then was_active=true; fi
-    mkdir -m 700 -- "$release/previous-units"
     for unit in "$SERVICE" "$SOCKET"; do
       if [[ -e $UNIT_DIR/$unit || -L $UNIT_DIR/$unit ]]; then
         [[ -f $UNIT_DIR/$unit && ! -L $UNIT_DIR/$unit ]] || {
@@ -199,9 +222,34 @@ case $ACTION in
         fi
       done
     done
+    ensure_dir "$LIBEXEC_DIR/releases" 755
+    ensure_dir "$UNIT_DIR" 755
+    ensure_dir "$CONFIG_BASE/omarchy" 755
+    unit_stage=""
+    state_stage=""
+    link_dir=""
+    release=$(mktemp -d "$LIBEXEC_DIR/releases/release.XXXXXXXX")
+    trap 'rm -rf -- "${unit_stage:-}" "${state_stage:-}" "${link_dir:-}" "$release"; rmdir -- "$UNIT_STATE_DIR" "$LIBEXEC_DIR/releases" "$LIBEXEC_DIR" 2>/dev/null || true' EXIT
+    ensure_dir "$UNIT_STATE_DIR" 700
+    [[ -d $UNIT_STATE_DIR && ! -L $UNIT_STATE_DIR ]] || {
+      echo "Refusing to use symlinked unit state directory" >&2; exit 1;
+    }
+    chmod 755 -- "$release"
+    install -m 755 -- "$BINARY" "$release/omarchy-audio-service"
+    touch "$release/.audio-control-release"
+    previous=$(readlink -- "$LIBEXEC_DIR/current" || true)
+    was_active=false
+    socket_was_enabled=false
+    daemon_touched=false
+    if { [[ -z $STAGE ]] || [[ -n ${AUDIO_BACKEND_STAGE_SYSTEMCTL:-} ]]; }; then
+      if manager is-active --quiet "$SERVICE"; then was_active=true; fi
+      if [[ -f $UNIT_DIR/$SOCKET ]] && manager is-enabled --quiet "$SOCKET" 2>/dev/null; then
+        socket_was_enabled=true
+      fi
+    fi
+    mkdir -m 700 -- "$release/previous-units"
     unit_stage=$(mktemp -d "$UNIT_DIR/.audio-backend.XXXXXXXX")
     state_stage=$(mktemp -d "$UNIT_STATE_DIR/.stage.XXXXXXXX")
-    trap 'rm -rf -- "$unit_stage" "$state_stage" "$release"; rmdir -- "$UNIT_STATE_DIR" 2>/dev/null || true' EXIT
     for unit in "$SERVICE" "$SOCKET"; do
       replace=true
       if [[ -e $UNIT_DIR/$unit ]]; then
@@ -234,7 +282,8 @@ case $ACTION in
         chmod 600 -- "$state_stage/$unit.installed.sha256"
       fi
     done
-    link="$LIBEXEC_DIR/.current.$$"
+    link_dir=$(mktemp -d "$LIBEXEC_DIR/.current.XXXXXXXX")
+    link="$link_dir/current"
     ln -s -- "releases/${release##*/}" "$link"
     trap 'rollback_install "$?"' EXIT
     trap 'exit 129' HUP
@@ -252,7 +301,10 @@ case $ACTION in
       fi
     done
     mv -Tf -- "$link" "$LIBEXEC_DIR/current"
+    rm -rf -- "$link_dir"
+    link_dir=""
     activated=false
+    daemon_touched=true
     if manager daemon-reload && manager enable --now "$SOCKET"; then
       if ! $was_active || manager restart "$SERVICE"; then activated=true; fi
     fi
@@ -264,20 +316,32 @@ case $ACTION in
     echo "Installed $LIBEXEC_DIR/current"
     ;;
   uninstall)
+    acquire_install_lock
+    [[ ! -L $LIBEXEC_DIR ]] || {
+      echo "Refusing to use symlinked libexec directory" >&2; exit 1;
+    }
+    [[ ! -L $LIBEXEC_DIR/releases ]] || {
+      echo "Refusing to use symlinked releases directory" >&2; exit 1;
+    }
+    [[ ! -L $UNIT_STATE_DIR ]] || {
+      echo "Refusing to use symlinked unit state directory" >&2; exit 1;
+    }
     had_current=false
-    if [[ -L $LIBEXEC_DIR/current ]]; then had_current=true; fi
+    changed=false
+    if [[ -L $LIBEXEC_DIR/current ]]; then had_current=true; changed=true; fi
+    if [[ -d $UNIT_STATE_DIR ]]; then changed=true; fi
     if [[ -f $UNIT_STATE_DIR/$SOCKET.installed.sha256 ]] || $had_current; then
-      if [[ -e $UNIT_DIR/$SOCKET ]]; then
-        manager disable --now "$SOCKET"
-      else
-        manager disable --now "$SOCKET" 2>/dev/null || true
+      if ! manager disable --now "$SOCKET" 2>/dev/null; then
+        if [[ -e $UNIT_DIR/$SOCKET ]] && manager is-active --quiet "$SOCKET" 2>/dev/null; then
+          exit 1
+        fi
       fi
     fi
     if [[ -f $UNIT_STATE_DIR/$SERVICE.installed.sha256 ]] || $had_current; then
-      if [[ -e $UNIT_DIR/$SERVICE ]]; then
-        manager stop "$SERVICE"
-      else
-        manager stop "$SERVICE" 2>/dev/null || true
+      if ! manager stop "$SERVICE" 2>/dev/null; then
+        if [[ -e $UNIT_DIR/$SERVICE ]] && manager is-active --quiet "$SERVICE" 2>/dev/null; then
+          exit 1
+        fi
       fi
     fi
     restore_tmp=""
@@ -288,6 +352,7 @@ case $ACTION in
         if [[ -f $UNIT_DIR/$unit && ! -L $UNIT_DIR/$unit ]]; then
           current_sha=$(file_sha256 "$UNIT_DIR/$unit")
           if [[ $current_sha == "$expected_sha" ]]; then
+            changed=true
             if [[ -f $UNIT_STATE_DIR/$unit.original && ! -L $UNIT_STATE_DIR/$unit.original ]]; then
               restore_tmp=$(mktemp "$UNIT_DIR/.audio-backend-restore.XXXXXXXX")
               cp -p -- "$UNIT_STATE_DIR/$unit.original" "$restore_tmp"
@@ -300,6 +365,7 @@ case $ACTION in
         fi
       elif $had_current && [[ ! -d $UNIT_STATE_DIR && -f $UNIT_DIR/$unit && ! -L $UNIT_DIR/$unit ]]; then
         if is_known_shipped_unit "$UNIT_DIR/$unit" "$unit"; then
+          changed=true
           rm -f -- "$UNIT_DIR/$unit"
         fi
       fi
@@ -308,13 +374,18 @@ case $ACTION in
     if $had_current; then
       rm -f -- "$LIBEXEC_DIR/current"
     fi
-    rm -rf -- "$UNIT_STATE_DIR"
+    if [[ -d $UNIT_STATE_DIR && ! -L $UNIT_STATE_DIR ]]; then
+      rm -rf -- "$UNIT_STATE_DIR"
+    fi
     for release in "$LIBEXEC_DIR"/releases/release.*; do
       [[ -d $release && ! -L $release && -f $release/.audio-control-release ]] || continue
+      changed=true
       rm -rf -- "$release"
     done
     rmdir -- "$LIBEXEC_DIR/releases" "$LIBEXEC_DIR" 2>/dev/null || true
-    manager daemon-reload
+    if $changed; then
+      manager daemon-reload
+    fi
     ;;
   status)
     [[ -z $STAGE && -z $BINARY ]] || exit 2

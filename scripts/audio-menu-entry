@@ -10,7 +10,7 @@ export LC_ALL=C
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$script_dir/.audio-common"
 action=${1:-install}
-menu_file=${AUDIO_CONTROL_MENU_FILE:-$HOME/.config/omarchy/extensions/omarchy-menu.jsonc}
+menu_file=${AUDIO_CONTROL_MENU_FILE:-${XDG_CONFIG_HOME:-${HOME:?}/.config}/omarchy/extensions/omarchy-menu.jsonc}
 marker="  // Added by ssupt.audio-control"
 entry='  "setup.audio": {"icon":"","label":"Audio","action":"omarchy-shell shell summon ssupt.audio-control '\''{\"view\":\"advanced\"}'\''"}'
 maximum_menu_bytes=1048576
@@ -40,6 +40,7 @@ strip_jsonc_comments() {
   awk '
     {
       line = $0
+      sub(/\r$/, "", line)
       line_comment = 0
       for (column = 1; column <= length(line); column++) {
         character = substr(line, column, 1)
@@ -78,7 +79,7 @@ strip_jsonc_comments() {
       if (in_string) exit 2
     }
     END { if (block_comment || in_string) exit 2 }
-  ' "$source"
+  ' < "$source"
 }
 
 strip_jsonc_trailing_commas() {
@@ -147,6 +148,7 @@ inspect_menu() {
     function invalid() { exit 2 }
     {
       line = $0
+      sub(/\r$/, "", line)
       line_comment = 0
       for (column = 1; column <= length(line); column++) {
         character = substr(line, column, 1)
@@ -267,7 +269,7 @@ inspect_menu() {
       printf "%d\t%d\t%d\t%d\t%d\n", closing_line, closing_column,
         has_entry ? 1 : 0, has_content ? 1 : 0, root_trailing_comma ? 1 : 0
     }
-  ' "$menu_file"
+  ' < "$menu_file"
 }
 
 install_entry() {
@@ -352,18 +354,32 @@ remove_entry() {
   trap 'rm -f -- "$tmp"' EXIT
   entry_pattern='^[[:space:]]*,?[[:space:]]*"setup\.audio"[[:space:]]*:'
   skip_entry=0
+  pending_marker=""
   for line in "${lines[@]}"; do
-    if [[ $line == "$marker" ]]; then
+    trimmed=${line%$'\r'}
+    if [[ $trimmed == "$marker" ]]; then
+      if (( skip_entry )); then
+        printf '%s\n' "$pending_marker"
+      fi
+      pending_marker=$line
       skip_entry=1
       continue
     fi
-    if (( skip_entry )) && [[ $line =~ $entry_pattern ]]; then
+    if (( skip_entry )) && [[ $trimmed =~ $entry_pattern ]]; then
+      pending_marker=""
       skip_entry=0
       continue
     fi
-    skip_entry=0
+    if (( skip_entry )); then
+      printf '%s\n' "$pending_marker"
+      pending_marker=""
+      skip_entry=0
+    fi
     printf '%s\n' "$line"
   done >"$tmp"
+  if (( skip_entry )); then
+    printf '%s\n' "$pending_marker" >>"$tmp"
+  fi
   validate_menu "$tmp" || {
     echo "Could not remove the audio menu entry safely" >&2
     exit 1

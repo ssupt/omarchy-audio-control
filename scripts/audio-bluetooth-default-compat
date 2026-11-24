@@ -13,11 +13,26 @@ previous=${3:-}
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 release="$script_dir/../backend-release.json"
-build_id=$(jq -er '.buildId | select(type == "string" and test("^[0-9a-f]{64}$"))' "$release")
 runtime=${XDG_RUNTIME_DIR:?}
-socket="$runtime/omarchy-audio-control/backend-${build_id:0:24}.sock"
-if [[ ! -S $socket && -S $runtime/omarchy-audio-control/backend.sock ]]; then
-  socket="$runtime/omarchy-audio-control/backend.sock"
+socket=""
+if [[ -f $release ]]; then
+  build_id=$(jq -er '.buildId | select(type == "string" and test("\\A[0-9a-f]{64}\\z"))' "$release")
+  socket="$runtime/omarchy-audio-control/backend-${build_id:0:24}.sock"
+  if [[ ! -S $socket && -S $runtime/omarchy-audio-control/backend.sock ]]; then
+    socket="$runtime/omarchy-audio-control/backend.sock"
+  fi
+else
+  if [[ -S $runtime/omarchy-audio-control/backend.sock ]]; then
+    socket="$runtime/omarchy-audio-control/backend.sock"
+  else
+    for candidate in "$runtime"/omarchy-audio-control/backend-*.sock; do
+      if [[ -S $candidate ]]; then
+        socket=$candidate
+        break
+      fi
+    done
+    [[ -n $socket ]] || socket="$runtime/omarchy-audio-control/backend.sock"
+  fi
 fi
 params=$(jq -cn --arg direction "$direction" --argjson id "$node_id" \
   --arg name "$node_name" --arg previous "$previous" \

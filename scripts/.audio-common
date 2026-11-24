@@ -26,7 +26,7 @@ audio_prepare_private_runtime() {
     echo "The audio runtime directory is not private to this user" >&2
     return 1
   fi
-  mode=$(stat -Lc '%a' -- "$runtime_base" 2>/dev/null) || return 1
+  mode=$(stat -c '%a' -- "$runtime_base" 2>/dev/null) || return 1
   permissions=${mode: -3}
   if [[ ! $permissions =~ ^[0-7]{3}$ ]] || (( (8#$permissions & 0022) != 0 )); then
     echo "The audio runtime directory is writable by another user" >&2
@@ -77,7 +77,7 @@ audio_open_lock_path() {
     echo "The audio lock is not a regular file" >&2
     return 1
   fi
-  read -r owner links < <(stat -Lc '%u %h' -- "$lock_path" 2>/dev/null) || return 1
+  read -r owner links < <(stat -c '%u %h' -- "$lock_path" 2>/dev/null) || return 1
   if [[ $owner != "$UID" || $links != 1 ]]; then
     echo "The audio lock is not private to this user" >&2
     return 1
@@ -88,7 +88,11 @@ audio_open_lock_path() {
   else
     exec 8>>"$lock_path" || return 1
   fi
-  path_identity=$(stat -Lc '%d:%i:%u:%h' -- "$lock_path" 2>/dev/null) || return 1
+  if [[ -L $lock_path ]]; then
+    echo "The audio lock changed while it was being opened" >&2
+    return 1
+  fi
+  path_identity=$(stat -c '%d:%i:%u:%h' -- "$lock_path" 2>/dev/null) || return 1
   descriptor_identity=$(stat -Lc '%d:%i:%u:%h' \
     -- "/proc/$$/fd/$descriptor" 2>/dev/null) || return 1
   if [[ $path_identity != "$descriptor_identity" ||
@@ -124,7 +128,7 @@ audio_acquire_mutation_lock() {
     local inherited_path="$AUDIO_CONTROL_PRIVATE_RUNTIME_DIR/omarchy-audio-mutation.lock"
     local inherited_identity inherited_file
     [[ ! -L $inherited_path && -f $inherited_path && -O $inherited_path ]] || return 1
-    inherited_identity=$(stat -Lc '%d:%i:%u:%h' -- "$inherited_path") || return 1
+    inherited_identity=$(stat -c '%d:%i:%u:%h' -- "$inherited_path") || return 1
     inherited_file=$(stat -Lc '%d:%i:%u:%h' -- "/proc/$$/fd/197") || return 1
     [[ $inherited_identity == "$inherited_file" && $inherited_identity == *":$UID:1" ]] || return 1
     flock -w 5 197
