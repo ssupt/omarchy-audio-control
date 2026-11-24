@@ -203,6 +203,7 @@ Item {
       if (mouse.button === Qt.RightButton) root.rightClicked()
     }
     onWheel: function(wheel) {
+      if (wheel.angleDelta.y === 0) return
       var delta = wheel.angleDelta.y > 0 ? root.step : -root.step
       var next = Math.max(root.minimum, Math.min(root.maximum, root.liveValue + delta))
       if (root.integer) next = Math.round(next)

@@ -52,9 +52,11 @@ Item {
           root.showOutputGroupStatus("Deleted output group", false)
         }
       } else if (action !== "reconcile") {
-        root.showOutputGroupStatus(exitCode === 3
-          ? "Switch away from the group and make sure every selected output is connected"
-          : outputGroupController.error, true)
+        root.showOutputGroupStatus(outputGroupController.error !== ""
+          ? outputGroupController.error
+          : (exitCode === 3
+            ? "Switch away from the group and make sure every selected output is connected"
+            : "Could not update output group"), true)
       }
       root.clampCursor()
     }
@@ -95,6 +97,7 @@ Item {
   property var newOutputGroupMembers: []
   property string aliasEditingDevice: ""
   readonly property bool routingMutation: rulesStore.busy || outputGroupController.busy
+    || diagnosticsMutationBusy
   readonly property bool diagnosticsMutationBusy: diagnostics.speakerTesting
     || diagnostics.recovering
   readonly property bool graphMutationBusy: !service || !service.ready || service.transactionBusy || sceneController.busy
@@ -264,6 +267,8 @@ Item {
     sceneStatus = ""
     outputGroupStatus = ""
     routingStatus = ""
+    outputGroupController.error = ""
+    rulesStore.error = ""
     policy.clearError()
   }
 
@@ -678,15 +683,17 @@ Item {
     }
     if (activeTab === 0 && selectedIndex === microphoneTestIndex) {
       if (profileSetPending || portSetPending || sceneController.busy
-          || policy.busy || diagnosticsMutationBusy) return
+          || policy.writing || diagnosticsMutationBusy) return
       microphoneTest.activate()
       return
     }
     if (activeTab === 1 && selectedIndex === 0) {
+      if (!bluetoothAutoSwitchLoaded || policy.busy || policyMutationBlocked) return
       setBluetoothAutoSwitch(!bluetoothAutoSwitch)
       return
     }
     if (activeTab === 1 && selectedIndex === 1) {
+      if (!bluetoothProfilePreferenceLoaded || policy.busy || policyMutationBlocked) return
       bluetoothPreferenceRow.togglePreferenceMenu()
       return
     }
@@ -755,10 +762,12 @@ Item {
   }
 
   function setBluetoothAutoSwitch(enabled) {
+    if (policyMutationBlocked) return
     policy.setSetting("bluetooth.autoswitch-to-headset-profile", enabled)
   }
 
   function setBluetoothProfilePreference(value) {
+    if (policyMutationBlocked) return
     policy.setSetting("bluetooth.profile-preference", value)
   }
 
@@ -1006,6 +1015,7 @@ Item {
         id: keyCatcher
         anchors.fill: parent
         blocked: root.profileMenuOpen || root.aliasEditingDevice !== ""
+          || outputGroupCreateRow.nameFocused
         onMoveRequested: function(dx, dy) {
           if (root.recoveryConfirmOpen) {
             if (dx !== 0) recoveryConfirm.selectedIndex = recoveryConfirm.selectedIndex === 0 ? 1 : 0
@@ -1302,7 +1312,7 @@ Item {
                   id: autoswitchRow
                   width: parent.width
                   implicitHeight: autoswitchContent.implicitHeight + Style.space(18)
-                  hasCursor: root.cursorActive && root.selectedIndex === 0
+                  hasCursor: root.cursorActive && root.activeTab === 1 && root.selectedIndex === 0
                   onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(autoswitchRow)
                   foreground: root.foreground
                   fill: root.hoverFill
@@ -1357,7 +1367,7 @@ Item {
                   MouseArea {
                     anchors.fill: parent
                     enabled: root.bluetoothAutoSwitchLoaded
-                      && !policy.busy
+                      && !policy.busy && !root.policyMutationBlocked
                     hoverEnabled: true
                     cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                     onContainsMouseChanged: if (containsMouse) root.setCursor(0)
@@ -1368,14 +1378,14 @@ Item {
                 AudioBluetoothPreferenceRow {
                   id: bluetoothPreferenceRow
                   width: parent.width
-                  hasCursor: root.cursorActive && root.selectedIndex === 1
+                  hasCursor: root.cursorActive && root.activeTab === 1 && root.selectedIndex === 1
                   onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(bluetoothPreferenceRow)
                   foreground: root.foreground
                   fill: root.hoverFill
                   fontFamily: root.fontFamily
                   preference: root.bluetoothProfilePreference
                   menuEnabled: root.bluetoothProfilePreferenceLoaded
-                    && !policy.busy
+                    && !policy.busy && !root.policyMutationBlocked
                   onCursorRequested: root.setCursor(1)
                   onPreferenceSelected: function(value) { root.setBluetoothProfilePreference(value) }
                   onMenuToggled: function(open) {
@@ -2199,7 +2209,7 @@ Item {
                       width: parent.width
                       card: modelData
                       rowIndex: 2 + index
-                      hasCursor: root.cursorActive
+                      hasCursor: root.cursorActive && root.activeTab === 1
                         && root.selectedIndex === bluetoothProfileDelegate.rowIndex
                       onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(bluetoothProfileDelegate)
                       foreground: root.foreground
@@ -2242,7 +2252,7 @@ Item {
                       width: parent.width
                       card: modelData
                       rowIndex: root.deviceProfileStartIndex + index
-                      hasCursor: root.cursorActive
+                      hasCursor: root.cursorActive && root.activeTab === 0
                         && root.selectedIndex === deviceProfileDelegate.rowIndex
                       onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(deviceProfileDelegate)
                       foreground: root.foreground
@@ -2381,7 +2391,7 @@ Item {
                     microphoneMuted: root.inputDeviceMuted
                     error: microphoneTest.error
                     enabled: !profileSetPending && !portSetPending
-                      && !sceneController.busy && !policy.busy
+                      && !sceneController.busy && !policy.writing
                       && !root.diagnosticsMutationBusy
                     hasCursor: root.cursorActive && root.activeTab === 0
                       && root.selectedIndex === root.microphoneTestIndex

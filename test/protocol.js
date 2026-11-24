@@ -215,6 +215,69 @@ function fixture(expectedBuildId) {
   assert.deepEqual(results, [{ n: 1 }, { n: 2 }], 'capacity callback failure must not drop subsequent frames')
   assert.equal(callbacks.length, 2)
 }
+// Resetting during hello/subscribe must not trigger a spurious fault on teardown or reconnect.
+{
+  const f = fixture()
+  f.client.open()
+  f.client.reset({ code: 'disconnected', message: 'closed' })
+  assert.equal(f.faults.length, 0, 'reset during pending hello must not call fault')
+  f.client.open()
+  f.reply(f.sent.at(-1), {
+    name: 'omarchy-audio-service', protocolVersion: 1, epoch: 'e', buildId: 'b',
+    transport: 'jsonl-ascii', capabilities: ['state.subscribe'],
+    maxFrameBytes: MAX_FRAME, maxSnapshotBytes: 8388608
+  })
+  f.client.reset({ code: 'disconnected', message: 'closed' })
+  assert.equal(f.faults.length, 0, 'reset during pending state.subscribe must not call fault')
+}
+// Re-entrant fault inside snapshot.end state callback must not resurrect ready=true.
+{
+  const sent = [], readyEvents = [], faults = []
+  let failWrite = false
+  const client = new Client({
+    now: () => 1000,
+    write: frame => {
+      if (failWrite) throw new Error('broken pipe')
+      sent.push(JSON.parse(frame))
+    },
+    ready: value => readyEvents.push(value),
+    state: () => {
+      failWrite = true
+      client.request('health', {}, null, { mutating: false })
+    },
+    fault: message => faults.push(message)
+  })
+  client.open()
+  const reply = (req, result) => JSON.stringify({ version: 1, id: req.id, result }) + '\n'
+  client.feed(reply(sent.at(-1), {
+    name: 'omarchy-audio-service', protocolVersion: 1, epoch: 'e', buildId: 'b',
+    transport: 'jsonl-ascii', capabilities: ['state.subscribe'],
+    maxFrameBytes: MAX_FRAME, maxSnapshotBytes: 8388608
+  }))
+  client.feed(reply(sent.at(-1), { subscribed: true }))
+  const snap = JSON.stringify({ epoch: 'e', revision: '1', nodes: [], busy: false })
+  client.feed(JSON.stringify({ version: 1, event: 'snapshot.begin', data: { bytes: snap.length, parts: 1 } }) + '\n'
+    + JSON.stringify({ version: 1, event: 'snapshot.part', data: { index: 0, text: snap } }) + '\n'
+    + JSON.stringify({ version: 1, event: 'snapshot.end', data: {} }) + '\n')
+  assert.equal(client.connected, false)
+  assert.equal(client.ready, false, 'fault during snapshot.end must not resurrect ready')
+  assert.ok(faults.length >= 1)
+  assert.equal(readyEvents.at(-1), false)
+}
+// Expired callback in tick() must see connected=false so cleanup cannot write to a hung backend.
+{
+  const f = fixture(); f.connect()
+  const beforeCount = f.sent.length
+  let callbackConnected = null
+  f.client.request('audio.mute_all', {}, () => {
+    callbackConnected = f.client.connected
+    f.client.request('node.level', {}, null)
+  }, { timeout: 1000 })
+  assert.equal(f.sent.length, beforeCount + 1)
+  f.advance(1001)
+  assert.equal(callbackConnected, false, 'tick() must disconnect before invoking expired callbacks')
+  assert.equal(f.sent.length, beforeCount + 1, 'expired callback must not write frames to a hung backend')
+}
 for (const value of ['ascii', 'Cuffie 🎧', '日本語', '\u0000', '\n', '\\uD83C']) {
   assert.equal(utf8Length(value), Buffer.byteLength(value))
 }

@@ -161,7 +161,7 @@ for (const action of ['toggleOutputMute', 'toggleInputMute', 'adjustVolume']) {
   const output = node(1)
   const sent = [], acknowledged = []
   const serviceContext = {
-    Model, Protocol, ready: false, error: '', state: {}, transactionBusy: false,
+    Model, Protocol, ready: false, error: '', lastLevelError: '', state: {}, transactionBusy: false,
     inFlightNodeChanges: {}, pendingNodeChanges: {}, activeTransactions: 0, client: null
   }
   serviceContext.root = serviceContext
@@ -255,6 +255,44 @@ for (const action of ['toggleOutputMute', 'toggleInputMute', 'adjustVolume']) {
   assert.equal(muteApplied, true)
   assert.equal(serviceContext.activeTransactions, 0)
   assert.equal(sent.filter(r => r.method === 'node.level' && !r._done).length, 0)
+
+  // Synchronously rejected transactional request must not wipe pendingNodeChanges.
+  p.setOutputVolume(0.3)
+  p.setOutputVolume(0.75)
+  const busyFirst = sent.find(r => r.method === 'node.level' && !r._done)
+  assert(busyFirst)
+  assert.equal(Object.keys(serviceContext.pendingNodeChanges).length, 1)
+  assert.equal(serviceContext.request('BAD METHOD!', {}, null), '')
+  assert.equal(Object.keys(serviceContext.pendingNodeChanges).length, 1,
+    'Synchronous request rejection must preserve queued slider updates')
+  busyFirst._done = true
+  reply(busyFirst, { outcome: 'applied' })
+  const flushedAfterReject = sent.find(r => r.method === 'node.level' && !r._done)
+  assert(flushedAfterReject)
+  assert.equal(flushedAfterReject.params.volume, 0.75)
+  flushedAfterReject._done = true
+  reply(flushedAfterReject, { outcome: 'applied' })
+
+  // A suppressed matching release must retry if the in-flight level fails with busy,
+  // and successful level replies must not clobber unrelated root.error values.
+  serviceContext.error = 'Unrelated status error'
+  p.setOutputVolume(0.6)
+  p.setOutputVolume(0.6) // matching release while 0.6 is in flight
+  const retryable = sent.find(r => r.method === 'node.level' && !r._done)
+  assert(retryable)
+  retryable._done = true
+  client.feed(JSON.stringify({
+    version: 1, id: retryable.id,
+    error: { code: 'busy', message: 'Audio route is updating', outcome: 'rejected' }
+  }) + '\n')
+  const retried = sent.find(r => r.method === 'node.level' && !r._done)
+  assert(retried, 'Suppressed matching release must re-queue after busy rejection')
+  assert.equal(retried.params.volume, 0.6)
+  retried._done = true
+  reply(retried, { outcome: 'applied' })
+  assert.equal(serviceContext.error, 'Unrelated status error',
+    'Successful node.level must not clear an unrelated service error')
+  serviceContext.error = ''
 }
 
 {

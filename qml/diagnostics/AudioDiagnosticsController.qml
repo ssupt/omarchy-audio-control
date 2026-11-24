@@ -29,6 +29,7 @@ Item {
   property bool refreshPending: false
   property string snapshotRevision: ""
 
+  readonly property bool serviceReady: !!service && service.ready
   readonly property var serviceDiagnostics: service && service.ready && service.state.diagnostics
     ? service.state.diagnostics : ({})
   readonly property bool refreshing: refreshPending || serviceDiagnostics.refreshing === true
@@ -43,6 +44,7 @@ Item {
     stopSpeakerTest(false)
   }
   onServiceDiagnosticsChanged: syncSnapshot()
+  Component.onCompleted: syncSnapshot()
 
   function syncSnapshot() {
     var revision = String(serviceDiagnostics.revision || "")
@@ -159,6 +161,16 @@ Item {
 
   Process {
     id: speakerProc
+    onRunningChanged: {
+      if (!running && root.speakerStopping) {
+        root.speakerCancelled = false
+        root.speakerStopping = false
+        if (root.recoveryPending) {
+          root.recoveryPending = false
+          root.runRecovery()
+        }
+      }
+    }
     onExited: function(exitCode) {
       if (root.speakerCancelled) {
         root.speakerCancelled = false

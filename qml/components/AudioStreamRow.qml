@@ -66,7 +66,7 @@ CursorSurface {
 
   function liveAudioVolume() {
     try {
-      var value = root.nodeReady ? Number(root.node.audio.volume) : 0
+      const value = root.nodeReady ? Number(root.node.audio.volume) : 0
       return isFinite(value) ? value : 0
     } catch (_error) { return 0 }
   }

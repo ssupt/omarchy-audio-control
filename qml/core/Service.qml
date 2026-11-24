@@ -36,6 +36,9 @@ Item {
   onTransactionBusyChanged: if (!transactionBusy) flushNodeChanges()
   property var client: null
   property bool destroying: false
+  property bool faulted: false
+  property string lastLevelError: ""
+  property string preparedPathOutput: ""
   property var inFlightNodeChanges: ({})
   property var pendingNodeChanges: ({})
   property int activeTransactions: 0
@@ -73,16 +76,25 @@ Item {
     observedRecordingLabels = current
     if (!captureNotifications || additions.length === 0 || !notificationsAvailable) return
 
+    function escapeMarkup(text) {
+      return String(text || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+    }
+    var safe = []
+    for (var i = 0; i < additions.length; i++) safe.push(escapeMarkup(additions[i]))
     var summary = "Microphone access started"
-    var body = additions.length === 1
-      ? additions[0] + " is now using the microphone."
-      : additions.length + " applications started using the microphone: " + additions.join(", ")
+    var body = safe.length === 1
+      ? safe[0] + " is now using the microphone."
+      : safe.length + " applications started using the microphone: " + safe.join(", ")
     Quickshell.execDetached([
       "notify-send",
       "--app-name", "Advanced Audio Control",
       "--icon", "audio-input-microphone-symbolic",
       "--urgency", "normal",
       "--expire-time", "8000",
+      "--",
       summary,
       body
     ])
@@ -100,10 +112,12 @@ Item {
     }
     var transactional = isNonLevelMutation(method, settings)
     var wrapped = callback
+    var savedPending = null
     if (transactional) {
-      // Drop queued slider/mute tails before starting a whole-graph command
-      // so stale pre-click patches cannot flush behind it and overwrite it.
-      pendingNodeChanges = ({})
+      // Save queued tails until client.request confirms dispatch; if rejected
+      // synchronously (not ready / queue full / invalid), restore them intact.
+      savedPending = pendingNodeChanges
+      if (client.hasCapacity()) pendingNodeChanges = ({})
       activeTransactions = (activeTransactions || 0) + 1
       wrapped = function(result, failure) {
         root.activeTransactions = Math.max(0, (root.activeTransactions || 0) - 1)
@@ -111,7 +125,11 @@ Item {
         finally { root.flushNodeChanges() }
       }
     }
-    return client.request(method, params || {}, wrapped, settings)
+    var id = client.request(method, params || {}, wrapped, settings)
+    if (transactional && id === "" && savedPending !== null) {
+      pendingNodeChanges = savedPending
+    }
+    return id
   }
   function identityForNode(node) {
     if (!ready || !state.graphReady || !node) return null
@@ -154,17 +172,29 @@ Item {
       if (Model.hasOwn(inFlightNodeChanges, key)) continue
       if (!client.hasCapacity()) break
       delete pendingNodeChanges[key]
-      inFlightNodeChanges[key] = entry.patch
+      inFlightNodeChanges[key] = { identity: entry.identity, patch: entry.patch, retryOnBusy: false }
       var params = { identity: entry.identity }
       for (var field in entry.patch)
         if (Model.hasOwn(entry.patch, field)) params[field] = entry.patch[field]
       ;(function(nodeKey) {
         request("node.level", params, function(_result, failure) {
+          var inflight = root.inFlightNodeChanges[nodeKey]
           delete root.inFlightNodeChanges[nodeKey]
+          if (failure && failure.code === "busy" && inflight && inflight.retryOnBusy
+              && !Model.hasOwn(root.pendingNodeChanges, nodeKey)) {
+            // Re-queue a suppressed matching release after a retryable busy conflict.
+            root.pendingNodeChanges[nodeKey] = { identity: inflight.identity, patch: inflight.patch }
+          }
           // A route change can briefly reject a level request while its device
           // parameters settle. The slider already reads back the observed value;
           // this retryable conflict is not a panel error.
-          root.error = failure && failure.code !== "busy" ? failure.message : ""
+          if (failure && failure.code !== "busy") {
+            root.lastLevelError = failure.message
+            root.error = failure.message
+          } else if (!failure && root.lastLevelError && root.error === root.lastLevelError) {
+            root.lastLevelError = ""
+            root.error = ""
+          }
           root.flushNodeChanges()
         })
       })(key)
@@ -180,7 +210,8 @@ Item {
     if (Object.keys(clean).length === 0) return false
     if (!Model.hasOwn(pendingNodeChanges, key)
         && Model.hasOwn(inFlightNodeChanges, key)
-        && patchesEqual(inFlightNodeChanges[key], clean)) {
+        && patchesEqual(inFlightNodeChanges[key].patch, clean)) {
+      inFlightNodeChanges[key].retryOnBusy = true
       return true
     }
     var merged = ({})
@@ -215,8 +246,13 @@ Item {
         root.ready = value
         root.backendVersion = info ? String(info.version || "") : ""
         root.capabilities = info ? info.capabilities : []
-        if (value) root.error = ""
-        else root.clearNodeChanges()
+        if (value) {
+          root.faulted = false
+          root.lastLevelError = ""
+          root.error = ""
+        } else {
+          root.clearNodeChanges()
+        }
       },
       capacity: function() { root.flushNodeChanges() },
       state: function(value) {
@@ -230,20 +266,27 @@ Item {
         root.state = value
       },
       fault: function(message) {
+        root.faulted = true
+        root.lastLevelError = ""
         root.error = message
-        restartProcessTimer.restart()
+        if (!root.destroying) restartProcessTimer.restart()
       },
       callbackError: function() { console.warn("Audio command callback failed") }
     })
     if (backendCommand.length) launchTimer.start()
     else {
       root.error = "Preparing audio service…"
+      root.preparedPathOutput = ""
       prepareBackend.running = true
     }
   }
   Component.onDestruction: {
     destroying = true
     reconnectTimer.stop()
+    restartProcessTimer.stop()
+    launchTimer.stop()
+    deadlineTimer.stop()
+    recordingChangeTimer.stop()
     backend.running = false
     prepareBackend.running = false
     if (client) client.reset(Protocol.failure("disconnected", "Audio plugin closed", false))
@@ -279,7 +322,13 @@ Item {
   Process {
     id: prepareBackend
     command: root.backendPreparationCommand
-    stdout: StdioCollector { id: preparedPath }
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (root.preparedPathOutput.length < 4096)
+          root.preparedPathOutput += String(chunk).slice(0, 4096 - root.preparedPathOutput.length)
+      }
+    }
     stderr: SplitParser {
       splitMarker: "\n"
       onRead: function(line) {
@@ -290,13 +339,15 @@ Item {
     }
     onExited: function(code, _status) {
       if (root.destroying) return
-      var path = preparedPath.text.trim()
+      var path = root.preparedPathOutput.trim()
       if (code === 0 && path.charAt(0) === "/" && path.indexOf("\n") === -1) {
         root.backendCommand = [path, "--plugin"]
         root.error = ""
         launchTimer.start()
-      } else if (root.error === "Preparing audio service…") {
-        root.error = "Audio service preparation failed; see the plugin README for native build requirements"
+      } else {
+        if (root.error === "Preparing audio service…")
+          root.error = "Audio service preparation failed; see the plugin README for native build requirements"
+        root.scheduleReconnect()
       }
     }
   }
@@ -313,10 +364,16 @@ Item {
       splitMarker: ""
       onRead: function(chunk) { console.warn("Audio backend:", String(chunk).slice(0, 1024)) }
     }
-    onStarted: if (root.client) root.client.open()
+    onStarted: {
+      root.faulted = false
+      if (root.client) root.client.open()
+    }
     onExited: function(_code, _status) {
       if (root.destroying) return
-      root.error = "Audio service is unavailable; check that the plugin release includes its backend"
+      var wasFaulted = root.faulted
+      root.faulted = false
+      if (!wasFaulted)
+        root.error = "Audio service is unavailable; check that the plugin release includes its backend"
       if (root.client) root.client.reset(Protocol.failure("disconnected", root.error, false))
       root.scheduleReconnect()
     }
@@ -331,6 +388,7 @@ Item {
     id: restartProcessTimer
     interval: 1
     onTriggered: {
+      if (root.destroying) return
       backend.running = false
       root.scheduleReconnect()
     }
@@ -348,6 +406,14 @@ Item {
   Timer {
     id: reconnectTimer
     interval: 5000
-    onTriggered: if (!root.destroying && !backend.running && root.backendCommand.length) backend.running = true
+    onTriggered: {
+      if (root.destroying) return
+      if (root.backendCommand.length) {
+        if (!backend.running) backend.running = true
+      } else if (!prepareBackend.running) {
+        root.preparedPathOutput = ""
+        prepareBackend.running = true
+      }
+    }
   }
 }

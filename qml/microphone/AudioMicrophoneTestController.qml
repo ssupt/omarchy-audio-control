@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell.Services.Pipewire
+import "../core/Model.js" as Model
 
 // Explicit record/play controls; Rust supervises children and owns the private
 // in-memory clip. Closing this view discards it and never triggers playback.
@@ -13,13 +14,14 @@ Item {
   property bool pending: false
   property string localError: ""
   property int secondsRemaining: 0
-  readonly property var job: service && service.state.microphone
+  readonly property var job: service && service.ready && service.state.microphone
     && service.state.microphone.owner === owner ? service.state.microphone : ({})
   readonly property string testState: String(job.state || "idle")
   readonly property string error: localError || String(job.error || "")
   readonly property bool microphoneMuted: !inputDeviceLive || !inputDevice
     || !inputDevice.audio || inputDevice.audio.muted
-  readonly property bool busy: pending || testState === "recording" || testState === "playing"
+  readonly property bool busy: pending || testState === "starting"
+    || testState === "recording" || testState === "playing"
   readonly property real level: microphoneMuted ? 0 : Math.max(0, Math.min(1, Number(peakMonitor.peak) || 0))
 
   function start(record) {
@@ -37,6 +39,7 @@ Item {
   }
   function stop(discard) {
     if (!service || !service.ready) return
+    if (testState === "idle" && !pending) return
     service.request("microphone.stop", { owner: owner, discard: discard }, function(_result, error) {
       root.localError = error ? error.message : ""
     })
@@ -44,23 +47,25 @@ Item {
   function startRecording() { start(true) }
   function play() { if (testState === "ready") start(false) }
   function stopRecording() { stop(false) }
-  function cancel() { stop(testState === "recording") }
+  function cancel() { stop(testState === "recording" || testState === "starting") }
   function discard() { stop(true) }
   function activate() {
     if (pending) return
-    if (testState === "recording") stopRecording()
+    if (testState === "starting") cancel()
+    else if (testState === "recording") stopRecording()
     else if (testState === "playing") cancel()
     else if (testState === "ready") play()
     else startRecording()
   }
-  onInputDeviceChanged: if (testState !== "idle") discard()
-  onInputDeviceLiveChanged: if (!inputDeviceLive) discard()
-  onSessionActiveChanged: if (!sessionActive) discard()
-  Component.onDestruction: discard()
+  onInputDeviceChanged: if (testState !== "idle" || pending) discard()
+  onInputDeviceLiveChanged: if (!inputDeviceLive && (testState !== "idle" || pending)) discard()
+  onSessionActiveChanged: if (!sessionActive && (testState !== "idle" || pending)) discard()
+  Component.onDestruction: if (testState !== "idle" || pending) discard()
   PwNodePeakMonitor {
     id: peakMonitor
     node: root.inputDevice
-    enabled: root.sessionActive && root.testState === "recording" && root.inputDeviceLive
+    enabled: root.sessionActive && root.testState === "recording"
+      && root.inputDeviceLive && Model.inputPeakSupported(root.inputDevice)
   }
   Timer {
     interval: 1000; repeat: true; running: root.testState === "recording"
