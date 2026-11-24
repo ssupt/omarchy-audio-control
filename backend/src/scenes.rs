@@ -250,6 +250,7 @@ pub async fn apply(
     rules: Option<&Value>,
     raw: &Value,
     overdrive: bool,
+    group_reconcile: &mut Option<Result<Value>>,
 ) -> Result<Value> {
     let scene =
         normalize_scene(raw).ok_or_else(|| Failure::new("invalid_params", "Invalid scene"))?;
@@ -338,17 +339,23 @@ pub async fn apply(
                         if group_members_ready(&graph, group_id, name, rules) {
                             let native_for_reconcile = native.clone();
                             let storage_for_reconcile = storage.clone();
-                            if matches!(
-                                tokio::task::spawn_blocking(move || {
-                                    crate::groups::apply(
-                                        &native_for_reconcile,
-                                        &storage_for_reconcile,
-                                        crate::groups::Change::Reconcile,
-                                    )
-                                })
-                                .await,
-                                Ok(Ok(_))
-                            ) {
+                            let reconciled = tokio::task::spawn_blocking(move || {
+                                crate::groups::apply(
+                                    &native_for_reconcile,
+                                    &storage_for_reconcile,
+                                    crate::groups::Change::Reconcile,
+                                )
+                            })
+                            .await
+                            .unwrap_or_else(|_| {
+                                Err(Failure::new(
+                                    "internal_error",
+                                    "Output group reconcile stopped unexpectedly",
+                                ))
+                            });
+                            let ok = reconciled.is_ok();
+                            *group_reconcile = Some(reconciled);
+                            if ok {
                                 let mut state = native.subscribe();
                                 let _ = tokio::time::timeout(Duration::from_secs(2), async {
                                     loop {
@@ -484,24 +491,36 @@ async fn device(native: &Handle, step: &Value, overdrive: bool) -> Result<StepOu
             "Device changed externally during scene recovery",
         ));
     }
-    native
-        .patch(
-            identity.clone(),
-            AudioPatch {
-                muted: Some(true),
-                volumes: Some(node.audio.volumes.clone()),
-            },
-        )
-        .await?;
-    native
-        .patch(
-            identity,
-            AudioPatch {
-                muted: node.audio.muted,
-                volumes: None,
-            },
-        )
-        .await?;
+    if node.audio.muted.is_some() {
+        native
+            .patch(
+                identity.clone(),
+                AudioPatch {
+                    muted: Some(true),
+                    volumes: Some(node.audio.volumes.clone()),
+                },
+            )
+            .await?;
+        native
+            .patch(
+                identity,
+                AudioPatch {
+                    muted: node.audio.muted,
+                    volumes: None,
+                },
+            )
+            .await?;
+    } else {
+        native
+            .patch(
+                identity,
+                AudioPatch {
+                    muted: None,
+                    volumes: Some(node.audio.volumes.clone()),
+                },
+            )
+            .await?;
+    }
     Ok(StepOutcome::Restored)
 }
 

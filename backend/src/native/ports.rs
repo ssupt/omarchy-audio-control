@@ -196,8 +196,31 @@ impl Handle {
             if error.outcome != "unknown" {
                 return Err(error);
             }
-            let rollback = change.rollback(&self.snapshot()).map_err(|_| {
-                Failure::unknown("Audio port could not be confirmed; its previous port cannot be safely restored")
+            let mut state = self.subscribe();
+            let rollback = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let graph = state.borrow_and_update().clone();
+                    match change.rollback(&graph) {
+                        Ok(rollback) => return Ok(rollback),
+                        Err(err) if err.code == "busy" => {
+                            state.changed().await.map_err(|_| {
+                                Failure::unknown("PipeWire disconnected during port rollback")
+                            })?;
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+            })
+            .await
+            .map_err(|_| {
+                Failure::unknown(
+                    "Audio port could not be confirmed; its previous port cannot be safely restored",
+                )
+            })?
+            .map_err(|_| {
+                Failure::unknown(
+                    "Audio port could not be confirmed; its previous port cannot be safely restored",
+                )
             })?;
             self.port_change(rollback)
                 .await
@@ -235,6 +258,7 @@ impl Handle {
                 },
             }))
             .map_err(|_| Failure::new("disconnected", "PipeWire is unavailable"))?;
+        drop(sender);
         tokio::time::timeout(Duration::from_secs(3), async {
             receive
                 .await

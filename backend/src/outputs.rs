@@ -171,6 +171,7 @@ impl<'a> View<'a> {
 pub struct MasterTargets<'a> {
     pub outputs: BTreeMap<u32, &'a Node>,
     pub inputs: BTreeMap<u32, &'a Node>,
+    pub muted_recording_streams: BTreeMap<u32, &'a Node>,
     pub recording_active: bool,
     pub recording_muted: bool,
 }
@@ -181,13 +182,24 @@ fn captures_sink_monitor(node: &Node) -> bool {
         .is_some_and(|v| matches!(v.as_str(), "true" | "1"))
 }
 
+fn is_monitor_or_sink(node: &Node) -> bool {
+    node.name.ends_with(".monitor")
+        || node
+            .properties
+            .get("device.class")
+            .is_some_and(|v| v.eq_ignore_ascii_case("monitor"))
+        || routing::class(node) == "Audio/Sink"
+}
+
 pub fn master_targets(graph: &Graph) -> MasterTargets<'_> {
     let mut outputs = BTreeMap::new();
     let mut inputs = BTreeMap::new();
+    let mut muted_recording_streams = BTreeMap::new();
     if !graph.ready || !graph.connected || graph.nodes.len() > 4096 || graph.links.len() > 8192 {
         return MasterTargets {
             outputs,
             inputs,
+            muted_recording_streams,
             recording_active: false,
             recording_muted: false,
         };
@@ -245,21 +257,32 @@ pub fn master_targets(graph: &Graph) -> MasterTargets<'_> {
         {
             continue;
         }
-        recording_active = true;
         let mut sources = Vec::new();
+        let mut captures_monitor = false;
         for link in graph.links.values().filter(|l| {
             l.input_node == stream.id && matches!(l.state.as_str(), "Active" | "Paused")
         }) {
-            if let Some(target) = graph.nodes.get(&link.output_node).filter(|n| {
-                routing::endpoint_direction(n) == Some(routing::Direction::Recording)
-                    && !n.serial.is_empty()
-            }) {
-                inputs.insert(target.id, target);
-                sources.push(target);
+            if let Some(target) = graph.nodes.get(&link.output_node) {
+                if routing::endpoint_direction(target) == Some(routing::Direction::Recording)
+                    && !target.serial.is_empty()
+                {
+                    sources.push(target);
+                } else if is_monitor_or_sink(target) {
+                    captures_monitor = true;
+                }
             }
+        }
+        if sources.is_empty() && captures_monitor {
+            continue;
+        }
+        recording_active = true;
+        for source in &sources {
+            inputs.insert(source.id, *source);
         }
         if sources.is_empty() && !stream.serial.is_empty() {
             inputs.insert(stream.id, stream);
+        } else if stream.audio.muted == Some(true) && !stream.serial.is_empty() {
+            muted_recording_streams.insert(stream.id, stream);
         }
         let stream_silenced = stream.audio.muted == Some(true)
             || (!sources.is_empty() && sources.iter().all(|s| s.audio.muted == Some(true)));
@@ -275,6 +298,7 @@ pub fn master_targets(graph: &Graph) -> MasterTargets<'_> {
     MasterTargets {
         outputs,
         inputs,
+        muted_recording_streams,
         recording_active,
         recording_muted,
     }
@@ -286,7 +310,7 @@ pub fn master_snapshot(graph: &Graph) -> Value {
         .outputs
         .values()
         .chain(targets.inputs.values())
-        .any(|node| node.audio.muted != Some(true));
+        .any(|node| node.audio.muted == Some(false));
     json!({
         "hasOutput": !targets.outputs.is_empty(),
         "hasInput": !targets.inputs.is_empty(),
@@ -521,6 +545,38 @@ mod tests {
         assert_eq!(master_snapshot(&g)["anyAudible"], true);
 
         g.nodes.get_mut(&2).unwrap().audio.muted = Some(true);
+        assert_eq!(master_snapshot(&g)["anyAudible"], false);
+    }
+
+    #[test]
+    fn master_targets_skip_sink_monitor_capture_and_track_muted_recording_streams() {
+        let mut g = graph();
+        select(&mut g, "alsa_output.speakers");
+        add(&mut g, 10, "mic_default", "Audio/Source");
+        add(&mut g, 11, "alsa_output.speakers.monitor", "Audio/Source");
+        add(&mut g, 12, "desktop_capture", "Stream/Input/Audio");
+        g.nodes.get_mut(&1).unwrap().audio.muted = Some(true);
+        g.nodes.get_mut(&10).unwrap().audio.muted = Some(false);
+        g.nodes.get_mut(&12).unwrap().audio.muted = Some(false);
+        // Desktop capture linked to a .monitor source without stream.capture.sink=true.
+        link(&mut g, 11, 12);
+
+        let targets = master_targets(&g);
+        assert!(!targets.recording_active);
+        assert!(!targets.inputs.contains_key(&12));
+
+        // Recording stream muted while its microphone source stays unmuted.
+        add(&mut g, 13, "voice_chat", "Stream/Input/Audio");
+        g.nodes.get_mut(&13).unwrap().audio.muted = Some(true);
+        link(&mut g, 10, 13);
+        let targets = master_targets(&g);
+        assert!(targets.recording_active);
+        assert!(targets.recording_muted);
+        assert!(targets.muted_recording_streams.contains_key(&13));
+
+        // Unknown mute state on a node must not pin anyAudible to true.
+        g.nodes.get_mut(&1).unwrap().audio.muted = None;
+        g.nodes.get_mut(&10).unwrap().audio.muted = Some(true);
         assert_eq!(master_snapshot(&g)["anyAudible"], false);
     }
 }

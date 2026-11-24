@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::Duration;
 
@@ -84,6 +84,8 @@ pub struct MetadataValue {
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Graph {
+    #[serde(skip)]
+    pub sequence: u64,
     pub version: String,
     pub generation: String,
     pub revision: u64,
@@ -171,7 +173,10 @@ impl Handle {
                 while !stopping.load(Ordering::Relaxed) {
                     let result = session(tx.clone(), sender.clone(), stopping.clone());
                     *sender.lock().unwrap() = None;
-                    let mut disconnected = Graph::default();
+                    let mut disconnected = Graph {
+                        sequence: next_graph_sequence(),
+                        ..Graph::default()
+                    };
                     if let Err(error) = result {
                         disconnected.error = error.to_string();
                     }
@@ -239,6 +244,7 @@ impl Handle {
                 },
             }))
             .map_err(|_| Failure::new("disconnected", "PipeWire is unavailable"))?;
+        drop(sender);
         tokio::time::timeout(Duration::from_secs(3), async {
             receive
                 .await
@@ -316,9 +322,15 @@ fn copy_props(props: Option<&spa::utils::dict::DictRef>) -> Properties {
         .map(|(key, value)| (key.into(), value.into()))
         .collect()
 }
+fn next_graph_sequence() -> u64 {
+    static GRAPH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    GRAPH_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1
+}
+
 fn publish(graph: &Rc<RefCell<Graph>>, tx: &watch::Sender<Arc<Graph>>) {
     let mut graph = graph.borrow_mut();
     graph.revision = graph.revision.wrapping_add(1);
+    graph.sequence = next_graph_sequence();
     let mut snapshot = graph.clone();
     for node in snapshot.nodes.values_mut() {
         if let Some((_, route)) = route_for(&graph, node) {
@@ -328,7 +340,7 @@ fn publish(graph: &Rc<RefCell<Graph>>, tx: &watch::Sender<Arc<Graph>>) {
     tx.send_replace(Arc::new(snapshot));
 }
 fn update_node(node: &mut Node, props: Properties) {
-    node.properties.extend(props);
+    node.properties = props;
     node.name = node
         .properties
         .get("node.name")
@@ -510,7 +522,14 @@ fn session(
                             .add_listener_local()
                             .info(move |info| {
                                 if let Some(node) = g.borrow_mut().nodes.get_mut(&id) {
-                                    update_node(node, copy_props(info.props()));
+                                    if info.change_mask().contains(pw::node::NodeChangeMask::PROPS)
+                                    {
+                                        if info.props().is_some() {
+                                            update_node(node, copy_props(info.props()));
+                                        }
+                                    } else if node.properties.is_empty() {
+                                        update_node(node, copy_props(info.props()));
+                                    }
                                     node.state = format!("{:?}", info.state());
                                 }
                                 publish(&g, &t);
@@ -684,28 +703,31 @@ fn session(
                             },
                         );
                     }
-                    _ => (),
+                    _ => return,
                 }
                 publish(&graph_added, &tx_added);
             })
             .global_remove(move |id| {
                 let mut proxies = proxies_removed.borrow_mut();
-                proxies.nodes.remove(&id);
-                proxies.devices.remove(&id);
-                proxies.links.remove(&id);
+                let mut removed = proxies.nodes.remove(&id).is_some()
+                    | proxies.devices.remove(&id).is_some()
+                    | proxies.links.remove(&id).is_some();
                 {
                     let mut graph = graph_removed.borrow_mut();
-                    graph.nodes.remove(&id);
-                    graph.devices.remove(&id);
-                    graph.links.remove(&id);
+                    removed |= graph.nodes.remove(&id).is_some()
+                        | graph.devices.remove(&id).is_some()
+                        | graph.links.remove(&id).is_some();
                     if let Some(metadata) = proxies.metadata.remove(&id) {
+                        removed = true;
                         if graph.metadata_ids.get(&metadata.name) == Some(&id) {
                             graph.metadata.remove(&metadata.name);
                             graph.metadata_ids.remove(&metadata.name);
                         }
                     }
                 }
-                publish(&graph_removed, &tx_removed);
+                if removed {
+                    publish(&graph_removed, &tx_removed);
+                }
             })
             .register()
     };

@@ -393,15 +393,22 @@ impl<'a> Transition<'a> {
         .await
         .map_err(|_| Failure::unknown("Audio profile did not settle before rollback"))??;
         let graph = self.native.snapshot();
-        let nodes = endpoints(&graph, &current)?;
-        self.mute(&nodes, &current).await?;
+        // Best-effort mute on `after` so an un-normalizable endpoint (e.g.,
+        // missing mute state or out-of-range volume that caused `settle` to
+        // fail) never blocks switching back to `before`.
+        let prepared = match endpoints(&graph, &current) {
+            Ok(nodes) => {
+                if self.mute(&nodes, &current).await.is_ok() {
+                    nodes.into_iter().map(|n| n.identity).collect()
+                } else {
+                    Vec::new()
+                }
+            }
+            Err(_) => Vec::new(),
+        };
         // Reissue even if the cached profile is the original: a silent write may have landed.
         self.native
-            .switch_profile(
-                current,
-                selection.before.clone(),
-                nodes.iter().map(|n| n.identity.clone()).collect(),
-            )
+            .switch_profile(current, selection.before.clone(), prepared)
             .await?;
         let restored = self.settle(&selection.before).await?;
         self.restore(old, &restored, &selection.before).await
@@ -463,7 +470,11 @@ pub async fn select(
         if let Err(error) = result {
             let cleanup = Transition::new(native);
             let recovery = if changed || error.outcome == "unknown" {
-                cleanup.rollback(&selection, &old).await.is_ok()
+                let rolled_back = cleanup.rollback(&selection, &old).await.is_ok();
+                if !rolled_back && selection.before.inspect(&native.snapshot()).is_ok() {
+                    let _ = cleanup.restore_mutes(&old).await;
+                }
+                rolled_back
             } else {
                 cleanup.restore_mutes(&old).await
             };

@@ -68,6 +68,9 @@ impl Service {
         if params.owner.is_empty() || params.owner.len() > 128 {
             return Err(Failure::new("invalid_params", "Invalid microphone owner"));
         }
+        if self.draining.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Failure::new("disconnected", "Audio service is stopping"));
+        }
         let native = self
             .native
             .clone()
@@ -96,7 +99,7 @@ impl Service {
             session.clip.clear();
         }
         drop(session);
-        self.set_busy(true);
+        self.set_busy_for(true, "microphone");
         self.publish_microphone(&params.owner, "starting", "");
         let prepared = FileLock::mutation().await.and_then(|lock| {
             if *receiver.borrow() == Control::Continue {

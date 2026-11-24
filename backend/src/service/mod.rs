@@ -14,10 +14,24 @@ use crate::storage::Storage;
 use crate::{PROTOCOL_VERSION, SERVICE_NAME};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::watch;
 
 const MAX_OPERATIONS: u32 = 32;
+
+#[derive(Default)]
+struct CatalogState {
+    fingerprint: String,
+    last_sequence: u64,
+}
+
+#[derive(Default)]
+struct MasterMutedStreams {
+    generation: String,
+    streams: BTreeSet<(u32, String)>,
+}
 
 /// Shared by all UI/CLI connections. Domain state and transaction ownership
 /// belong here, never in a connection handler or one of the QML surfaces.
@@ -29,9 +43,11 @@ pub struct Service {
     storage: Option<Storage>,
     operations: Arc<tokio::sync::Semaphore>,
     users: watch::Sender<usize>,
+    draining: AtomicBool,
     microphone: tokio::sync::Mutex<microphone::Session>,
     diagnostics: tokio::sync::Mutex<Option<diagnostics::Sample>>,
-    catalog: std::sync::Mutex<String>,
+    catalog: std::sync::Mutex<CatalogState>,
+    master_muted_streams: std::sync::Mutex<MasterMutedStreams>,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +68,14 @@ impl Service {
         service.start_automation();
         let weak = Arc::downgrade(&service);
         tokio::spawn(async move {
+            let initial = graph.borrow_and_update().clone();
+            if initial.sequence != 0 || initial.connected || initial.ready {
+                if let Some(service) = weak.upgrade() {
+                    service.publish_graph(&initial);
+                } else {
+                    return;
+                }
+            }
             while graph.changed().await.is_ok() {
                 let snapshot = graph.borrow_and_update().clone();
                 let Some(service) = weak.upgrade() else {
@@ -82,9 +106,11 @@ impl Service {
             storage,
             operations: Arc::new(tokio::sync::Semaphore::new(MAX_OPERATIONS as usize)),
             users: watch::channel(0).0,
+            draining: AtomicBool::new(false),
             microphone: tokio::sync::Mutex::new(microphone::Session::default()),
             diagnostics: tokio::sync::Mutex::new(None),
-            catalog: std::sync::Mutex::new(String::new()),
+            catalog: std::sync::Mutex::new(CatalogState::default()),
+            master_muted_streams: std::sync::Mutex::new(MasterMutedStreams::default()),
         }))
     }
 
@@ -114,9 +140,12 @@ impl Service {
     }
 
     pub async fn drain(&self) {
+        self.draining.store(true, Ordering::SeqCst);
         self.stop_microphone(None, true).await;
         // The listener is closed before this barrier, so no new work can arrive.
         let _ = self.operations.acquire_many(MAX_OPERATIONS).await;
+        // Stop any microphone session that was still initializing when drain began.
+        self.stop_microphone(None, true).await;
         let _transaction = self.mutation.lock().await;
     }
 
@@ -217,7 +246,9 @@ impl Drop for Lease {
                 .send_modify(|users| *users = users.saturating_sub(1));
             if *service.users.borrow() == 0 {
                 tokio::spawn(async move {
-                    service.stop_microphone(None, true).await;
+                    if *service.users.borrow() == 0 {
+                        service.stop_microphone(None, true).await;
+                    }
                 });
             }
         }

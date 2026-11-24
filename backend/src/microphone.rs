@@ -49,12 +49,21 @@ pub async fn run(
             Ok(())
         });
     }
+    // Subscribe before inspecting/spawning so a mute or disconnect during
+    // startup is never missed between validation and watch registration.
+    let mut graph = native.subscribe();
+    let initial_graph = graph.borrow_and_update().clone();
+    if !initial_graph.ready {
+        return Err(Failure::new(
+            "source_changed",
+            "Microphone or audio graph changed",
+        ));
+    }
     if record {
         let identity = identity
             .as_ref()
             .ok_or_else(|| Failure::new("invalid_params", "Microphone identity is required"))?;
-        let graph = native.snapshot();
-        let source = native::validate_identity(&graph, identity)?;
+        let source = native::validate_identity(&initial_graph, identity)?;
         if source
             .properties
             .get("media.class")
@@ -76,6 +85,15 @@ pub async fn run(
             .arg("--sample-count=240000");
         command.stdin(Stdio::null()).stdout(Stdio::piped());
     } else {
+        if let Some(identity) = &identity {
+            let source = native::validate_identity(&initial_graph, identity)?;
+            if source.audio.muted != Some(false) {
+                return Err(Failure::new(
+                    "invalid_target",
+                    "Select an unmuted microphone",
+                ));
+            }
+        }
         if clip.len() < 2 || clip.len() > CLIP_BYTES || clip.len() % 2 != 0 {
             return Err(Failure::new(
                 "no_clip",
@@ -103,31 +121,54 @@ pub async fn run(
         }
         Ok::<_, std::io::Error>(())
     };
-    let mut graph = native.subscribe();
+    let graph_broken = |live: &native::Graph| -> bool {
+        if !live.ready {
+            return true;
+        }
+        if let Some(identity) = &identity {
+            if native::validate_identity(live, identity).is_err()
+                || live
+                    .nodes
+                    .get(&identity.id)
+                    .is_some_and(|n| n.audio.muted != Some(false))
+            {
+                return true;
+            }
+        }
+        false
+    };
     let disconnected = async {
+        let current = graph.borrow_and_update().clone();
+        if graph_broken(&current) {
+            return;
+        }
         while graph.changed().await.is_ok() {
             let live = graph.borrow_and_update().clone();
-            if !live.ready {
+            if graph_broken(&live) {
                 return;
-            }
-            if let Some(identity) = &identity {
-                if native::validate_identity(&live, identity).is_err()
-                    || live
-                        .nodes
-                        .get(&identity.id)
-                        .is_some_and(|n| n.audio.muted != Some(false))
-                {
-                    return;
-                }
             }
         }
     };
     tokio::pin!(disconnected);
     // Do not reap until the stream has finished, or cancellation has killed the
     // group. This keeps the PID reserved throughout group signalling.
-    let completed = tokio::select! {
-        result = transfer => result.is_ok(),
-        _ = cancel.changed() => false,
+    enum TransferState {
+        Done,
+        Cancelled,
+        Failed,
+    }
+    let transfer_state = tokio::select! {
+        result = transfer => match result {
+            Ok(()) => TransferState::Done,
+            Err(_) => {
+                if *cancel.borrow() != Control::Continue {
+                    TransferState::Cancelled
+                } else {
+                    TransferState::Failed
+                }
+            }
+        },
+        _ = cancel.changed() => TransferState::Cancelled,
         _ = &mut disconnected => { return finish_cancel(&mut child,pid).await.and(Err(Failure::new("source_changed", "Microphone or audio graph changed"))); },
         _ = tokio::time::sleep(Duration::from_secs(8)) => { return finish_cancel(&mut child,pid).await.and(Err(Failure::new("timeout", "Microphone test timed out"))); }
     };
@@ -135,9 +176,16 @@ pub async fn run(
     // ChildStdin::shutdown flushes but does not necessarily close the pipe.
     // Drop our writer so a player reading to EOF can finish.
     drop(stdin);
+    if matches!(transfer_state, TransferState::Failed) {
+        finish_cancel(&mut child, pid).await?;
+        return Err(Failure::new(
+            "test_failed",
+            "Microphone test could not finish",
+        ));
+    }
     // Own the sample limit: pw-record can exit unsuccessfully after reaching
     // --sample-count even though it produced the complete recording.
-    if !completed || (record && data.len() == CLIP_BYTES) {
+    if matches!(transfer_state, TransferState::Cancelled) || (record && data.len() == CLIP_BYTES) {
         finish_cancel(&mut child, pid).await?;
     } else {
         tokio::select! {

@@ -249,6 +249,7 @@ impl Handle {
                 },
             }))
             .map_err(|_| Failure::new("disconnected", "PipeWire is unavailable"))?;
+        drop(sender);
         tokio::time::timeout(Duration::from_secs(3), async {
             receive.await.map_err(|_| {
                 Failure::unknown("PipeWire disconnected during profile selection")
