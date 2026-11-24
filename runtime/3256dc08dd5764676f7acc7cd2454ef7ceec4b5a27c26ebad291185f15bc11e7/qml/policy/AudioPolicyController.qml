@@ -9,7 +9,8 @@ Item {
   readonly property bool loaded: !!service && service.ready && service.state.graphReady === true
   property string error: ""
   property string pendingKey: ""
-  readonly property bool busy: pendingKey !== "" || (!!service && service.transactionBusy)
+  readonly property bool writing: pendingKey !== ""
+  readonly property bool busy: writing || (!!service && service.transactionBusy)
   onSettingsChanged: settled()
 
   readonly property var coreDefinitions: [

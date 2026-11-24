@@ -26,6 +26,7 @@ CursorSurface {
   required property bool routeSetBusy
   required property bool mutationBlocked
   property bool popupReportedOpen: false
+  property real percentWidth: Style.space(36)
 
   signal claimed(string section, int index)
   signal volumeRequested(real value)
@@ -65,7 +66,7 @@ CursorSurface {
 
   function liveAudioVolume() {
     try {
-      var value = root.nodeReady ? Number(root.node.audio.volume) : 0
+      const value = root.nodeReady ? Number(root.node.audio.volume) : 0
       return isFinite(value) ? value : 0
     } catch (_error) { return 0 }
   }
@@ -165,7 +166,7 @@ CursorSurface {
 
         Item {
           id: streamNameArea
-          width: parent.width - streamMuteIcon.width - streamPct.width - Style.space(16)
+          width: parent.width - streamMuteIcon.width - Style.space(8)
           height: Math.max(streamName.implicitHeight, routeChevron.visible ? routeChevron.height : 0)
 
           Text {
@@ -204,20 +205,6 @@ CursorSurface {
             anchors.leftMargin: Style.space(4)
             anchors.verticalCenter: parent.verticalCenter
           }
-        }
-
-        Text {
-          textFormat: Text.PlainText
-          id: streamPct
-          text: Math.round(root.streamVolume * 100) + "%"
-          color: Qt.darker(root.bar.foreground, 1.5)
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.caption
-          font.bold: true
-          width: Style.space(36)
-          horizontalAlignment: Text.AlignRight
-          anchors.verticalCenter: parent.verticalCenter
-          opacity: root.streamMuted ? 0.5 : 1.0
         }
       }
 
@@ -265,41 +252,57 @@ CursorSurface {
       }
     }
 
-    AudioSlider {
-      bar: root.bar
+    // Volume and the live level share one track; the percentage sits at the
+    // end of the row like the device sliders.
+    Item {
       width: parent.width
-      minimum: 0
-      maximum: root.volumeMaximum
-      step: 0.05
-      value: root.streamVolume
-      opacity: root.streamMuted ? 0.5 : 1.0
-      enabled: root.nodeReady && !root.mutationBlocked
+      height: streamSlider.implicitHeight
 
-      onMoved: function(v) {
-        if (!root.mutationBlocked && root.nodeReady)
-          root.volumeRequested(v)
+      Text {
+        textFormat: Text.PlainText
+        id: streamPct
+        text: Math.round((streamSlider.dragging ? streamSlider.liveValue : root.streamVolume) * 100) + "%"
+        color: Qt.darker(root.bar.foreground, 1.5)
+        font.family: root.bar.fontFamily
+        font.pixelSize: Style.font.caption
+        font.bold: true
+        width: root.percentWidth
+        horizontalAlignment: Text.AlignRight
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        opacity: root.streamMuted ? 0.5 : 1.0
       }
-      onReleased: function(v) {
-        if (!root.mutationBlocked && root.nodeReady)
-          root.volumeRequested(v)
-      }
-      onRightClicked: {
-        if (!root.mutationBlocked && root.nodeReady)
-          root.muteRequested()
-      }
-    }
 
-    Rectangle {
-      width: parent.width
-      height: Math.max(Style.space(4), Style.spacing.xs)
-      color: Util.alpha(root.bar.foreground, 0.18)
-      opacity: root.streamMuted ? 0.35 : 1.0
+      AudioSlider {
+        id: streamSlider
+        bar: root.bar
+        anchors.left: parent.left
+        anchors.right: streamPct.left
+        anchors.rightMargin: Style.space(4)
+        anchors.verticalCenter: parent.verticalCenter
+        minimum: 0
+        maximum: root.volumeMaximum
+        step: 0.05
+        value: root.streamVolume
+        opacity: root.streamMuted ? 0.5 : 1.0
+        enabled: root.nodeReady && !root.mutationBlocked
+        meterEnabled: true
+        // The level is post-volume and the track spans volumeMaximum, so
+        // rescale it onto the same axis as the knob.
+        meterLevel: root.meterLevel / Math.max(0.0001, root.volumeMaximum)
 
-      Rectangle {
-        height: parent.height
-        width: parent.width * root.meterLevel
-        color: root.bar.foreground
-        Behavior on width { NumberAnimation { duration: 70 } }
+        onMoved: function(v) {
+          if (!root.mutationBlocked && root.nodeReady)
+            root.volumeRequested(v)
+        }
+        onReleased: function(v) {
+          if (!root.mutationBlocked && root.nodeReady)
+            root.volumeRequested(v)
+        }
+        onRightClicked: {
+          if (!root.mutationBlocked && root.nodeReady)
+            root.muteRequested()
+        }
       }
     }
   }

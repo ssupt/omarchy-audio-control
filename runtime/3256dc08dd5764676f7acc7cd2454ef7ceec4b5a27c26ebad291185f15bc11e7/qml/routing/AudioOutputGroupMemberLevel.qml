@@ -22,7 +22,7 @@ Item {
   readonly property real currentVolume: {
     try {
       if (!connected || !node || !node.audio) return 0
-      var value = Number(node.audio.volume)
+      const value = Number(node.audio.volume)
       return isFinite(value) ? value : 0
     } catch (_error) {
       return 0
