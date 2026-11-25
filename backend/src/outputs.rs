@@ -171,7 +171,10 @@ impl<'a> View<'a> {
 pub struct MasterTargets<'a> {
     pub outputs: BTreeMap<u32, &'a Node>,
     pub inputs: BTreeMap<u32, &'a Node>,
-    pub muted_recording_streams: BTreeMap<u32, &'a Node>,
+    pub unmutable_outputs: bool,
+    pub unmutable_inputs: bool,
+    pub default_output_unmutable: bool,
+    pub default_input_unmutable: bool,
     pub recording_active: bool,
     pub recording_muted: bool,
 }
@@ -194,12 +197,18 @@ fn is_monitor_or_sink(node: &Node) -> bool {
 pub fn master_targets(graph: &Graph) -> MasterTargets<'_> {
     let mut outputs = BTreeMap::new();
     let mut inputs = BTreeMap::new();
-    let mut muted_recording_streams = BTreeMap::new();
+    let mut unmutable_outputs = false;
+    let mut unmutable_inputs = false;
+    let mut default_output_unmutable = false;
+    let mut default_input_unmutable = false;
     if !graph.ready || !graph.connected || graph.nodes.len() > 4096 || graph.links.len() > 8192 {
         return MasterTargets {
             outputs,
             inputs,
-            muted_recording_streams,
+            unmutable_outputs,
+            unmutable_inputs,
+            default_output_unmutable,
+            default_input_unmutable,
             recording_active: false,
             recording_muted: false,
         };
@@ -210,7 +219,11 @@ pub fn master_targets(graph: &Graph) -> MasterTargets<'_> {
     {
         let volume = view.volume(default_sink);
         if !volume.serial.is_empty() {
-            outputs.insert(volume.id, volume);
+            if volume.audio.muted.is_some() {
+                outputs.insert(volume.id, volume);
+            } else {
+                default_output_unmutable = true;
+            }
         }
     }
     let default_source =
@@ -224,13 +237,17 @@ pub fn master_targets(graph: &Graph) -> MasterTargets<'_> {
             })?
         });
     if let Some(source) = default_source {
-        inputs.insert(source.id, source);
+        if source.audio.muted.is_some() {
+            inputs.insert(source.id, source);
+        } else {
+            default_input_unmutable = true;
+        }
     }
     for stream in graph.nodes.values() {
         if routing::stream_direction(stream) != Some(routing::Direction::Playback) {
             continue;
         }
-        let mut linked = false;
+        let mut sinks = Vec::new();
         for link in graph.links.values().filter(|l| {
             l.output_node == stream.id && matches!(l.state.as_str(), "Active" | "Paused")
         }) {
@@ -240,13 +257,25 @@ pub fn master_targets(graph: &Graph) -> MasterTargets<'_> {
             }) {
                 let volume = view.volume(target);
                 if !volume.serial.is_empty() {
-                    outputs.insert(volume.id, volume);
-                    linked = true;
+                    sinks.push(volume);
                 }
             }
         }
-        if !linked && !stream.serial.is_empty() {
-            outputs.insert(stream.id, stream);
+        for sink in &sinks {
+            if sink.audio.muted.is_some() {
+                outputs.insert(sink.id, *sink);
+            }
+        }
+        if sinks.is_empty() {
+            if !stream.serial.is_empty() && stream.audio.muted.is_some() {
+                outputs.insert(stream.id, stream);
+            }
+        } else if sinks.iter().any(|s| s.audio.muted.is_none()) {
+            if !stream.serial.is_empty() && stream.audio.muted.is_some() {
+                outputs.insert(stream.id, stream);
+            } else if stream.audio.muted != Some(true) {
+                unmutable_outputs = true;
+            }
         }
     }
     let mut recording_active = false;
@@ -277,12 +306,17 @@ pub fn master_targets(graph: &Graph) -> MasterTargets<'_> {
         }
         recording_active = true;
         for source in &sources {
-            inputs.insert(source.id, *source);
+            if source.audio.muted.is_some() {
+                inputs.insert(source.id, *source);
+            }
         }
-        if sources.is_empty() && !stream.serial.is_empty() {
-            inputs.insert(stream.id, stream);
-        } else if stream.audio.muted == Some(true) && !stream.serial.is_empty() {
-            muted_recording_streams.insert(stream.id, stream);
+        let needs_stream = sources.is_empty() || sources.iter().any(|s| s.audio.muted.is_none());
+        if needs_stream {
+            if !stream.serial.is_empty() && stream.audio.muted.is_some() {
+                inputs.insert(stream.id, stream);
+            } else if stream.audio.muted != Some(true) {
+                unmutable_inputs = true;
+            }
         }
         let stream_silenced = stream.audio.muted == Some(true)
             || (!sources.is_empty() && sources.iter().all(|s| s.audio.muted == Some(true)));
@@ -298,7 +332,10 @@ pub fn master_targets(graph: &Graph) -> MasterTargets<'_> {
     MasterTargets {
         outputs,
         inputs,
-        muted_recording_streams,
+        unmutable_outputs,
+        unmutable_inputs,
+        default_output_unmutable,
+        default_input_unmutable,
         recording_active,
         recording_muted,
     }
@@ -310,10 +347,12 @@ pub fn master_snapshot(graph: &Graph) -> Value {
         .outputs
         .values()
         .chain(targets.inputs.values())
-        .any(|node| node.audio.muted == Some(false));
+        .any(|node| node.audio.muted == Some(false))
+        || (targets.recording_active && !targets.recording_muted)
+        || targets.unmutable_outputs;
     json!({
-        "hasOutput": !targets.outputs.is_empty(),
-        "hasInput": !targets.inputs.is_empty(),
+        "hasOutput": !targets.outputs.is_empty() || targets.unmutable_outputs,
+        "hasInput": !targets.inputs.is_empty() || targets.recording_active,
         "anyAudible": any_audible,
         "recordingActive": targets.recording_active,
         "recordingMuted": targets.recording_muted,
@@ -549,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn master_targets_skip_sink_monitor_capture_and_track_muted_recording_streams() {
+    fn master_targets_skip_sink_monitor_capture_and_fall_back_on_unmutable_sources() {
         let mut g = graph();
         select(&mut g, "alsa_output.speakers");
         add(&mut g, 10, "mic_default", "Audio/Source");
@@ -565,18 +604,43 @@ mod tests {
         assert!(!targets.recording_active);
         assert!(!targets.inputs.contains_key(&12));
 
-        // Recording stream muted while its microphone source stays unmuted.
+        // Individually muted recording stream on a muteable source must NOT enter inputs.
         add(&mut g, 13, "voice_chat", "Stream/Input/Audio");
         g.nodes.get_mut(&13).unwrap().audio.muted = Some(true);
         link(&mut g, 10, 13);
         let targets = master_targets(&g);
         assert!(targets.recording_active);
         assert!(targets.recording_muted);
-        assert!(targets.muted_recording_streams.contains_key(&13));
+        assert!(targets.inputs.contains_key(&10));
+        assert!(!targets.inputs.contains_key(&13));
 
-        // Unknown mute state on a node must not pin anyAudible to true.
+        // Unknown mute state on an idle default sink must not pin anyAudible to true.
         g.nodes.get_mut(&1).unwrap().audio.muted = None;
         g.nodes.get_mut(&10).unwrap().audio.muted = Some(true);
         assert_eq!(master_snapshot(&g)["anyAudible"], false);
+
+        // Source without a mute flag falls back to its linked recording streams when muteable.
+        add(&mut g, 14, "voice_live", "Stream/Input/Audio");
+        g.nodes.get_mut(&14).unwrap().audio.muted = Some(false);
+        g.nodes.get_mut(&10).unwrap().audio.muted = None;
+        link(&mut g, 10, 14);
+        let targets = master_targets(&g);
+        assert!(!targets.inputs.contains_key(&10));
+        assert!(targets.inputs.contains_key(&13));
+        assert!(targets.inputs.contains_key(&14));
+        assert!(!targets.unmutable_inputs);
+        assert!(targets.recording_active);
+        assert!(!targets.recording_muted);
+        assert_eq!(master_snapshot(&g)["anyAudible"], true);
+        assert_eq!(master_snapshot(&g)["recordingMuted"], false);
+
+        // When neither source nor recording stream exposes mute, capture is marked unmutable.
+        g.nodes.get_mut(&14).unwrap().audio.muted = None;
+        let targets = master_targets(&g);
+        assert!(targets.unmutable_inputs);
+        assert!(targets.recording_active);
+        assert!(!targets.recording_muted);
+        assert_eq!(master_snapshot(&g)["anyAudible"], true);
+        assert_eq!(master_snapshot(&g)["recordingMuted"], false);
     }
 }

@@ -86,6 +86,7 @@ impl Service {
         let Some(storage) = self.storage.clone() else {
             return Ok(());
         };
+        let _store_sync = self.store_sync.lock().await;
         let stores =
             tokio::task::spawn_blocking(move || Kind::ALL.map(|kind| (kind, storage.read(kind))))
                 .await
@@ -133,7 +134,6 @@ impl Service {
                     .and_then(|paths| crate::file_watch::Watcher::new(&paths).map_err(Into::into));
                 if let Some(service) = weak.upgrade() {
                     // Watches precede the read so replacement during startup is observed.
-                    let _guard = service.mutation.lock().await;
                     let _ = service.reload_stores().await;
                     if let Err(error) = &watcher {
                         service.update_state(|state| state["storeWatchError"] = json!(error));
@@ -149,7 +149,6 @@ impl Service {
                         let Some(service) = weak.upgrade() else {
                             return;
                         };
-                        let _guard = service.mutation.lock().await;
                         let _ = service.reload_stores().await;
                     }
                 }

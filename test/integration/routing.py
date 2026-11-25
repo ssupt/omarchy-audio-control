@@ -409,9 +409,32 @@ with tempfile.TemporaryDirectory(prefix='audio-routing-') as temporary, ExitStac
         assert node('audio_test_other_output')['audio']['muted'] is False
         assert client.request('audio.mute_all', dict(generation=client.state['generation'], muted=False, scope='inputs'))['outcome'] == 'applied'
         client.wait_state(lambda s: s.get('master', {}).get('recordingMuted') is False)
+        # With two recording apps on one microphone, muting one app individually
+        # must survive a bar microphone mute/unmute cycle.
+        second_capture = subprocess.Popen(
+            ['pw-record', '--raw', '--rate=48000', '--channels=1', '--format=s16',
+             '--target=audio_test_other_input',
+             '--properties=node.name=test_individually_muted_rec application.name=test_individually_muted_rec', '-'],
+            env=env, stdout=subprocess.DEVNULL, stderr=log)
+        cleanup.callback(stop, second_capture)
+        until(lambda: linked('test_individually_muted_rec', 'audio_test_other_input'))
+        client.wait_state(lambda s: any(n['name'] == 'test_individually_muted_rec'
+                                        and n['audio'].get('muted') is False for n in s['nodes']))
+        assert client.request('node.level', dict(identity=identity('test_individually_muted_rec'), muted=True))['outcome'] == 'applied'
+        client.wait_state(lambda s: node('test_individually_muted_rec')['audio']['muted'] is True)
+        assert client.request('audio.mute_all', dict(generation=client.state['generation'], muted=True, scope='inputs'))['outcome'] == 'applied'
+        client.wait_state(lambda s: s.get('master', {}).get('recordingMuted') is True
+                          and node('audio_test_other_input')['audio']['muted'] is True)
+        assert client.request('audio.mute_all', dict(generation=client.state['generation'], muted=False, scope='inputs'))['outcome'] == 'applied'
+        client.wait_state(lambda s: s.get('master', {}).get('recordingMuted') is False
+                          and node('audio_test_other_input')['audio']['muted'] is False)
+        assert node('test_individually_muted_rec')['audio']['muted'] is True, \
+            'Master unmute cleared an individual application mute'
+        stop(second_capture)
+        client.wait_state(lambda s: all(n['name'] != 'test_individually_muted_rec' for n in s['nodes']))
         stop(tone_capture)
         client.wait_state(lambda s: all(n['name'] != 'test_pinned_tone' for n in s['nodes']))
-        print('PASS: master mute silences pinned non-default microphones and drives confirmed indicators', flush=True)
+        print('PASS: master mute silences pinned non-default microphones, preserves individual app mutes, and drives confirmed indicators', flush=True)
 
         # The real policy checks above cover user behavior. A second private
         # graph owns its metadata in PipeWire and keeps fixed links, allowing

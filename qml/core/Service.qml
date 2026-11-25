@@ -42,6 +42,7 @@ Item {
   property var inFlightNodeChanges: ({})
   property var pendingNodeChanges: ({})
   property int activeTransactions: 0
+  property int nodeChangeEpoch: 0
 
   // The quick mixer and advanced window share one audio control session.
   signal quickPanelOpened()
@@ -113,11 +114,15 @@ Item {
     var transactional = isNonLevelMutation(method, settings)
     var wrapped = callback
     var savedPending = null
+    var savedEpoch = nodeChangeEpoch || 0
     if (transactional) {
-      // Save queued tails until client.request confirms dispatch; if rejected
-      // synchronously (not ready / queue full / invalid), restore them intact.
+      // Save queued tails and epoch until client.request confirms dispatch;
+      // if rejected synchronously (not ready / queue full / invalid), restore them intact.
       savedPending = pendingNodeChanges
-      if (client.hasCapacity()) pendingNodeChanges = ({})
+      if (client.hasCapacity()) {
+        pendingNodeChanges = ({})
+        nodeChangeEpoch = savedEpoch + 1
+      }
       activeTransactions = (activeTransactions || 0) + 1
       wrapped = function(result, failure) {
         root.activeTransactions = Math.max(0, (root.activeTransactions || 0) - 1)
@@ -128,6 +133,7 @@ Item {
     var id = client.request(method, params || {}, wrapped, settings)
     if (transactional && id === "" && savedPending !== null) {
       pendingNodeChanges = savedPending
+      nodeChangeEpoch = savedEpoch
     }
     return id
   }
@@ -146,6 +152,7 @@ Item {
     inFlightNodeChanges = ({})
     pendingNodeChanges = ({})
     activeTransactions = 0
+    nodeChangeEpoch = (nodeChangeEpoch || 0) + 1
   }
   function patchesEqual(a, b) {
     if (!a || !b) return false
@@ -172,7 +179,12 @@ Item {
       if (Model.hasOwn(inFlightNodeChanges, key)) continue
       if (!client.hasCapacity()) break
       delete pendingNodeChanges[key]
-      inFlightNodeChanges[key] = { identity: entry.identity, patch: entry.patch, retryOnBusy: false }
+      inFlightNodeChanges[key] = {
+        identity: entry.identity,
+        patch: entry.patch,
+        retryOnBusy: false,
+        epoch: nodeChangeEpoch || 0
+      }
       var params = { identity: entry.identity }
       for (var field in entry.patch)
         if (Model.hasOwn(entry.patch, field)) params[field] = entry.patch[field]
@@ -181,8 +193,10 @@ Item {
           var inflight = root.inFlightNodeChanges[nodeKey]
           delete root.inFlightNodeChanges[nodeKey]
           if (failure && failure.code === "busy" && inflight && inflight.retryOnBusy
+              && inflight.epoch === (root.nodeChangeEpoch || 0)
               && !Model.hasOwn(root.pendingNodeChanges, nodeKey)) {
-            // Re-queue a suppressed matching release after a retryable busy conflict.
+            // Re-queue a suppressed matching release after a retryable busy conflict,
+            // unless a newer transactional mutation (e.g. scene.apply) invalidated it.
             root.pendingNodeChanges[nodeKey] = { identity: inflight.identity, patch: inflight.patch }
           }
           // A route change can briefly reject a level request while its device
@@ -210,6 +224,7 @@ Item {
     if (Object.keys(clean).length === 0) return false
     if (!Model.hasOwn(pendingNodeChanges, key)
         && Model.hasOwn(inFlightNodeChanges, key)
+        && inFlightNodeChanges[key].epoch === (nodeChangeEpoch || 0)
         && patchesEqual(inFlightNodeChanges[key].patch, clean)) {
       inFlightNodeChanges[key].retryOnBusy = true
       return true

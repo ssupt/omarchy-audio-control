@@ -439,12 +439,13 @@ pub async fn apply(
     }
     Ok(result)
 }
-async fn device(native: &Handle, step: &Value, overdrive: bool) -> Result<StepOutcome> {
-    let graph = native.snapshot();
-    let Some(node) = resolve(&graph, text(step, "direction"), text(step, "name")) else {
-        return Ok(StepOutcome::Skipped);
+fn device_step_plan(node: &Node, step: &Value, overdrive: bool) -> Result<(Vec<f64>, bool, bool)> {
+    let Some(original_muted) = node.audio.muted else {
+        return Err(Failure::new(
+            "not_applied",
+            "Audio device mute state is unavailable",
+        ));
     };
-    let identity = identity(&graph, node);
     let volume = step["volume"].as_f64().unwrap().min(
         if text(step, "direction") == "output" && !overdrive {
             1.0
@@ -459,6 +460,53 @@ async fn device(native: &Handle, step: &Value, overdrive: bool) -> Result<StepOu
         levels[right] *= if balance < 0.0 { 1.0 + balance } else { 1.0 };
     }
     let muted = text(step, "direction") == "input" && step["muted"] == true;
+    Ok((levels, muted, original_muted))
+}
+async fn device(native: &Handle, step: &Value, overdrive: bool) -> Result<StepOutcome> {
+    let direction = text(step, "direction");
+    let name = text(step, "name");
+    let (graph, node) = {
+        let graph = native.snapshot();
+        match resolve(&graph, direction, name) {
+            None => return Ok(StepOutcome::Skipped),
+            Some(node) if node.audio.muted.is_some() => (graph.clone(), node.clone()),
+            Some(_) => {
+                // Defer briefly if a preceding profile/port step is still populating mute state.
+                let mut state = native.subscribe();
+                let settled = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+                    loop {
+                        let current = state.borrow_and_update().clone();
+                        match resolve(&current, direction, name) {
+                            None => return Ok(None),
+                            Some(node) if node.audio.muted.is_some() => {
+                                return Ok(Some((current.clone(), node.clone())));
+                            }
+                            Some(_) => (),
+                        }
+                        if state.changed().await.is_err() {
+                            return Err(Failure::unknown(
+                                "PipeWire disconnected while waiting for device mute state",
+                            ));
+                        }
+                    }
+                })
+                .await;
+                match settled {
+                    Ok(Ok(Some(pair))) => pair,
+                    Ok(Ok(None)) => return Ok(StepOutcome::Skipped),
+                    Ok(Err(error)) => return Err(error),
+                    Err(_) => {
+                        return Err(Failure::new(
+                            "not_applied",
+                            "Audio device mute state is unavailable",
+                        ));
+                    }
+                }
+            }
+        }
+    };
+    let identity = identity(&graph, &node);
+    let (levels, muted, original_muted) = device_step_plan(&node, step, overdrive)?;
     let change = async {
         native
             .patch(
@@ -491,36 +539,26 @@ async fn device(native: &Handle, step: &Value, overdrive: bool) -> Result<StepOu
             "Device changed externally during scene recovery",
         ));
     }
-    if node.audio.muted.is_some() {
-        native
-            .patch(
-                identity.clone(),
-                AudioPatch {
-                    muted: Some(true),
-                    volumes: Some(node.audio.volumes.clone()),
-                },
-            )
-            .await?;
-        native
-            .patch(
-                identity,
-                AudioPatch {
-                    muted: node.audio.muted,
-                    volumes: None,
-                },
-            )
-            .await?;
-    } else {
-        native
-            .patch(
-                identity,
-                AudioPatch {
-                    muted: None,
-                    volumes: Some(node.audio.volumes.clone()),
-                },
-            )
-            .await?;
-    }
+    native
+        .patch(
+            identity.clone(),
+            AudioPatch {
+                muted: Some(true),
+                volumes: Some(node.audio.volumes.clone()),
+            },
+        )
+        .await
+        .map_err(|_| Failure::unknown("Audio device state could not be restored"))?;
+    native
+        .patch(
+            identity,
+            AudioPatch {
+                muted: Some(original_muted),
+                volumes: None,
+            },
+        )
+        .await
+        .map_err(|_| Failure::unknown("Audio device state could not be restored"))?;
     Ok(StepOutcome::Restored)
 }
 
@@ -538,6 +576,30 @@ mod tests {
             properties: BTreeMap::from([("media.class".into(), class.into())]),
             ..Node::default()
         }
+    }
+
+    #[test]
+    fn device_step_rejects_missing_mute_readback_before_mutating() {
+        let mut mic = node(5, "alsa_input.usb", "Audio/Source");
+        mic.audio.volumes = vec![0.8];
+        mic.audio.muted = None;
+        let step = json!({
+            "kind": "device",
+            "direction": "input",
+            "name": "alsa_input.usb",
+            "volume": 0.5,
+            "balance": 0.0,
+            "muted": false
+        });
+        let err = device_step_plan(&mic, &step, false).unwrap_err();
+        assert_eq!(err.code, "not_applied");
+        assert_eq!(err.outcome, "rejected");
+
+        mic.audio.muted = Some(false);
+        let (levels, muted, original_muted) = device_step_plan(&mic, &step, false).unwrap();
+        assert_eq!(levels, vec![0.5]);
+        assert!(!muted);
+        assert!(!original_muted);
     }
 
     #[test]

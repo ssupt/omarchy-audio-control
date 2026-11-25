@@ -169,8 +169,8 @@ Panel {
     && displayAudioSinks.length > 0
   readonly property bool inputDevicesCollapsed: compactDevices && !inputDevicesExpanded
     && displayAudioSources.length > 0
-  readonly property var activeOutputRowNode: activeDisplayNode(displayAudioSinks, preferredOutputName, sink)
-  readonly property var activeInputRowNode: activeDisplayNode(displayAudioSources, preferredInputName, source)
+  readonly property var activeOutputRowNode: activeDisplayNode(displayAudioSinks, sink, preferredOutputName)
+  readonly property var activeInputRowNode: activeDisplayNode(displayAudioSources, source, preferredInputName)
   // Shared by every slider row so percentages line up down the panel.
   readonly property real percentColumnWidth: Style.space(36)
   onCompactDevicesChanged: {
@@ -181,12 +181,20 @@ Panel {
   onOutputDevicesCollapsedChanged: clampCursor()
   onInputDevicesCollapsedChanged: clampCursor()
 
-  function activeDisplayNode(list, preferredName, fallback) {
-    if (preferredName !== "") {
-      for (var i = 0; i < list.length; i++)
-        if (Model.nodeName(list[i]) === preferredName) return list[i]
+  function activeDisplayNode(list, liveDefault, preferredName) {
+    if (liveDefault) {
+      var liveName = Model.nodeName(liveDefault)
+      for (var i = 0; i < list.length; i++) {
+        if (list[i] === liveDefault || (liveName !== "" && Model.nodeName(list[i]) === liveName))
+          return list[i]
+      }
+      return liveDefault
     }
-    return fallback || null
+    if (preferredName !== "") {
+      for (var j = 0; j < list.length; j++)
+        if (Model.nodeName(list[j]) === preferredName) return list[j]
+    }
+    return null
   }
 
   function toggleDeviceList(section) {

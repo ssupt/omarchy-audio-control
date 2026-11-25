@@ -150,7 +150,16 @@ impl Service {
             } else if let Ok(clip) = result {
                 session.clip = clip;
             }
-            service.publish_microphone(&params.owner, session.clip_state(), &error);
+            let clip_state = session.clip_state();
+            drop(_lock);
+            drop(_busy);
+            drop(_transaction);
+            // Publish terminal state after releasing mutation locks so callers
+            // observing `ready`/`idle` can immediately start another operation,
+            // while still holding `session` so a new microphone test cannot
+            // publish ahead of this terminal state.
+            service.publish_microphone(&params.owner, clip_state, &error);
+            drop(session);
         });
         Ok(json!({"started":true}))
     }

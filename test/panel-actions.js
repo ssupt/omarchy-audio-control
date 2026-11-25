@@ -6,6 +6,8 @@ const Protocol = require('../qml/core/AudioProtocol.js')
 
 const source = fs.readFileSync(require.resolve('../qml/panels/Panel.qml'), 'utf8')
 const serviceSource = fs.readFileSync(require.resolve('../qml/core/Service.qml'), 'utf8')
+const micControllerSource = fs.readFileSync(
+  require.resolve('../qml/microphone/AudioMicrophoneTestController.qml'), 'utf8')
 function node(id, mediaClass = 'Audio/Sink') {
   return { id, ready: true, audio: { volume: .5, muted: false },
     properties: { 'object.serial': String(id), 'node.name': 'node_' + id, 'media.class': mediaClass } }
@@ -14,9 +16,12 @@ function panel() {
   const output = node(1), input = node(2, 'Audio/Source'), stream = node(3, 'Stream/Output/Audio')
   const requests = [], levels = []
   const context = {
-    Model, nodes: [output, input, stream], volumeSink: output, source: input,
+    Model, nodes: [output, input, stream], sink: output, volumeSink: output, source: input,
     audioStreams: [stream], recordingStreams: [], candidateSinks: [output], candidateSources: [input],
+    displayAudioSinks: [output], displayAudioSources: [input],
     displayAudioStreams: [stream], displayRecordingStreams: [],
+    preferredOutputName: '', preferredInputName: '',
+    outputDevicesExpanded: false, inputDevicesExpanded: false, cursorActive: false,
     outputVolumeMaximum: 1, focusSection: 'output', selectedIndex: -1,
     nodeGeneration: 'g',
     hasOutput: true, hasInput: true, outputMuted: false, inputMuted: false,
@@ -45,7 +50,9 @@ function panel() {
     ['bool', 'sceneMutationBusy'],
     ['var', 'masterState'],
     ['bool', 'activeRecordingMuted'],
-    ['bool', 'anyAudible']
+    ['bool', 'anyAudible'],
+    ['var', 'activeOutputRowNode'],
+    ['var', 'activeInputRowNode']
   ]) {
     const expression = source.match(new RegExp('readonly property ' + kind + ' ' + name + ': ([^\\n]*(?:\\n    [^\\n]*)*)'))[1]
     Object.defineProperty(context, name, { get: () => vm.runInContext(expression, context) })
@@ -162,7 +169,7 @@ for (const action of ['toggleOutputMute', 'toggleInputMute', 'adjustVolume']) {
   const sent = [], acknowledged = []
   const serviceContext = {
     Model, Protocol, ready: false, error: '', lastLevelError: '', state: {}, transactionBusy: false,
-    inFlightNodeChanges: {}, pendingNodeChanges: {}, activeTransactions: 0, client: null
+    inFlightNodeChanges: {}, pendingNodeChanges: {}, activeTransactions: 0, nodeChangeEpoch: 0, client: null
   }
   serviceContext.root = serviceContext
   vm.createContext(serviceContext)
@@ -293,6 +300,139 @@ for (const action of ['toggleOutputMute', 'toggleInputMute', 'adjustVolume']) {
   assert.equal(serviceContext.error, 'Unrelated status error',
     'Successful node.level must not clear an unrelated service error')
   serviceContext.error = ''
+
+  // A late busy reply from a pre-scene slider request must not re-queue 60%
+  // after scene.apply has already been dispatched.
+  p.setOutputVolume(0.6)
+  p.setOutputVolume(0.6) // matching release marks retryOnBusy on the in-flight 60% request
+  const staleSlider = sent.find(r => r.method === 'node.level' && !r._done)
+  assert(staleSlider)
+  assert.equal(staleSlider.params.volume, 0.6)
+  let sceneApplied = false
+  assert.notEqual(serviceContext.request('scene.apply', {
+    scene: { name: 'Quiet', steps: [{ kind: 'device', direction: 'output', name: 'node_1', volume: 0.2, balance: 0 }] }
+  }, () => { sceneApplied = true }), '')
+  const sceneReq = sent.at(-1)
+  staleSlider._done = true
+  client.feed(JSON.stringify({
+    version: 1, id: staleSlider.id,
+    error: { code: 'busy', message: 'Audio route is updating', outcome: 'rejected' }
+  }) + '\n')
+  reply(sceneReq, { outcome: 'applied', applied: 1, errors: [] })
+  assert.equal(sceneApplied, true)
+  assert.equal(Object.keys(serviceContext.pendingNodeChanges).length, 0,
+    'Late busy reply from pre-scene slider must not re-queue after scene.apply')
+  assert.equal(sent.filter(r => r.method === 'node.level' && !r._done).length, 0,
+    'Stale 60% slider retry must not overwrite newly applied scene')
+}
+
+// Cancelling a microphone test while start is waiting for the mutation lock
+// must immediately dispatch microphone.stop instead of exiting because pending is true.
+{
+  const input = node(2, 'Audio/Source')
+  const requests = []
+  const mic = {
+    Model,
+    inputDevice: input,
+    inputDeviceLive: true,
+    sessionActive: true,
+    owner: 'mic-test-owner',
+    pending: false,
+    cancelPending: false,
+    pendingRecord: false,
+    localError: '',
+    secondsRemaining: 0,
+    peakMonitor: { peak: 0 },
+    service: {
+      ready: true,
+      state: { microphone: { owner: 'mic-test-owner', state: 'idle', error: '' } },
+      identityForNode(n) { return n === input ? { generation: 'g1', id: 2, serial: '2' } : null },
+      request(method, params, callback) { requests.push({ method, params, callback }); return 'r' + requests.length }
+    }
+  }
+  mic.root = mic
+  vm.createContext(mic)
+  for (const match of micControllerSource.matchAll(/^  function \w+\([^\n]*\) \{[\s\S]*?^  \}/gm))
+    vm.runInContext(match[0], mic)
+  for (const [kind, name] of [
+    ['var', 'job'],
+    ['string', 'rawTestState'],
+    ['string', 'testState'],
+    ['string', 'error'],
+    ['bool', 'microphoneMuted'],
+    ['bool', 'busy']
+  ]) {
+    const expression = micControllerSource.match(new RegExp('readonly property ' + kind + ' ' + name + ': ([^\\n]*(?:\\n    [^\\n]*)*)'))[1]
+    Object.defineProperty(mic, name, { get: () => vm.runInContext(expression, mic) })
+  }
+
+  mic.activate()
+  assert.equal(mic.pending, true)
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].method, 'microphone.start')
+  mic.service.state.microphone = { owner: 'mic-test-owner', state: 'starting', error: '' }
+  assert.equal(mic.testState, 'starting')
+
+  // Clicking Cancel while pending is still true must dispatch microphone.stop.
+  mic.activate()
+  assert.equal(requests.length, 2, 'Cancel while starting must send microphone.stop even when pending is true')
+  assert.equal(requests[1].method, 'microphone.stop')
+  assert.equal(requests[1].params.discard, true)
+  assert.equal(mic.testState, 'cancelling')
+
+  // Repeated clicks while cancelling must not spam duplicate stop requests.
+  mic.activate()
+  assert.equal(requests.length, 2)
+
+  // Start request returning cancelled must clear pending and leave no user-facing error.
+  requests[1].callback({ stopping: true }, null)
+  requests[0].callback(null, { code: 'cancelled', message: 'Microphone test was cancelled before starting' })
+  mic.service.state.microphone = { owner: 'mic-test-owner', state: 'idle', error: '' }
+  assert.equal(mic.pending, false)
+  assert.equal(mic.testState, 'idle')
+  assert.equal(mic.error, '')
+}
+
+// Compact picker must display and preselect the live PipeWire default even
+// when an older device preference is saved and the default changed externally.
+{
+  const headphones = node(10, 'Audio/Sink')
+  headphones.name = 'alsa_output.headphones'
+  headphones.properties['node.name'] = headphones.name
+  const speakers = node(11, 'Audio/Sink')
+  speakers.name = 'alsa_output.speakers'
+  speakers.properties['node.name'] = speakers.name
+  const usbMic = node(20, 'Audio/Source')
+  usbMic.name = 'alsa_input.usb'
+  usbMic.properties['node.name'] = usbMic.name
+  const internalMic = node(21, 'Audio/Source')
+  internalMic.name = 'alsa_input.internal'
+  internalMic.properties['node.name'] = internalMic.name
+
+  const { context: p } = panel()
+  p.displayAudioSinks = [headphones, speakers]
+  p.preferredOutputName = 'alsa_output.headphones'
+  p.sink = speakers
+  assert.equal(p.activeOutputRowNode, speakers,
+    'Collapsed output picker must name the live PipeWire default, not the saved preference')
+  p.toggleDeviceList('output')
+  assert.equal(p.outputDevicesExpanded, true)
+  assert.equal(p.selectedIndex, 1,
+    'Opening the output picker must preselect the live PipeWire default')
+
+  p.displayAudioSources = [usbMic, internalMic]
+  p.preferredInputName = 'alsa_input.usb'
+  p.source = internalMic
+  assert.equal(p.activeInputRowNode, internalMic,
+    'Collapsed input picker must name the live PipeWire default, not the saved preference')
+  p.toggleDeviceList('input')
+  assert.equal(p.inputDevicesExpanded, true)
+  assert.equal(p.selectedIndex, 1,
+    'Opening the input picker must preselect the live PipeWire default')
+
+  // When no live default is reported, fall back to the saved preference.
+  p.sink = null
+  assert.equal(p.activeOutputRowNode, headphones)
 }
 
 {

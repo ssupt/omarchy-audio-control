@@ -125,13 +125,14 @@ pub(super) struct Change {
     after: Guard,
     observed: u64,
     prepared: Vec<Identity>,
+    require_prepared: bool,
 }
 pub(super) struct Command {
     pub change: Change,
     pub completion: Completion,
 }
 impl Change {
-    pub(super) fn apply(&self, graph: &Graph, proxies: &Proxies) -> Result<()> {
+    fn validate(&self, graph: &Graph) -> Result<u32> {
         let device = self.before.inspect(graph)?;
         if !device.profile_writable || device.profile_revision != self.observed {
             return Err(Failure::new(
@@ -150,37 +151,43 @@ impl Change {
                 "That audio profile is no longer available",
             ));
         }
-        for identity in &self.prepared {
-            let node = validate_identity(graph, identity)?;
-            let audio = super::audio::route_for(graph, node)
-                .map(|(_, route)| &route.audio)
-                .unwrap_or(&node.audio);
-            if audio.muted != Some(true) {
+        if self.require_prepared {
+            for identity in &self.prepared {
+                let node = validate_identity(graph, identity)?;
+                let audio = super::audio::route_for(graph, node)
+                    .map(|(_, route)| &route.audio)
+                    .unwrap_or(&node.audio);
+                if audio.muted != Some(true) {
+                    return Err(Failure::new(
+                        "conflict",
+                        "Audio changed during profile preparation",
+                    ));
+                }
+            }
+            if graph.nodes.values().any(|n| {
+                n.properties.get("device.id").and_then(|v| v.parse().ok()) == Some(device.id)
+                    && matches!(
+                        n.properties.get("media.class").map(String::as_str),
+                        Some("Audio/Sink" | "Audio/Source")
+                    )
+                    && !self
+                        .prepared
+                        .iter()
+                        .any(|id| id.id == n.id && id.serial == n.serial)
+            }) {
                 return Err(Failure::new(
                     "conflict",
-                    "Audio changed during profile preparation",
+                    "Audio endpoints changed during profile preparation",
                 ));
             }
         }
-        if graph.nodes.values().any(|n| {
-            n.properties.get("device.id").and_then(|v| v.parse().ok()) == Some(device.id)
-                && matches!(
-                    n.properties.get("media.class").map(String::as_str),
-                    Some("Audio/Sink" | "Audio/Source")
-                )
-                && !self
-                    .prepared
-                    .iter()
-                    .any(|id| id.id == n.id && id.serial == n.serial)
-        }) {
-            return Err(Failure::new(
-                "conflict",
-                "Audio endpoints changed during profile preparation",
-            ));
-        }
+        Ok(device.id)
+    }
+    pub(super) fn apply(&self, graph: &Graph, proxies: &Proxies) -> Result<()> {
+        let device_id = self.validate(graph)?;
         let proxy = proxies
             .devices
-            .get(&device.id)
+            .get(&device_id)
             .ok_or_else(|| Failure::new("stale_device", "Audio device disappeared"))?;
         let data = profile_pod(self.after.profile.index)?;
         let pod = spa::pod::Pod::from_bytes(&data)
@@ -218,12 +225,36 @@ impl Handle {
         after: Guard,
         prepared: Vec<Identity>,
     ) -> Result<()> {
+        self.switch_profile_with_guard(before, after, prepared, true)
+            .await
+    }
+
+    /// Rollback must be able to leave a broken target profile even if an
+    /// endpoint on that profile cannot be normalized or muted first.
+    pub(crate) async fn switch_profile_rollback(
+        &self,
+        before: Guard,
+        after: Guard,
+        prepared: Vec<Identity>,
+    ) -> Result<()> {
+        self.switch_profile_with_guard(before, after, prepared, false)
+            .await
+    }
+
+    async fn switch_profile_with_guard(
+        &self,
+        before: Guard,
+        after: Guard,
+        prepared: Vec<Identity>,
+        require_prepared: bool,
+    ) -> Result<()> {
         let observed = before.inspect(&self.snapshot())?.profile_revision;
         let change = Change {
             before,
             after,
             observed,
             prepared,
+            require_prepared,
         };
         let permit = self
             .inner
@@ -289,12 +320,12 @@ impl Handle {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use spa::pod::{Object, Property, Value};
     use std::{collections::BTreeMap, sync::Arc};
 
-    fn graph() -> (Graph, Identity) {
+    pub(crate) fn graph() -> (Graph, Identity) {
         let identity = Identity {
             generation: "test".into(),
             id: 7,
@@ -412,6 +443,55 @@ mod tests {
                 .properties
                 .iter()
                 .any(|p| p.key == spa::sys::SPA_PARAM_PROFILE_save && p.value == Value::Bool(true))
+        );
+    }
+    #[test]
+    fn forward_profile_switch_requires_prepared_endpoints_while_rollback_allows_fallback() {
+        let (mut graph, identity) = graph();
+        let selection = Selection::new(&graph, identity, "headset").unwrap();
+        graph.nodes.insert(
+            99,
+            super::super::Node {
+                id: 99,
+                serial: "99".into(),
+                name: "headset_sink".into(),
+                audio: super::super::Audio {
+                    volumes: vec![2.0],
+                    muted: Some(false),
+                    ..super::super::Audio::default()
+                },
+                properties: BTreeMap::from([
+                    ("device.id".into(), "7".into()),
+                    ("media.class".into(), "Audio/Sink".into()),
+                ]),
+                ..super::super::Node::default()
+            },
+        );
+        let forward = Change {
+            before: selection.before.clone(),
+            after: selection.after.clone(),
+            observed: 0,
+            prepared: Vec::new(),
+            require_prepared: true,
+        };
+        assert_eq!(forward.validate(&graph).unwrap_err().code, "conflict");
+
+        let rollback = Change {
+            before: selection.before.clone(),
+            after: selection.after.clone(),
+            observed: 0,
+            prepared: Vec::new(),
+            require_prepared: false,
+        };
+        assert_eq!(rollback.validate(&graph).unwrap(), 7);
+
+        let stale_rollback = Change {
+            observed: 1,
+            ..rollback
+        };
+        assert_eq!(
+            stale_rollback.validate(&graph).unwrap_err().code,
+            "conflict"
         );
     }
 }

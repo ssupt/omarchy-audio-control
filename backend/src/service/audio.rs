@@ -179,8 +179,21 @@ impl Service {
                 "Requested volume exceeds the configured limit",
             ));
         }
+        let clear_master_memory =
+            crate::routing::stream_direction(node).is_some() && params.patch.muted.is_some();
+        let identity_key = (
+            params.identity.generation.clone(),
+            params.identity.id,
+            params.identity.serial.clone(),
+        );
         let _external_lock = FileLock::mutation().await?;
         native.patch(params.identity, params.patch).await?;
+        if clear_master_memory {
+            let mut state = self.master_muted_streams.lock().unwrap();
+            if state.generation == identity_key.0 {
+                state.streams.remove(&(identity_key.1, identity_key.2));
+            }
+        }
         Ok(json!({"outcome": "applied"}))
     }
 
@@ -211,32 +224,27 @@ impl Service {
             let active = crate::outputs::master_targets(graph);
             let mut seen = std::collections::BTreeSet::new();
             let mut targets = Vec::new();
-            let mut push_node = |node: &native::Node| {
+            let mut push_node = |node: &native::Node, allow_stream: bool| {
+                let is_stream = crate::routing::stream_direction(node).is_some();
+                if is_stream && !allow_stream {
+                    return;
+                }
                 if seen.insert(node.id) && node.audio.muted.is_some_and(|current| current != muted)
                 {
-                    let is_stream = crate::routing::stream_direction(node).is_some();
                     targets.push((crate::routing::identity(graph, node), is_stream));
                 }
             };
             match params.scope {
                 MasterScope::All => {
+                    // When unmuting, only unmute endpoints here; streams are restored
+                    // strictly from the identities that master mute actually muted.
                     for node in active.outputs.values().chain(active.inputs.values()) {
-                        push_node(node);
-                    }
-                    if !muted {
-                        for node in active.muted_recording_streams.values() {
-                            push_node(node);
-                        }
+                        push_node(node, muted);
                     }
                 }
                 MasterScope::Inputs => {
                     for node in active.inputs.values() {
-                        push_node(node);
-                    }
-                    if !muted {
-                        for node in active.muted_recording_streams.values() {
-                            push_node(node);
-                        }
+                        push_node(node, muted);
                     }
                 }
             }
@@ -262,7 +270,7 @@ impl Service {
                             }
                         };
                         if in_scope {
-                            push_node(node);
+                            push_node(node, true);
                         }
                     }
                 }
@@ -389,22 +397,69 @@ impl Service {
                 }
             }
         }
+        let final_graph = native.snapshot();
         if !params.muted {
             // Prune entries whose nodes disappeared or are no longer muted.
-            let current = native.snapshot();
             let mut state = self.master_muted_streams.lock().unwrap();
-            if state.generation != current.generation {
-                state.generation = current.generation.clone();
+            if state.generation != final_graph.generation {
+                state.generation = final_graph.generation.clone();
                 state.streams.clear();
             } else {
                 state.streams.retain(|(id, serial)| {
-                    current.nodes.get(id).is_some_and(|node| {
+                    final_graph.nodes.get(id).is_some_and(|node| {
                         node.serial == *serial && node.audio.muted == Some(true)
                     })
                 });
             }
+        } else if failed.is_none() {
+            if !final_graph.ready
+                || !final_graph.connected
+                || final_graph.generation != params.generation
+            {
+                failed = Some(Failure::unknown(
+                    "Audio graph changed before mute was confirmed",
+                ));
+            } else {
+                let post = crate::outputs::master_targets(&final_graph);
+                let unmutable = match params.scope {
+                    MasterScope::All => {
+                        post.unmutable_outputs
+                            || post.unmutable_inputs
+                            || (post.outputs.is_empty()
+                                && post.inputs.is_empty()
+                                && (post.default_output_unmutable || post.default_input_unmutable))
+                    }
+                    MasterScope::Inputs => {
+                        post.unmutable_inputs
+                            || (post.inputs.is_empty() && post.default_input_unmutable)
+                    }
+                };
+                let still_recording = post.recording_active && !post.recording_muted;
+                let still_audible = match params.scope {
+                    MasterScope::All => post
+                        .outputs
+                        .values()
+                        .chain(post.inputs.values())
+                        .any(|node| node.audio.muted == Some(false)),
+                    MasterScope::Inputs => post
+                        .inputs
+                        .values()
+                        .any(|node| node.audio.muted == Some(false)),
+                };
+                if unmutable {
+                    failed = Some(Failure::new(
+                        "unsupported",
+                        "Active audio capture or playback could not be muted",
+                    ));
+                } else if still_recording || still_audible {
+                    failed = Some(Failure::new(
+                        "not_applied",
+                        "Audio could not be confirmed muted",
+                    ));
+                }
+            }
         }
-        self.publish_graph(&native.snapshot());
+        self.publish_graph(&final_graph);
         if let Some(error) = failed {
             return Err(error);
         }

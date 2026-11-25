@@ -7,7 +7,7 @@ use crate::storage::{Kind, Storage};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Saved {
     identity: Identity,
     node: Node,
@@ -42,6 +42,23 @@ fn class(node: &Node) -> &str {
         .get("media.class")
         .map(String::as_str)
         .unwrap_or("")
+}
+fn live_endpoints(graph: &Graph, guard: &Guard) -> Result<Vec<Identity>> {
+    guard.inspect(graph)?;
+    Ok(graph
+        .nodes
+        .values()
+        .filter(|n| {
+            n.properties.get("device.id").and_then(|v| v.parse().ok()) == Some(guard.identity.id)
+                && matches!(class(n), "Audio/Sink" | "Audio/Source")
+                && !n.serial.is_empty()
+        })
+        .map(|n| Identity {
+            generation: graph.generation.clone(),
+            id: n.id,
+            serial: n.serial.clone(),
+        })
+        .collect())
 }
 fn endpoints(graph: &Graph, guard: &Guard) -> Result<Vec<Saved>> {
     guard.inspect(graph)?;
@@ -393,22 +410,35 @@ impl<'a> Transition<'a> {
         .await
         .map_err(|_| Failure::unknown("Audio profile did not settle before rollback"))??;
         let graph = self.native.snapshot();
-        // Best-effort mute on `after` so an un-normalizable endpoint (e.g.,
-        // missing mute state or out-of-range volume that caused `settle` to
-        // fail) never blocks switching back to `before`.
-        let prepared = match endpoints(&graph, &current) {
-            Ok(nodes) => {
-                if self.mute(&nodes, &current).await.is_ok() {
-                    nodes.into_iter().map(|n| n.identity).collect()
-                } else {
-                    Vec::new()
+        // Mute every live endpoint on `current` best-effort (even ones whose
+        // volumes exceeded 150% and failed `settle`), then switch back without
+        // letting an un-mutable endpoint trap the device on the failed profile.
+        let mut prepared = Vec::new();
+        if let Ok(identities) = live_endpoints(&graph, &current) {
+            for identity in identities {
+                if Instant::now() >= self.deadline {
+                    break;
+                }
+                if self
+                    .native
+                    .patch_guarded(
+                        identity.clone(),
+                        AudioPatch {
+                            muted: Some(true),
+                            volumes: None,
+                        },
+                        Some(current.clone()),
+                    )
+                    .await
+                    .is_ok()
+                {
+                    prepared.push(identity);
                 }
             }
-            Err(_) => Vec::new(),
-        };
+        }
         // Reissue even if the cached profile is the original: a silent write may have landed.
         self.native
-            .switch_profile(current, selection.before.clone(), prepared)
+            .switch_profile_rollback(current, selection.before.clone(), prepared)
             .await?;
         let restored = self.settle(&selection.before).await?;
         self.restore(old, &restored, &selection.before).await
@@ -564,5 +594,36 @@ mod tests {
         let patch = restore_patch(&old, &extra, 2);
         assert_eq!(patch.volumes, Some(vec![0.6]));
         assert_eq!(patch.muted, Some(true));
+    }
+    #[test]
+    fn rollback_live_endpoints_include_nodes_with_out_of_range_volumes() {
+        let (mut graph, identity) = crate::native::profiles::tests::graph();
+        graph.nodes.insert(
+            42,
+            Node {
+                id: 42,
+                serial: "420".into(),
+                name: "bt_headset_sink".into(),
+                audio: Audio {
+                    volumes: vec![2.0],
+                    muted: Some(false),
+                    ..Audio::default()
+                },
+                properties: BTreeMap::from([
+                    ("device.id".into(), "7".into()),
+                    ("media.class".into(), "Audio/Sink".into()),
+                ]),
+                ..Node::default()
+            },
+        );
+        let guard = Selection::new(&graph, identity, "headset").unwrap().before;
+        assert_eq!(endpoints(&graph, &guard).unwrap_err().code, "unsupported");
+        let live = live_endpoints(&graph, &guard).unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].id, 42);
+        assert_eq!(live[0].serial, "420");
+        // Missing mute flag must also still be returned for best-effort rollback.
+        graph.nodes.get_mut(&42).unwrap().audio.muted = None;
+        assert_eq!(live_endpoints(&graph, &guard).unwrap().len(), 1);
     }
 }

@@ -193,6 +193,51 @@ if sys.argv[1] == 'disable' and not (pathlib.Path(sys.argv[-1]).is_absolute()):
     assert not (custom_stage / '.local/libexec/omarchy-audio-control').exists()
     assert custom_service.read_text() == edited_contents
 
+    # Uninstall must preserve the installation when systemd is unreachable
+    # (both before preflight and if the manager drops mid-uninstall).
+    unreach_stage = pathlib.Path(temporary) / 'unreachable-uninstall'
+    unreach_env = dict(env)
+    unreach_env.pop('AUDIO_STAGE_FAIL_RESTART', None)
+    unreach_env.pop('AUDIO_STAGE_ACTIVE', None)
+    subprocess.run([str(installer), 'install', '--stage', str(unreach_stage), '--binary', str(binary)],
+                   check=True, capture_output=True, text=True, env=unreach_env)
+    unreach_libexec = unreach_stage / '.local/libexec/omarchy-audio-control'
+    unreach_current = (unreach_libexec / 'current').resolve()
+    unreach_service = unreach_stage / '.config/systemd/user/omarchy-audio-control.service'
+    unreach_socket = unreach_stage / '.config/systemd/user/omarchy-audio-control.socket'
+    dead_manager = pathlib.Path(temporary) / 'dead-manager'
+    dead_manager.write_text('#!/usr/bin/env python3\nimport sys\nraise SystemExit(1)\n')
+    dead_manager.chmod(0o755)
+    dead_env = dict(unreach_env, AUDIO_BACKEND_STAGE_SYSTEMCTL=str(dead_manager))
+    dead_res = subprocess.run([str(installer), 'uninstall', '--stage', str(unreach_stage)],
+                              capture_output=True, text=True, env=dead_env)
+    assert dead_res.returncode != 0, 'Uninstall succeeded despite unreachable systemd manager'
+    assert (unreach_libexec / 'current').resolve() == unreach_current
+    assert (unreach_libexec / 'unit-state').is_dir()
+    assert unreach_service.is_file() and unreach_socket.is_file()
+
+    # Even if daemon-reload succeeded, a failed is-active (exit 1) must NOT be treated as stopped.
+    mid_fail_manager = pathlib.Path(temporary) / 'mid-fail-manager'
+    mid_fail_manager.write_text('''#!/usr/bin/env python3
+import sys
+if sys.argv[1] == 'daemon-reload':
+    raise SystemExit(0)
+raise SystemExit(1)
+''')
+    mid_fail_manager.chmod(0o755)
+    mid_fail_env = dict(unreach_env, AUDIO_BACKEND_STAGE_SYSTEMCTL=str(mid_fail_manager))
+    mid_res = subprocess.run([str(installer), 'uninstall', '--stage', str(unreach_stage)],
+                             capture_output=True, text=True, env=mid_fail_env)
+    assert mid_res.returncode != 0, 'Uninstall treated failed is-active as confirmed stopped'
+    assert (unreach_libexec / 'current').resolve() == unreach_current
+    assert (unreach_libexec / 'unit-state').is_dir()
+    assert unreach_service.is_file() and unreach_socket.is_file()
+    # Once the manager is reachable again, uninstall succeeds cleanly.
+    subprocess.run([str(installer), 'uninstall', '--stage', str(unreach_stage)],
+                   check=True, capture_output=True, text=True, env=unreach_env)
+    assert not unreach_libexec.exists()
+    assert not unreach_service.exists() and not unreach_socket.exists()
+
     # Early rejection on a symlinked user unit must not leak releases or create unit-state.
     sym_stage = pathlib.Path(temporary) / 'symlink-unit'
     sym_systemd = sym_stage / '.config/systemd/user'

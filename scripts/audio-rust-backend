@@ -110,6 +110,44 @@ manager() {
   fi
 }
 
+manager_active() {
+  [[ -z $STAGE || -n ${AUDIO_BACKEND_STAGE_SYSTEMCTL:-} ]]
+}
+
+unit_confirmed_stopped() {
+  local unit=$1 rc=0
+  if ! manager_active; then
+    return 0
+  fi
+  manager is-active --quiet "$unit" 2>/dev/null || rc=$?
+  # systemctl is-active exits 3 (inactive/failed) or 4 (unknown/not-found).
+  # Exit 0 means active; exit 1 (or other) means the manager could not be queried.
+  (( rc == 3 || rc == 4 ))
+}
+
+stop_unit_for_uninstall() {
+  local unit=$1 action=$2 rc=0 state=""
+  if ! manager_active; then
+    return 0
+  fi
+  if [[ $action == disable ]]; then
+    if manager disable --now "$unit" 2>/dev/null; then return 0; fi
+  else
+    if manager stop "$unit" 2>/dev/null; then return 0; fi
+  fi
+  state=$(manager is-active "$unit" 2>/dev/null) || rc=$?
+  if (( rc == 3 || rc == 4 )); then
+    return 0
+  fi
+  # Allow a missing-unit stub manager that succeeded on preflight daemon-reload
+  # and emitted no active state; real systemctl always prints a state on exit 0.
+  if [[ ! -e $UNIT_DIR/$unit ]] && (( rc == 0 )) && [[ -z $state ]]; then
+    return 0
+  fi
+  echo "Cannot confirm $unit is stopped; preserving existing installation" >&2
+  exit 1
+}
+
 # Installed files and the selected release form one upgrade transaction. Run on
 # any failure after the first replacement, including filesystem errors/signals.
 rollback_install() {
@@ -119,14 +157,14 @@ rollback_install() {
   if $daemon_touched && [[ -z $previous ]]; then
     if ! $socket_was_enabled; then
       if ! manager disable --now "$SOCKET" 2>/dev/null; then
-        if manager is-active --quiet "$SOCKET" 2>/dev/null; then
+        if ! unit_confirmed_stopped "$SOCKET"; then
           restored=false
         fi
       fi
     fi
     if [[ -f $release/previous-units/$SERVICE ]]; then
       manager stop "$SERVICE" || restored=false
-    elif manager is-active --quiet "$SERVICE" 2>/dev/null; then
+    elif ! unit_confirmed_stopped "$SERVICE"; then
       manager stop "$SERVICE" || restored=false
     fi
   fi
@@ -330,19 +368,22 @@ case $ACTION in
     changed=false
     if [[ -L $LIBEXEC_DIR/current ]]; then had_current=true; changed=true; fi
     if [[ -d $UNIT_STATE_DIR ]]; then changed=true; fi
+    for release in "$LIBEXEC_DIR"/releases/release.*; do
+      [[ -d $release && ! -L $release && -f $release/.audio-control-release ]] || continue
+      changed=true
+      break
+    done
+    if { $changed || [[ -f $UNIT_STATE_DIR/$SOCKET.installed.sha256 ]] || [[ -f $UNIT_STATE_DIR/$SERVICE.installed.sha256 ]]; } && manager_active; then
+      manager daemon-reload || {
+        echo "Cannot reach systemd user manager; preserving existing installation" >&2
+        exit 1
+      }
+    fi
     if [[ -f $UNIT_STATE_DIR/$SOCKET.installed.sha256 ]] || $had_current; then
-      if ! manager disable --now "$SOCKET" 2>/dev/null; then
-        if [[ -e $UNIT_DIR/$SOCKET ]] && manager is-active --quiet "$SOCKET" 2>/dev/null; then
-          exit 1
-        fi
-      fi
+      stop_unit_for_uninstall "$SOCKET" disable
     fi
     if [[ -f $UNIT_STATE_DIR/$SERVICE.installed.sha256 ]] || $had_current; then
-      if ! manager stop "$SERVICE" 2>/dev/null; then
-        if [[ -e $UNIT_DIR/$SERVICE ]] && manager is-active --quiet "$SERVICE" 2>/dev/null; then
-          exit 1
-        fi
-      fi
+      stop_unit_for_uninstall "$SERVICE" stop
     fi
     restore_tmp=""
     trap '[[ -n $restore_tmp ]] && rm -f -- "$restore_tmp"' EXIT
