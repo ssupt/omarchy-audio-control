@@ -68,6 +68,9 @@ impl Service {
         if params.owner.is_empty() || params.owner.len() > 128 {
             return Err(Failure::new("invalid_params", "Invalid microphone owner"));
         }
+        if self.draining.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Failure::new("disconnected", "Audio service is stopping"));
+        }
         let native = self
             .native
             .clone()
@@ -96,7 +99,7 @@ impl Service {
             session.clip.clear();
         }
         drop(session);
-        self.set_busy(true);
+        self.set_busy_for(true, "microphone");
         self.publish_microphone(&params.owner, "starting", "");
         let prepared = FileLock::mutation().await.and_then(|lock| {
             if *receiver.borrow() == Control::Continue {
@@ -147,7 +150,16 @@ impl Service {
             } else if let Ok(clip) = result {
                 session.clip = clip;
             }
-            service.publish_microphone(&params.owner, session.clip_state(), &error);
+            let clip_state = session.clip_state();
+            drop(_lock);
+            drop(_busy);
+            drop(_transaction);
+            // Publish terminal state after releasing mutation locks so callers
+            // observing `ready`/`idle` can immediately start another operation,
+            // while still holding `session` so a new microphone test cannot
+            // publish ahead of this terminal state.
+            service.publish_microphone(&params.owner, clip_state, &error);
+            drop(session);
         });
         Ok(json!({"started":true}))
     }

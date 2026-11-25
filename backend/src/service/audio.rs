@@ -179,8 +179,21 @@ impl Service {
                 "Requested volume exceeds the configured limit",
             ));
         }
+        let clear_master_memory =
+            crate::routing::stream_direction(node).is_some() && params.patch.muted.is_some();
+        let identity_key = (
+            params.identity.generation.clone(),
+            params.identity.id,
+            params.identity.serial.clone(),
+        );
         let _external_lock = FileLock::mutation().await?;
         native.patch(params.identity, params.patch).await?;
+        if clear_master_memory {
+            let mut state = self.master_muted_streams.lock().unwrap();
+            if state.generation == identity_key.0 {
+                state.streams.remove(&(identity_key.1, identity_key.2));
+            }
+        }
         Ok(json!({"outcome": "applied"}))
     }
 
@@ -201,22 +214,87 @@ impl Service {
                 "Audio graph changed; refresh before retrying",
             ));
         }
-        let collect_targets = |graph: &native::Graph, muted: bool| -> Vec<Identity> {
+        if graph.nodes.len() > 4096 || graph.links.len() > 8192 {
+            return Err(Failure::new(
+                "too_large",
+                "Audio graph is too large to mute safely",
+            ));
+        }
+        let collect_targets = |graph: &native::Graph, muted: bool| -> Vec<(Identity, bool)> {
             let active = crate::outputs::master_targets(graph);
-            let nodes: Box<dyn Iterator<Item = &native::Node> + '_> = match params.scope {
-                MasterScope::All => Box::new(
-                    active
-                        .outputs
-                        .values()
-                        .chain(active.inputs.values())
-                        .copied(),
-                ),
-                MasterScope::Inputs => Box::new(active.inputs.values().copied()),
+            let mut seen = std::collections::BTreeSet::new();
+            let mut targets = Vec::new();
+            let mut push_node = |node: &native::Node, allow_stream: bool| {
+                let is_stream = crate::routing::stream_direction(node).is_some();
+                if is_stream && !allow_stream {
+                    return;
+                }
+                if seen.insert(node.id) && node.audio.muted.is_some_and(|current| current != muted)
+                {
+                    targets.push((crate::routing::identity(graph, node), is_stream));
+                }
             };
-            nodes
-                .filter(|node| node.audio.muted != Some(muted))
-                .map(|node| crate::routing::identity(graph, node))
-                .collect()
+            match params.scope {
+                MasterScope::All => {
+                    // When unmuting, only unmute endpoints here; streams are restored
+                    // strictly from the identities that master mute actually muted.
+                    for node in active.outputs.values().chain(active.inputs.values()) {
+                        push_node(node, muted);
+                    }
+                }
+                MasterScope::Inputs => {
+                    for node in active.inputs.values() {
+                        push_node(node, muted);
+                    }
+                }
+            }
+            if !muted {
+                let remembered: Vec<(u32, String)> = {
+                    let state = self.master_muted_streams.lock().unwrap();
+                    if state.generation == params.generation {
+                        state.streams.iter().cloned().collect()
+                    } else {
+                        Vec::new()
+                    }
+                };
+                for (id, serial) in remembered {
+                    if let Some(node) = graph.nodes.get(&id) {
+                        if node.serial != serial {
+                            continue;
+                        }
+                        let direction = crate::routing::stream_direction(node);
+                        let in_scope = match params.scope {
+                            MasterScope::All => direction.is_some(),
+                            MasterScope::Inputs => {
+                                direction == Some(crate::routing::Direction::Recording)
+                            }
+                        };
+                        if in_scope {
+                            push_node(node, true);
+                        }
+                    }
+                }
+            }
+            targets
+        };
+        let record_stream_mute = |identity: &Identity, is_stream: bool, muted: bool| {
+            if !is_stream {
+                return;
+            }
+            let mut state = self.master_muted_streams.lock().unwrap();
+            if state.generation != identity.generation {
+                state.generation = identity.generation.clone();
+                state.streams.clear();
+            }
+            if muted {
+                if state.streams.len() < 256 {
+                    state.streams.insert((identity.id, identity.serial.clone()));
+                }
+            } else {
+                state
+                    .streams
+                    .remove(&(identity.id, identity.serial.clone()));
+            }
         };
         let node_gone = |graph: &native::Graph, identity: &Identity| {
             graph.generation == params.generation
@@ -229,7 +307,7 @@ impl Service {
         let targets = collect_targets(&graph, params.muted);
         let mut attempted = std::collections::BTreeSet::new();
         let mut failed: Option<Failure> = None;
-        for identity in targets {
+        for (identity, is_stream) in targets {
             if tokio::time::Instant::now() >= deadline {
                 failed = Some(Failure::unknown(
                     "Audio change was not confirmed by PipeWire",
@@ -249,9 +327,12 @@ impl Service {
             )
             .await
             {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => {
+                    record_stream_mute(&identity, is_stream, params.muted);
+                }
                 Ok(Err(error)) => {
                     if node_gone(&native.snapshot(), &identity) {
+                        record_stream_mute(&identity, is_stream, false);
                         continue;
                     }
                     if failed.is_none() || error.outcome == "unknown" {
@@ -270,11 +351,13 @@ impl Service {
         if params.muted && tokio::time::Instant::now() < deadline {
             let current = native.snapshot();
             if current.ready && current.connected && current.generation == params.generation {
-                let remaining: Vec<Identity> = collect_targets(&current, true)
+                let remaining: Vec<(Identity, bool)> = collect_targets(&current, true)
                     .into_iter()
-                    .filter(|identity| !attempted.contains(&(identity.id, identity.serial.clone())))
+                    .filter(|(identity, _)| {
+                        !attempted.contains(&(identity.id, identity.serial.clone()))
+                    })
                     .collect();
-                for identity in remaining {
+                for (identity, is_stream) in remaining {
                     if tokio::time::Instant::now() >= deadline {
                         failed = Some(Failure::unknown(
                             "Audio change was not confirmed by PipeWire",
@@ -293,7 +376,9 @@ impl Service {
                     )
                     .await
                     {
-                        Ok(Ok(())) => {}
+                        Ok(Ok(())) => {
+                            record_stream_mute(&identity, is_stream, true);
+                        }
                         Ok(Err(error)) => {
                             if node_gone(&native.snapshot(), &identity) {
                                 continue;
@@ -312,7 +397,69 @@ impl Service {
                 }
             }
         }
-        self.publish_graph(&native.snapshot());
+        let final_graph = native.snapshot();
+        if !params.muted {
+            // Prune entries whose nodes disappeared or are no longer muted.
+            let mut state = self.master_muted_streams.lock().unwrap();
+            if state.generation != final_graph.generation {
+                state.generation = final_graph.generation.clone();
+                state.streams.clear();
+            } else {
+                state.streams.retain(|(id, serial)| {
+                    final_graph.nodes.get(id).is_some_and(|node| {
+                        node.serial == *serial && node.audio.muted == Some(true)
+                    })
+                });
+            }
+        } else if failed.is_none() {
+            if !final_graph.ready
+                || !final_graph.connected
+                || final_graph.generation != params.generation
+            {
+                failed = Some(Failure::unknown(
+                    "Audio graph changed before mute was confirmed",
+                ));
+            } else {
+                let post = crate::outputs::master_targets(&final_graph);
+                let unmutable = match params.scope {
+                    MasterScope::All => {
+                        post.unmutable_outputs
+                            || post.unmutable_inputs
+                            || (post.outputs.is_empty()
+                                && post.inputs.is_empty()
+                                && (post.default_output_unmutable || post.default_input_unmutable))
+                    }
+                    MasterScope::Inputs => {
+                        post.unmutable_inputs
+                            || (post.inputs.is_empty() && post.default_input_unmutable)
+                    }
+                };
+                let still_recording = post.recording_active && !post.recording_muted;
+                let still_audible = match params.scope {
+                    MasterScope::All => post
+                        .outputs
+                        .values()
+                        .chain(post.inputs.values())
+                        .any(|node| node.audio.muted == Some(false)),
+                    MasterScope::Inputs => post
+                        .inputs
+                        .values()
+                        .any(|node| node.audio.muted == Some(false)),
+                };
+                if unmutable {
+                    failed = Some(Failure::new(
+                        "unsupported",
+                        "Active audio capture or playback could not be muted",
+                    ));
+                } else if still_recording || still_audible {
+                    failed = Some(Failure::new(
+                        "not_applied",
+                        "Audio could not be confirmed muted",
+                    ));
+                }
+            }
+        }
+        self.publish_graph(&final_graph);
         if let Some(error) = failed {
             return Err(error);
         }
@@ -344,6 +491,7 @@ impl Service {
         let rules = snapshot["stores"]["rules"]
             .is_object()
             .then_some(&snapshot["stores"]["rules"]);
+        let mut group_reconcile = None;
         let result = if request.method == "scene.apply" {
             crate::scenes::apply(
                 native,
@@ -351,11 +499,15 @@ impl Service {
                 rules,
                 &request.params::<Apply>()?.scene,
                 overdrive,
+                &mut group_reconcile,
             )
             .await
         } else {
             crate::scenes::capture(native, rules, &request.params::<Capture>()?.name, overdrive)
         };
+        if let Some(reconciled) = group_reconcile {
+            self.apply_reconcile_state(reconciled);
+        }
         self.reload_stores().await?;
         result
     }

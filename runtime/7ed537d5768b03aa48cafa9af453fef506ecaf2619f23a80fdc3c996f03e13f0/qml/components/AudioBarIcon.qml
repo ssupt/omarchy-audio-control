@@ -30,7 +30,7 @@ Item {
     visible: root.recordingCount > 0
     width: Math.max(badgeHeight, badgeText.implicitWidth + Style.space(3))
     height: badgeHeight
-    radius: height / 2
+    radius: 0
     color: root.urgent
     borderSpec: Border.flat(root.badgeBorder, 1)
     anchors.right: parent.right

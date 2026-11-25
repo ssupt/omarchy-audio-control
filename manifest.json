@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "ssupt.audio-control",
   "name": "Advanced Audio Control",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "author": "ssupt",
   "description": "Advanced PipeWire and WirePlumber audio mixer for Omarchy: devices, multi-output groups, Bluetooth codecs, safety policies, microphone privacy, audio scenes, persistent routing rules, graph and service diagnostics, channel tests, support reports, and guarded recovery",
   "kinds": [
@@ -11,9 +11,9 @@
     "service"
   ],
   "entryPoints": {
-    "barWidget": "runtime/45e31847254d264344920dcf5f0ca85724e24bc9e8bcbaa7866faeb60c994625/qml/panels/Panel.qml",
-    "panel": "runtime/45e31847254d264344920dcf5f0ca85724e24bc9e8bcbaa7866faeb60c994625/qml/panels/AdvancedAudio.qml",
-    "service": "runtime/45e31847254d264344920dcf5f0ca85724e24bc9e8bcbaa7866faeb60c994625/qml/core/Service.qml"
+    "barWidget": "runtime/7ed537d5768b03aa48cafa9af453fef506ecaf2619f23a80fdc3c996f03e13f0/qml/panels/Panel.qml",
+    "panel": "runtime/7ed537d5768b03aa48cafa9af453fef506ecaf2619f23a80fdc3c996f03e13f0/qml/panels/AdvancedAudio.qml",
+    "service": "runtime/7ed537d5768b03aa48cafa9af453fef506ecaf2619f23a80fdc3c996f03e13f0/qml/core/Service.qml"
   },
   "barWidget": {
     "displayName": "Advanced Audio Control",

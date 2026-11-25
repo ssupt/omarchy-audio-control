@@ -113,6 +113,27 @@ async fn connect_ready(path: &Path) -> io::Result<UnixStream> {
     Ok(socket)
 }
 
+fn spawn_plugin_daemon() -> io::Result<tokio::process::Child> {
+    // No shell, downloaded code, installation hooks or user units.
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .arg("--plugin-daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: setsid is async-signal-safe. A shell reload may terminate
+    // the relay's process group; accepted work belongs to the daemon.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn()
+}
+
 pub async fn relay() -> io::Result<()> {
     let stdin = Pipe::new(0)?;
     let stdout = Pipe::new(1)?;
@@ -120,24 +141,8 @@ pub async fn relay() -> io::Result<()> {
     let socket = match connect_ready(&path).await {
         Ok(socket) => socket,
         Err(_) => {
-            // No shell, downloaded code, installation hooks or user units.
-            let mut command = Command::new(std::env::current_exe()?);
-            command
-                .arg("--plugin-daemon")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            // SAFETY: setsid is async-signal-safe. A shell reload may terminate
-            // the relay's process group; accepted work belongs to the daemon.
-            unsafe {
-                command.pre_exec(|| {
-                    if libc::setsid() < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-            let mut child = command.spawn()?;
+            let mut child = Some(spawn_plugin_daemon()?);
+            let mut spawns = 1u8;
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 // Concurrent launches converge on the same locked socket. Even
@@ -145,13 +150,26 @@ pub async fn relay() -> io::Result<()> {
                 if let Ok(socket) = connect_ready(&path).await {
                     break socket;
                 }
-                let _ = child.try_wait()?;
+                if let Some(running) = child.as_mut() {
+                    if running.try_wait()?.is_some() {
+                        child = None;
+                    }
+                }
                 if Instant::now() >= deadline {
                     return Err(io::Error::other(
                         "Audio backend could not start; check runtime permissions and PipeWire dependencies",
                     ));
                 }
                 sleep(Duration::from_millis(25)).await;
+                // If an exiting daemon held the socket lock while our first
+                // child tried to bind, respawn once the old daemon releases it.
+                if child.is_none() && spawns < 8 {
+                    if let Ok(socket) = connect_ready(&path).await {
+                        break socket;
+                    }
+                    child = Some(spawn_plugin_daemon()?);
+                    spawns += 1;
+                }
             }
         }
     };

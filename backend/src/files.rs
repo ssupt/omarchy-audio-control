@@ -212,9 +212,13 @@ pub fn write_json(path: &Path, value: &Value, limit: usize) -> Result<()> {
     temporary
         .persist(path)
         .map_err(|error| Failure::from(error.error))?;
-    File::open(parent)?.sync_all().map_err(|_| {
-        Failure::unknown("Configuration was saved but directory durability could not be confirmed")
-    })?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| {
+            Failure::unknown(
+                "Configuration was saved but directory durability could not be confirmed",
+            )
+        })?;
     Ok(())
 }
 

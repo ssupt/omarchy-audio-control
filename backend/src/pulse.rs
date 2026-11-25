@@ -72,7 +72,11 @@ impl Session {
             }
         }
         if operation.get_state() != OperationState::Done {
-            return Err(unavailable());
+            return Err(if mutation {
+                Failure::unknown("The audio server did not confirm the output group change")
+            } else {
+                unavailable()
+            });
         }
         Ok(())
     }
@@ -87,7 +91,7 @@ impl Session {
                 .push(item.map_owned(SinkInfo::to_owned), 512);
         });
         self.finish(op, false)?;
-        Rc::try_unwrap(list).ok().unwrap().into_inner().result()
+        std::mem::take(&mut *list.borrow_mut()).result()
     }
 
     pub fn sources(&mut self) -> Result<Vec<SourceInfo<'static>>> {
@@ -100,7 +104,7 @@ impl Session {
                 .push(item.map_owned(SourceInfo::to_owned), 512);
         });
         self.finish(op, false)?;
-        Rc::try_unwrap(list).ok().unwrap().into_inner().result()
+        std::mem::take(&mut *list.borrow_mut()).result()
     }
 
     pub fn modules(&mut self) -> Result<Vec<ModuleInfo<'static>>> {
@@ -113,7 +117,7 @@ impl Session {
                 .push(item.map_owned(ModuleInfo::to_owned), 1024);
         });
         self.finish(op, false)?;
-        Rc::try_unwrap(list).ok().unwrap().into_inner().result()
+        std::mem::take(&mut *list.borrow_mut()).result()
     }
 
     pub fn sink_inputs(&mut self) -> Result<Vec<SinkInputInfo<'static>>> {
@@ -129,7 +133,7 @@ impl Session {
                     .push(item.map_owned(SinkInputInfo::to_owned), 4096);
             });
         self.finish(op, false)?;
-        Rc::try_unwrap(list).ok().unwrap().into_inner().result()
+        std::mem::take(&mut *list.borrow_mut()).result()
     }
 
     pub fn unmute_sink_input(&mut self, index: u32) -> Result<()> {

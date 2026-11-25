@@ -192,4 +192,113 @@ if sys.argv[1] == 'disable' and not (pathlib.Path(sys.argv[-1]).is_absolute()):
                    check=True, capture_output=True, text=True, env=strict_env)
     assert not (custom_stage / '.local/libexec/omarchy-audio-control').exists()
     assert custom_service.read_text() == edited_contents
+
+    # Uninstall must preserve the installation when systemd is unreachable
+    # (both before preflight and if the manager drops mid-uninstall).
+    unreach_stage = pathlib.Path(temporary) / 'unreachable-uninstall'
+    unreach_env = dict(env)
+    unreach_env.pop('AUDIO_STAGE_FAIL_RESTART', None)
+    unreach_env.pop('AUDIO_STAGE_ACTIVE', None)
+    subprocess.run([str(installer), 'install', '--stage', str(unreach_stage), '--binary', str(binary)],
+                   check=True, capture_output=True, text=True, env=unreach_env)
+    unreach_libexec = unreach_stage / '.local/libexec/omarchy-audio-control'
+    unreach_current = (unreach_libexec / 'current').resolve()
+    unreach_service = unreach_stage / '.config/systemd/user/omarchy-audio-control.service'
+    unreach_socket = unreach_stage / '.config/systemd/user/omarchy-audio-control.socket'
+    dead_manager = pathlib.Path(temporary) / 'dead-manager'
+    dead_manager.write_text('#!/usr/bin/env python3\nimport sys\nraise SystemExit(1)\n')
+    dead_manager.chmod(0o755)
+    dead_env = dict(unreach_env, AUDIO_BACKEND_STAGE_SYSTEMCTL=str(dead_manager))
+    dead_res = subprocess.run([str(installer), 'uninstall', '--stage', str(unreach_stage)],
+                              capture_output=True, text=True, env=dead_env)
+    assert dead_res.returncode != 0, 'Uninstall succeeded despite unreachable systemd manager'
+    assert (unreach_libexec / 'current').resolve() == unreach_current
+    assert (unreach_libexec / 'unit-state').is_dir()
+    assert unreach_service.is_file() and unreach_socket.is_file()
+
+    # Even if daemon-reload succeeded, a failed is-active (exit 1) must NOT be treated as stopped.
+    mid_fail_manager = pathlib.Path(temporary) / 'mid-fail-manager'
+    mid_fail_manager.write_text('''#!/usr/bin/env python3
+import sys
+if sys.argv[1] == 'daemon-reload':
+    raise SystemExit(0)
+raise SystemExit(1)
+''')
+    mid_fail_manager.chmod(0o755)
+    mid_fail_env = dict(unreach_env, AUDIO_BACKEND_STAGE_SYSTEMCTL=str(mid_fail_manager))
+    mid_res = subprocess.run([str(installer), 'uninstall', '--stage', str(unreach_stage)],
+                             capture_output=True, text=True, env=mid_fail_env)
+    assert mid_res.returncode != 0, 'Uninstall treated failed is-active as confirmed stopped'
+    assert (unreach_libexec / 'current').resolve() == unreach_current
+    assert (unreach_libexec / 'unit-state').is_dir()
+    assert unreach_service.is_file() and unreach_socket.is_file()
+    # Once the manager is reachable again, uninstall succeeds cleanly.
+    subprocess.run([str(installer), 'uninstall', '--stage', str(unreach_stage)],
+                   check=True, capture_output=True, text=True, env=unreach_env)
+    assert not unreach_libexec.exists()
+    assert not unreach_service.exists() and not unreach_socket.exists()
+
+    # Early rejection on a symlinked user unit must not leak releases or create unit-state.
+    sym_stage = pathlib.Path(temporary) / 'symlink-unit'
+    sym_systemd = sym_stage / '.config/systemd/user'
+    sym_systemd.mkdir(parents=True)
+    (sym_stage / 'real.service').write_text(custom_contents)
+    (sym_systemd / 'omarchy-audio-control.service').symlink_to(sym_stage / 'real.service')
+    sym_res = subprocess.run([str(installer), 'install', '--stage', str(sym_stage), '--binary', str(binary)],
+                             capture_output=True, text=True, env=legacy_env)
+    assert sym_res.returncode != 0
+    assert not (sym_stage / '.local/libexec/omarchy-audio-control').exists(), 'Early rejection leaked libexec/unit-state'
+
+    # Reject path-traversal --stage values like /..
+    bad_stage = subprocess.run([str(installer), 'install', '--stage', '/..', '--binary', str(binary)],
+                               capture_output=True, text=True, env=legacy_env)
+    assert bad_stage.returncode == 2
+
+    # Fresh install failing during mv before daemon-reload must not invoke disable/stop on unloaded units
+    # and must clean up the staged release directory when rollback succeeds.
+    fresh_stage = pathlib.Path(temporary) / 'fresh-mv-fail'
+    fresh_log = pathlib.Path(temporary) / 'fresh-manager.log'
+    strict_fresh = pathlib.Path(temporary) / 'strict-fresh-manager'
+    strict_fresh.write_text('''#!/usr/bin/env python3
+import os, pathlib, sys
+with pathlib.Path(os.environ['AUDIO_STAGE_LOG']).open('a') as stream:
+    stream.write(' '.join(sys.argv[1:]) + '\\n')
+if sys.argv[1] in ('is-active', 'is-enabled'):
+    raise SystemExit(3)
+if sys.argv[1] in ('disable', 'stop'):
+    raise SystemExit(1)
+''')
+    strict_fresh.chmod(0o755)
+    fresh_marker = fresh_log.with_suffix('.move-failed')
+    if fresh_marker.exists():
+        fresh_marker.unlink()
+    fresh_env = dict(os.environ,
+                     AUDIO_BACKEND_STAGE_SYSTEMCTL=str(strict_fresh),
+                     AUDIO_STAGE_LOG=str(fresh_log),
+                     AUDIO_STAGE_REAL_MV=real_mv,
+                     PATH=str(fault_bin) + os.pathsep + os.environ['PATH'])
+    fresh_res = subprocess.run([str(installer), 'install', '--stage', str(fresh_stage), '--binary', str(binary)],
+                               capture_output=True, text=True, env=fresh_env)
+    assert fresh_res.returncode != 0
+    assert 'previous installation was restored' in fresh_res.stderr, fresh_res.stderr
+    assert not (fresh_stage / '.local/libexec/omarchy-audio-control').exists(), 'Clean fresh rollback leaked release dir'
+
+    # Validate staged unit files with systemd-analyze when available.
+    if shutil.which('systemd-analyze'):
+        verify_stage = pathlib.Path(temporary) / 'verify home'
+        verify_runtime = pathlib.Path(temporary) / 'verify-runtime'
+        verify_runtime.mkdir(mode=0o700)
+        verify_env = dict(os.environ,
+                          HOME=str(verify_stage),
+                          XDG_CONFIG_HOME=str(verify_stage / '.config'),
+                          XDG_RUNTIME_DIR=str(verify_runtime),
+                          AUDIO_BACKEND_STAGE_SYSTEMCTL=str(manager),
+                          AUDIO_STAGE_LOG=temporary + '/verify-manager.log')
+        subprocess.run([str(installer), 'install', '--stage', str(verify_stage), '--binary', str(binary)],
+                       check=True, capture_output=True, text=True, env=verify_env)
+        subprocess.run([
+            'systemd-analyze', '--user', '--man=no', 'verify',
+            str(verify_stage / '.config/systemd/user/omarchy-audio-control.service'),
+            str(verify_stage / '.config/systemd/user/omarchy-audio-control.socket'),
+        ], check=True, capture_output=True, text=True, env=verify_env)
 print('PASS: staged installation, active upgrade, rollback, directory modes, custom unit restoration, legacy uninstall, and user edit retention')

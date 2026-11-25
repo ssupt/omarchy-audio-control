@@ -427,10 +427,20 @@ pub async fn set(native: &Handle, params: &Set) -> Result<()> {
         }
         .await;
         return Err(if restored.is_ok() {
-            Failure::new(
-                "not_applied",
-                "Application route was not applied; its previous state was restored",
-            )
+            let post = native.snapshot();
+            if post.generation == params.identity.generation
+                && post
+                    .nodes
+                    .get(&params.identity.id)
+                    .is_none_or(|n| n.serial != params.identity.serial)
+            {
+                Failure::new("stale_node", "Audio device or stream has been replaced")
+            } else {
+                Failure::new(
+                    "not_applied",
+                    "Application route was not applied; its previous state was restored",
+                )
+            }
         } else {
             Failure::unknown("Application route could not be confirmed or restored")
         });

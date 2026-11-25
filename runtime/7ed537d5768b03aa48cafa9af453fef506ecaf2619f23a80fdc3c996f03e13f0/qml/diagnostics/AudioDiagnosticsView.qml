@@ -193,7 +193,7 @@ Column {
             Rectangle {
               width: Style.space(6)
               height: width
-              radius: width / 2
+              radius: 0
               color: modelData.active ? root.foreground : root.urgent
               anchors.verticalCenter: parent.verticalCenter
             }
@@ -443,7 +443,8 @@ Column {
           : "A Wayland clipboard command is not available.")
       icon: "󰆏"
       busy: root.controller.copying
-      actionEnabled: root.snapshot.capabilities.supportReport
+      actionEnabled: root.controller.serviceReady
+        && root.snapshot.capabilities.supportReport
         && root.snapshot.capabilities.clipboard && !root.controller.refreshing
         && !root.controller.speakerTesting && !root.controller.recovering
       hasCursor: root.tabActive && root.cursorActive && root.selectedIndex === 2

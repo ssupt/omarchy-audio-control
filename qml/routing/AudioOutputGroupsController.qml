@@ -17,8 +17,14 @@ Item {
     service.request("groups." + action, params, function(result, failure) {
       root.busy = false
       root.error = failure ? failure.message : ""
+      var code = 0
+      if (failure) {
+        if (failure.outcome === "unknown") code = 4
+        else if (failure.code === "group_in_use" || failure.code === "member_unavailable") code = 3
+        else code = 1
+      }
       root.operationFinished(action, String(result && result.id || params.id || ""),
-        !failure, failure ? (failure.outcome === "unknown" ? 4 : 3) : 0)
+        !failure, code)
     }, { mutating: true, timeout: 35000 })
     return true
   }

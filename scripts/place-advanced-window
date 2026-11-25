@@ -1,6 +1,7 @@
 #!/bin/bash
 
 set -euo pipefail
+export LC_ALL=C
 
 (( $# == 0 )) || {
   echo "Usage: place-advanced-window" >&2
@@ -16,7 +17,7 @@ workspace_json=$(timeout 2 hyprctl activeworkspace -j 2>/dev/null |
 (( ${#workspace_json} <= maximum_hyprland_bytes )) || exit 1
 target_workspace=$(jq -r 'if type == "object" then (.id // empty) else empty end' \
   <<<"$workspace_json") || exit 1
-[[ $target_workspace =~ ^[1-9][0-9]*$ ]] || exit 1
+[[ $target_workspace =~ ^-?[1-9][0-9]*$ ]] || exit 1
 
 for (( attempt = 0; attempt < 40; attempt++ )); do
   clients_json=$(timeout 2 hyprctl clients -j 2>/dev/null |

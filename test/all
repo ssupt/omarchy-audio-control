@@ -773,6 +773,21 @@ jq -e '
   and .defaults == {"output":"headphones","input":"new-microphone"}
   and .bluetoothProfiles == {"001122334455":"a2dp-aac"}
 ' "$shared_preferences" >/dev/null || fail "shared audio preferences"
+
+# Evict oldest Bluetooth profile entries past the 128 cap so new saves persist.
+jq -nc '
+  {version:1, defaults:{output:"",input:""}, bluetoothProfiles:(
+    reduce range(0; 128) as $i ({};
+      .["aabbccdd" + ((($i / 100 | floor) | tostring) + ((($i / 10 | floor) % 10) | tostring) + (($i % 10) | tostring) + "0")] = "a2dp")
+  )}
+' >"$shared_preferences"
+OMARCHY_AUDIO_PREFERENCES_FILE="$shared_preferences" \
+  "$ROOT/scripts/audio-preferences" set-profile ff:ee:dd:cc:bb:aa a2dp-ldac
+jq -e '
+  (.bluetoothProfiles | length) == 128
+  and .bluetoothProfiles["ffeeddccbbaa"] == "a2dp-ldac"
+  and (.bluetoothProfiles | has("aabbccdd0000") | not)
+' "$shared_preferences" >/dev/null || fail "bluetooth profile preference eviction"
 echo "PASS: shared audio preferences"
 rm -f -- "$shared_preferences" "$shared_preferences_lock" \
   "$invalid_preferences" "$invalid_preferences_lock" \
@@ -858,6 +873,17 @@ if "$ROOT/scripts/audio-app-rules" set-alias speakers Desk >/dev/null 2>&1; then
 fi
 [[ $(<"$rules_file") == "$future_rules_before" ]] ||
   fail "future-version audio rules overwritten"
+
+# Parity with Rust storage normalization: drop non-string aliases, reject
+# trailing-newline group IDs, and reject float version 1.0.
+printf '%s\n' '{"version":1,"devices":{"aliases":{"speakers":null,"mic":false,"good":"Desk"}},"outputGroups":[{"id":"0123456789abcdef\n","name":"Bad","sink":"omarchy_audio_group_0123456789abcdef\n","members":["a","b"]}]}' >"$rules_file"
+normalized_rules=$("$ROOT/scripts/audio-app-rules" show)
+jq -e '.devices.aliases == {"good":"Desk"} and .outputGroups == []' <<<"$normalized_rules" >/dev/null ||
+  fail "audio-app-rules normalization parity with Rust"
+printf '%s\n' '{"version":1.0,"appRules":[]}' >"$rules_file"
+if "$ROOT/scripts/audio-app-rules" show >/dev/null 2>&1; then
+  fail "audio-app-rules accepted float version 1.0"
+fi
 unset OMARCHY_AUDIO_RULES_FILE
 echo "PASS: application rules and device preference store"
 rm -rf -- "$rules_dir"
@@ -945,6 +971,21 @@ if AUDIO_CONTROL_MENU_FILE="$menu_file" AUDIO_CONTROL_SKIP_MENU_REFRESH=1 \
   fail "syntactically invalid JSONC menu was rewritten"
 fi
 [[ $(<"$menu_file") == "$invalid_menu_before" ]] || fail "invalid JSONC menu changed"
+
+# CRLF endings, orphaned marker preservation, and dash-prefixed filenames.
+printf '{\r\n  // Added by ssupt.audio-control\r\n  "personal.notes": {"label":"Keep"}\r\n}\r\n' >"$menu_file"
+AUDIO_CONTROL_MENU_FILE="$menu_file" AUDIO_CONTROL_SKIP_MENU_REFRESH=1 \
+  "$ROOT/scripts/audio-menu-entry" install
+AUDIO_CONTROL_MENU_FILE="$menu_file" AUDIO_CONTROL_SKIP_MENU_REFRESH=1 \
+  "$ROOT/scripts/audio-menu-entry" remove
+grep -q '// Added by ssupt.audio-control' "$menu_file" ||
+  fail "orphaned menu marker comment was dropped"
+! grep -q '"setup.audio"' "$menu_file" || fail "CRLF menu entry was not removed"
+dash_menu="$menu_tmp/-leading-dash.jsonc"
+printf '%s\n' '{"personal.notes":{"label":"Safe"}}' >"$dash_menu"
+AUDIO_CONTROL_MENU_FILE="$dash_menu" AUDIO_CONTROL_SKIP_MENU_REFRESH=1 \
+  "$ROOT/scripts/audio-menu-entry" install
+grep -q '"setup.audio"' "$dash_menu" || fail "dash-prefixed menu filename failed"
 echo "PASS: menu integration"
 
 jq -e '

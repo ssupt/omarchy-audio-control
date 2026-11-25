@@ -20,6 +20,7 @@ CursorSurface {
   signal menuToggled(bool open)
 
   property bool memberMenuReportedOpen: false
+  readonly property bool nameFocused: groupNameField.activeFocus
 
   readonly property bool ready: groupName.trim() !== ""
     && selectedMembers && selectedMembers.length >= 2 && !busy
@@ -34,7 +35,7 @@ CursorSurface {
       groupNameField.forceActiveFocus()
       groupNameField.selectAll()
     } else if (!root.selectedMembers || root.selectedMembers.length < 2) {
-      memberSelect.toggle()
+      if (memberSelect.enabled) memberSelect.toggle()
     } else if (root.ready) {
       root.createRequested()
     }
@@ -49,13 +50,20 @@ CursorSurface {
   function syncMemberValues() {
     memberSelect.values = root.selectedMembers || []
   }
+  function syncNameText() {
+    if (groupNameField.text !== root.groupName) groupNameField.text = root.groupName
+  }
   function focusName() {
     groupNameField.forceActiveFocus()
     groupNameField.selectAll()
   }
 
+  onGroupNameChanged: syncNameText()
   onSelectedMembersChanged: syncMemberValues()
-  Component.onCompleted: syncMemberValues()
+  Component.onCompleted: {
+    syncNameText()
+    syncMemberValues()
+  }
   Component.onDestruction: reportMemberMenu(false)
 
   Row {
@@ -83,13 +91,14 @@ CursorSurface {
         border.width: 1
         border.color: groupNameField.activeFocus ? Commons.Color.accent
           : Qt.darker(root.foreground, 1.8)
-        radius: Style.space(3)
+        radius: 0
       }
       onTextEdited: root.nameEdited(text)
       onAccepted: {
         if (root.ready) root.createRequested()
-        else memberSelect.toggle()
+        else if (memberSelect.enabled) memberSelect.toggle()
       }
+      Keys.onEscapePressed: groupNameField.focus = false
       onActiveFocusChanged: if (activeFocus) root.cursorRequested()
     }
 

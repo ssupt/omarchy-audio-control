@@ -84,6 +84,7 @@ jobs:
           AUDIO_REQUIRE_QML: "1"
           AUDIO_TEST_OMARCHY_SHELL: "${{ github.workspace }}/omarchy/shell"
         run: |
+          /usr/lib/qt6/bin/qmllint --import=disable --unqualified=disable --missing-type=disable --missing-property=disable --unresolved-type=disable --access-singleton-via-object=disable qml/*/*.qml
           python test/integration/text_rendering.py
           python test/integration/panel_lifecycle.py
           cargo build --locked --manifest-path backend/Cargo.toml

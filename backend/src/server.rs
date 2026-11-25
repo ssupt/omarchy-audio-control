@@ -294,33 +294,59 @@ where
     let mut subscribed = false;
     let mut last_revision = None;
     let mut lease = None;
+    let mut input_closed = false;
     let mut operations = JoinSet::<(String, crate::protocol::Result<Value>)>::new();
     let handshake_deadline = Instant::now() + FRAME_TIMEOUT;
     loop {
+        if *shutdown.borrow() {
+            return Ok(());
+        }
+        if input_closed {
+            if operations.is_empty() {
+                return Ok(());
+            }
+            tokio::select! {
+                _ = shutdown.changed() => return Ok(()),
+                Some(completed) = operations.join_next() => {
+                    let (id, result) = completed.map_err(io::Error::other)?;
+                    if subscribed {
+                        write_latest_snapshot(&mut writer, &mut state, &mut last_revision).await?;
+                    }
+                    write_frame(&mut writer, &Response::new(Some(&id), result)).await?;
+                }
+            }
+            continue;
+        }
         let read = read_frame(&mut reader);
         tokio::pin!(read);
         let incoming = loop {
             tokio::select! {
-                biased;
                 _ = shutdown.changed() => return Ok(()),
-                incoming = &mut read => break incoming,
+                _ = tokio::time::sleep_until(handshake_deadline), if !negotiated => {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "Handshake timed out"));
+                }
                 Some(completed) = operations.join_next(), if !operations.is_empty() => {
-                    let (id,result) = completed.map_err(io::Error::other)?;
+                    let (id, result) = completed.map_err(io::Error::other)?;
                     if subscribed {
                         write_latest_snapshot(&mut writer, &mut state, &mut last_revision).await?;
                     }
-                    write_frame(&mut writer,&Response::new(Some(&id),result)).await?;
-                },
-                _ = tokio::time::sleep_until(handshake_deadline), if !negotiated => return Err(io::Error::new(io::ErrorKind::TimedOut, "Handshake timed out")),
+                    write_frame(&mut writer, &Response::new(Some(&id), result)).await?;
+                }
                 changed = state.changed(), if subscribed => {
-                    if changed.is_err() { return Ok(()); }
+                    if changed.is_err() {
+                        return Ok(());
+                    }
                     write_latest_snapshot(&mut writer, &mut state, &mut last_revision).await?;
                 }
+                incoming = &mut read => break incoming,
             }
         };
         let frame = match incoming {
             Ok(Some(frame)) => frame,
-            Ok(None) => return Ok(()),
+            Ok(None) => {
+                input_closed = true;
+                continue;
+            }
             Err(error) => {
                 let failure = Failure::new("invalid_frame", error.to_string());
                 let _ = write_frame(&mut writer, &Response::new(None, Err(failure))).await;
@@ -403,6 +429,7 @@ where
 
 pub async fn serve_listener(
     listener: StdListener,
+    bound: Option<BoundSocket>,
     service: Arc<Service>,
     mut shutdown: watch::Receiver<bool>,
 ) -> io::Result<()> {
@@ -440,6 +467,10 @@ pub async fn serve_listener(
             }
         }
     }
+    // Release the listening socket and lock immediately so a replacement daemon
+    // can bind while existing clients and mutations finish draining.
+    drop(listener);
+    drop(bound);
     // Connections see the shutdown watch. Do not let stalled clients prevent exit.
     let _ = timeout(Duration::from_secs(5), async {
         while clients.join_next().await.is_some() {}
@@ -519,5 +550,32 @@ mod tests {
         assert_eq!(replies[4]["event"], "snapshot.end");
         assert_eq!(replies[5]["id"], "3");
         assert_eq!(replies[6]["id"], "4");
+    }
+
+    #[tokio::test]
+    async fn eof_drains_dispatched_operation_replies() {
+        let input = concat!(
+            "{\"version\":1,\"id\":\"1\",\"method\":\"hello\"}\n",
+            "{\"version\":1,\"id\":\"2\",\"method\":\"store.read\",\"params\":{\"store\":\"settings\"}}\n"
+        );
+        let (writer, mut output) = tokio::io::duplex(16384);
+        let (shutdown_tx, shutdown) = watch::channel(false);
+        let task = tokio::spawn(serve(
+            BufReader::new(input.as_bytes()),
+            writer,
+            Service::new().unwrap(),
+            shutdown,
+        ));
+        let mut data = String::new();
+        output.read_to_string(&mut data).await.unwrap();
+        task.await.unwrap().unwrap();
+        drop(shutdown_tx);
+        let replies: Vec<Value> = data
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[0]["id"], "1");
+        assert_eq!(replies[1]["id"], "2");
     }
 }

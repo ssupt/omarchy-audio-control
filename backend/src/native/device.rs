@@ -37,7 +37,16 @@ impl OwnedDevice {
         }
     }
     pub fn info(&mut self, snapshot: &mut Device, info: &pw::device::DeviceInfoRef) {
-        snapshot.properties.extend(copy_props(info.props()));
+        if info
+            .change_mask()
+            .contains(pw::device::DeviceChangeMask::PROPS)
+        {
+            if info.props().is_some() {
+                snapshot.properties = copy_props(info.props());
+            }
+        } else if snapshot.properties.is_empty() {
+            snapshot.properties = copy_props(info.props());
+        }
         if info
             .change_mask()
             .contains(pw::device::DeviceChangeMask::PARAMS)

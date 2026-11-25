@@ -6,6 +6,7 @@ use std::{
 };
 
 fn collect_sources(root: &Path, directory: &Path, files: &mut Vec<String>) {
+    println!("cargo:rerun-if-changed={}", directory.display());
     for entry in fs::read_dir(directory).unwrap() {
         let path = entry.unwrap().path();
         if path.is_dir() {
@@ -34,12 +35,7 @@ fn main() {
         "packaging/launch-backend.py".into(),
     ];
     collect_sources(root, &root.join("backend/src"), &mut files);
-    println!(
-        "cargo:rerun-if-changed={}",
-        root.join("backend/src").display()
-    );
     collect_sources(root, &root.join("qml"), &mut files);
-    println!("cargo:rerun-if-changed={}", root.join("qml").display());
     let scripts = root.join("scripts");
     for entry in fs::read_dir(&scripts).unwrap() {
         let path = entry.unwrap().path();

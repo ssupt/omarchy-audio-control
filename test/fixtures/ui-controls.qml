@@ -63,6 +63,11 @@ Item {
   function level(value) {
     return streamRow && Math.abs(panel.audioNodeVolume(streamRow.node) - value) < .01
   }
+  function sliderX(fraction) {
+    return Math.round(typeof root.slider.trackX === "function"
+      ? root.slider.trackX(fraction)
+      : root.slider.width * fraction)
+  }
   Timer {
     interval: 50; repeat: true; running: !root.done
     onTriggered: {
@@ -193,37 +198,39 @@ Item {
         root.phase++
         break
       case 10:
-        pointer.mousePress(root.slider, root.slider.width * .3, root.slider.height / 2)
+        pointer.mousePress(root.slider, root.sliderX(.3), root.slider.height / 2)
         if (!root.check(root.slider.dragging, "pointer press did not start dragging")) return
         root.slider.enabled = false
-        pointer.mouseRelease(root.slider, root.slider.width * .4, root.slider.height / 2)
+        pointer.mouseRelease(root.slider, root.sliderX(.4), root.slider.height / 2)
         root.slider.enabled = true
         var moves = root.sliderMoves
-        pointer.mouseMove(root.slider, root.slider.width * .7, root.slider.height / 2)
+        pointer.mouseMove(root.slider, root.sliderX(.7), root.slider.height / 2)
         if (!root.check(!root.slider.dragging && root.sliderMoves === moves,
             "canceled slider follows the mouse after release")) return
-        pointer.mousePress(root.slider, root.slider.width * .2, root.slider.height / 2)
-        pointer.mouseMove(root.slider, root.slider.width * .6, root.slider.height / 2)
-        pointer.mouseRelease(root.slider, root.slider.width * .6, root.slider.height / 2)
+        pointer.mousePress(root.slider, root.sliderX(.2), root.slider.height / 2)
+        pointer.mouseMove(root.slider, root.sliderX(.6), root.slider.height / 2)
+        pointer.mouseRelease(root.slider, root.sliderX(.6), root.slider.height / 2)
         if (!root.check(!root.slider.dragging && Math.abs(root.lastReleased - root.lastMoved) < .001,
             "normal release lost the final slider value")) return
-        pointer.mouseDrag(root.slider, root.slider.width * .3, root.slider.height / 2,
-          root.slider.width * .4, root.slider.height + 30)
+        var dragStart = root.sliderX(.3)
+        var dragEnd = root.sliderX(.7)
+        pointer.mouseDrag(root.slider, dragStart, root.slider.height / 2,
+          dragEnd - dragStart, root.slider.height + 30)
         if (!root.check(!root.slider.dragging && Math.abs(root.lastMoved - .7) < .01
             && Math.abs(root.lastReleased - root.lastMoved) < .001
             && pointerScroll.contentY === 0, "slider drag outside the track lost its final value or scrolled the panel: "
             + JSON.stringify({dragging: root.slider.dragging, moved: root.lastMoved,
               released: root.lastReleased, contentY: pointerScroll.contentY}))) return
         moves = root.sliderMoves
-        pointer.mouseMove(root.slider, root.slider.width * .4, root.slider.height / 2)
+        pointer.mouseMove(root.slider, root.sliderX(.4), root.slider.height / 2)
         if (!root.check(!root.slider.dragging && root.sliderMoves === moves,
             "slider resumed dragging after release outside the track")) return
-        pointer.mousePress(root.slider, root.slider.width * .3, root.slider.height / 2)
+        pointer.mousePress(root.slider, root.sliderX(.3), root.slider.height / 2)
         root.slider.visible = false
         pointer.mouseRelease(pointerWindow.contentItem, 300, 80)
         root.slider.visible = true
         moves = root.sliderMoves
-        pointer.mouseMove(root.slider, root.slider.width * .8, root.slider.height / 2)
+        pointer.mouseMove(root.slider, root.sliderX(.8), root.slider.height / 2)
         if (!root.check(!root.slider.dragging && root.sliderMoves === moves,
             "hidden slider retained its drag after release outside the control")) return
         pointerWindow.hide()

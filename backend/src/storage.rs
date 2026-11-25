@@ -180,7 +180,9 @@ impl Storage {
             "store.read" => self.read(request.params::<Read>()?.store)?,
             "settings.set" => {
                 let params = request.params::<Setting>()?;
-                if !["outputOverdrive", "captureNotifications"].contains(&params.key.as_str()) {
+                if !["outputOverdrive", "captureNotifications", "compactDevices"]
+                    .contains(&params.key.as_str())
+                {
                     return Err(invalid());
                 }
                 self.update(Kind::Settings, |store| {
@@ -205,7 +207,16 @@ impl Storage {
                     return Err(invalid());
                 }
                 self.update(Kind::Preferences, |store| {
-                    store["bluetoothProfiles"][address] = json!(params.profile);
+                    let profiles = store["bluetoothProfiles"].as_object_mut().unwrap();
+                    profiles.shift_remove(&address);
+                    while profiles.len() >= 128 {
+                        if let Some(oldest) = profiles.keys().next().cloned() {
+                            profiles.shift_remove(&oldest);
+                        } else {
+                            break;
+                        }
+                    }
+                    profiles.insert(address, json!(params.profile));
                     Ok(())
                 })?
             }
@@ -535,6 +546,7 @@ pub fn normalize(kind: Kind, raw: &Value) -> Value {
             value["version"] = json!(1);
             value["outputOverdrive"] = json!(raw["outputOverdrive"] == true);
             value["captureNotifications"] = json!(raw["captureNotifications"] != false);
+            value["compactDevices"] = json!(raw["compactDevices"] == true);
             value
         }
         Kind::Preferences => {
@@ -808,6 +820,59 @@ mod tests {
         assert_eq!(identifier(&json!("  exact name  "), 160), "  exact name  ");
         assert_eq!(identifier(&json!("spoof\u{202e}name"), 160), "");
         assert_eq!(label(&json!("\n Display   Name \t"), 80), "Display Name");
+    }
+    #[test]
+    fn compact_device_layout_is_an_opt_in_boolean_setting() {
+        assert_eq!(
+            normalize(Kind::Settings, &json!({}))["compactDevices"],
+            false
+        );
+        assert_eq!(
+            normalize(Kind::Settings, &json!({"compactDevices": "yes"}))["compactDevices"],
+            false
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage {
+            directory: directory.path().into(),
+        };
+        let request = |key: &str, value: bool| {
+            storage.handle(&Request {
+                version: 1,
+                id: "settings-test".into(),
+                method: "settings.set".into(),
+                params: json!({"key": key, "value": value}),
+            })
+        };
+        request("compactDevices", true).unwrap();
+        assert_eq!(
+            storage.read(Kind::Settings).unwrap()["compactDevices"],
+            true
+        );
+        assert!(request("unknownLayout", true).is_err());
+    }
+    #[test]
+    fn bluetooth_profile_preferences_evict_oldest_past_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage {
+            directory: directory.path().into(),
+        };
+        for index in 0..130u32 {
+            let address = format!("AA:BB:CC:DD:{:02X}:{:02X}", index / 256, index % 256);
+            storage
+                .handle(&Request {
+                    version: 1,
+                    id: format!("bt-{index}"),
+                    method: "preferences.profile".into(),
+                    params: json!({"address": address, "profile": format!("a2dp-sink-{index}")}),
+                })
+                .unwrap();
+        }
+        let saved = storage.read(Kind::Preferences).unwrap();
+        let profiles = saved["bluetoothProfiles"].as_object().unwrap();
+        assert_eq!(profiles.len(), 128);
+        assert!(!profiles.contains_key("aabbccdd0000"));
+        assert!(!profiles.contains_key("aabbccdd0001"));
+        assert_eq!(profiles["aabbccdd0081"], "a2dp-sink-129");
     }
     #[test]
     fn forgetting_bluetooth_removes_only_that_devices_saved_routes() {

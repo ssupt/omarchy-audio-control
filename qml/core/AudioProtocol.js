@@ -38,6 +38,7 @@ function Client(options) {
   this.negotiated = false
   this.ready = false
   this.info = null
+  this.connectionId = 0
 }
 Client.prototype.now = function() { return this.options.now ? this.options.now() : Date.now() }
 Client.prototype.scheduleDeadline = function(force) {
@@ -69,6 +70,7 @@ Client.prototype.reset = function(error) {
   this.negotiated = false
   this.ready = false
   this.info = null
+  this.connectionId++
   if (this.options.ready) this.options.ready(false, null)
   for (var id in pending) {
     var entry = pending[id]
@@ -84,7 +86,9 @@ Client.prototype.open = function() {
   this.reset(failure("disconnected", "Audio service connection replaced", false))
   this.connected = true
   var client = this
+  var connectionId = this.connectionId
   this.request("hello", {}, function(result, error) {
+    if (client.connectionId !== connectionId || !client.connected) return
     if (error) { client.fault(error.message); return }
     if (!object(result) || result.name !== "omarchy-audio-service"
         || result.protocolVersion !== VERSION || result.transport !== "jsonl-ascii"
@@ -103,6 +107,7 @@ Client.prototype.open = function() {
     client.negotiated = true
     client.info = result
     client.request("state.subscribe", {}, function(_result, subscribeError) {
+      if (client.connectionId !== connectionId || !client.connected) return
       if (subscribeError) client.fault(subscribeError.message)
     }, { mutating: false, timeout: 5000 })
   }, { mutating: false, timeout: 5000 })
@@ -233,7 +238,9 @@ Client.prototype.event = function(name, data) {
       this.fault("Stale audio service snapshot")
       return
     }
+    var connectionId = this.connectionId
     if (this.options.state) this.options.state(state)
+    if (this.connectionId !== connectionId || !this.connected) return
     this.initialSnapshotDeadline = 0
     var wasReady = this.ready
     this.ready = true
@@ -252,11 +259,21 @@ Client.prototype.tick = function() {
   for (var id in this.pending) {
     if (now >= this.pending[id].deadline) { expired.push(this.pending[id]); delete this.pending[id] }
   }
-  for (var i = 0; i < expired.length; i++) {
-    var entry = expired[i]
-    this.callback(entry.callback, null, failure("timeout", "Audio command timed out; refreshing state", entry.mutating))
+  if (expired.length) {
+    // Mark disconnected before notifying expired callbacks so callback cleanup
+    // (e.g. flushing coalesced slider tails) cannot write to a hung backend.
+    this.connected = false
+    this.negotiated = false
+    this.ready = false
+    this.info = null
+    this.connectionId++
+    if (this.options.ready) this.options.ready(false, null)
+    for (var i = 0; i < expired.length; i++) {
+      var entry = expired[i]
+      this.callback(entry.callback, null, failure("timeout", "Audio command timed out; refreshing state", entry.mutating))
+    }
+    this.fault("Audio command timed out; refreshing state")
   }
-  if (expired.length) this.fault("Audio service stopped responding")
   // QML can fire slightly early; rearm even when the nearest deadline is unchanged.
   this.scheduleDeadline(true)
 }

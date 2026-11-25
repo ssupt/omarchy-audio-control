@@ -63,7 +63,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     }
     if options.socket.is_none() && !options.plugin_daemon {
         if let Some(listener) = systemd_listener()? {
-            let result = serve_listener(listener, service.clone(), receiver).await;
+            let result = serve_listener(listener, None, service.clone(), receiver).await;
             service.drain().await;
             return Ok(result?);
         }
@@ -75,7 +75,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     };
     let mut socket = bind_socket(&path)?;
     eprintln!("listening on {}", path.display());
-    let result = serve_listener(socket.take_listener(), service.clone(), receiver).await;
+    let listener = socket.take_listener();
+    let result = serve_listener(listener, Some(socket), service.clone(), receiver).await;
     service.drain().await;
     Ok(result?)
 }

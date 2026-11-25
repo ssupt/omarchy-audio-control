@@ -58,7 +58,8 @@ For an application, **Follow default output** clears a saved destination;
 can also stay pinned to a microphone. The advanced window also offers device
 aliases and favorites, stereo balance, supported Bluetooth modes, microphone
 activity and a five-second record-and-playback test, speaker identification,
-audio recovery, and diagnostics.
+audio recovery, diagnostics, and a compact quick-mixer layout that folds each
+device list into a single picker (**Devices → Quick mixer**).
 
 An output group can drift when its devices use separate clocks, especially with
 Bluetooth. Microphone tests start only when requested; clips stay in memory

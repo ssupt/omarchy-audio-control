@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 pub(super) const PENDING_GROUP_ERROR: &str =
     "An output group change is pending while the group is in use";
+const GROUP_RESTORE_ERROR: &str = "Some output groups could not be restored";
 
 impl Service {
     pub(super) fn apply_reconcile_state(&self, result: Result<Value>) {
@@ -24,18 +25,20 @@ impl Service {
                     .unwrap_or(false);
                 self.update_state(|state| {
                     state["pendingGroups"] = pending;
-                    state["automationError"] = if failed {
-                        json!("Some output groups could not be restored")
+                    if failed {
+                        state["automationError"] = json!(GROUP_RESTORE_ERROR);
                     } else if has_pending {
-                        json!(PENDING_GROUP_ERROR)
-                    } else {
-                        json!("")
-                    };
+                        state["automationError"] = json!(PENDING_GROUP_ERROR);
+                    } else if state["automationError"] == PENDING_GROUP_ERROR
+                        || state["automationError"] == GROUP_RESTORE_ERROR
+                    {
+                        state["automationError"] = json!("");
+                    }
                 });
             }
             Err(_) => {
                 self.update_state(|state| {
-                    state["automationError"] = json!("Some output groups could not be restored")
+                    state["automationError"] = json!(GROUP_RESTORE_ERROR);
                 });
             }
         }
@@ -107,5 +110,28 @@ impl Service {
         tokio::task::spawn_blocking(move || groups::apply(&native, &storage, change))
             .await
             .map_err(|_| Failure::unknown("Output group verification did not finish"))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconcile_success_preserves_unrelated_automation_error() {
+        let service = Service::new().unwrap();
+        service.update_state(|s| {
+            s["automationError"] = json!("An application rule could not be applied");
+        });
+        service.apply_reconcile_state(Ok(json!({"pendingGroups": [], "failed": false})));
+        assert_eq!(
+            service.state.borrow()["automationError"],
+            "An application rule could not be applied"
+        );
+        service.update_state(|s| {
+            s["automationError"] = json!(PENDING_GROUP_ERROR);
+        });
+        service.apply_reconcile_state(Ok(json!({"pendingGroups": [], "failed": false})));
+        assert_eq!(service.state.borrow()["automationError"], "");
     }
 }

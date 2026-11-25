@@ -44,14 +44,20 @@ impl Service {
         ])
         .to_string();
         let mut catalog = self.catalog.lock().unwrap();
+        if graph.sequence != 0 && graph.sequence <= catalog.last_sequence {
+            return;
+        }
+        if graph.sequence != 0 {
+            catalog.last_sequence = graph.sequence;
+        }
         let links = json!(graph.links.values().collect::<Vec<_>>());
         self.update_state(|state| {
-            if *catalog != fingerprint || state["links"] != links {
+            if catalog.fingerprint != fingerprint || state["links"] != links {
                 state["routes"] = crate::routing::snapshot(graph);
                 state["outputs"] = crate::outputs::snapshot(graph);
             }
-            if *catalog != fingerprint {
-                *catalog = fingerprint;
+            if catalog.fingerprint != fingerprint {
+                catalog.fingerprint = fingerprint;
                 let revision = state["catalogRevision"]
                     .as_str()
                     .and_then(|s| s.parse::<u64>().ok())
@@ -80,6 +86,7 @@ impl Service {
         let Some(storage) = self.storage.clone() else {
             return Ok(());
         };
+        let _store_sync = self.store_sync.lock().await;
         let stores =
             tokio::task::spawn_blocking(move || Kind::ALL.map(|kind| (kind, storage.read(kind))))
                 .await
@@ -127,7 +134,6 @@ impl Service {
                     .and_then(|paths| crate::file_watch::Watcher::new(&paths).map_err(Into::into));
                 if let Some(service) = weak.upgrade() {
                     // Watches precede the read so replacement during startup is observed.
-                    let _guard = service.mutation.lock().await;
                     let _ = service.reload_stores().await;
                     if let Err(error) = &watcher {
                         service.update_state(|state| state["storeWatchError"] = json!(error));
@@ -143,7 +149,6 @@ impl Service {
                         let Some(service) = weak.upgrade() else {
                             return;
                         };
-                        let _guard = service.mutation.lock().await;
                         let _ = service.reload_stores().await;
                     }
                 }
@@ -204,5 +209,35 @@ impl Service {
             ));
         }
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::Service;
+    use crate::native::Graph;
+
+    #[test]
+    fn publish_graph_ignores_older_sequence_snapshots() {
+        let service = Service::new().unwrap();
+        let newer = Graph {
+            sequence: 5,
+            connected: true,
+            ready: true,
+            generation: "gen-1".into(),
+            ..Graph::default()
+        };
+        let older = Graph {
+            sequence: 4,
+            connected: false,
+            ready: false,
+            generation: "gen-0".into(),
+            ..Graph::default()
+        };
+        service.publish_graph(&newer);
+        service.publish_graph(&older);
+        let state = service.state.borrow().clone();
+        assert_eq!(state["connected"], true);
+        assert_eq!(state["generation"], "gen-1");
     }
 }
