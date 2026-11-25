@@ -13,6 +13,7 @@ CursorSurface {
   required property string glyph
   required property string label
   required property int deviceCount
+  readonly property bool expandable: deviceCount > 1
 
   signal claimed(string section, int index)
   signal activated()
@@ -47,18 +48,19 @@ CursorSurface {
       font.pixelSize: Style.font.body
       font.bold: true
       elide: Text.ElideRight
-      width: parent.width - Style.space(22) - pickerHint.width - Style.space(16)
+      width: parent.width - Style.space(22)
+        - (pickerHint.visible ? pickerHint.width + Style.space(16) : Style.space(8))
       anchors.verticalCenter: parent.verticalCenter
     }
 
     Row {
       id: pickerHint
+      visible: root.expandable
       spacing: Style.space(4)
       anchors.verticalCenter: parent.verticalCenter
 
       Text {
         textFormat: Text.PlainText
-        visible: root.deviceCount > 1
         text: String(root.deviceCount)
         color: Qt.darker(root.bar.foreground, 1.4)
         font.family: root.bar.fontFamily
@@ -80,7 +82,8 @@ CursorSurface {
 
   MouseArea {
     anchors.fill: parent
-    hoverEnabled: true
+    enabled: root.expandable
+    hoverEnabled: root.expandable
     cursorShape: Qt.PointingHandCursor
     onContainsMouseChanged: if (containsMouse) root.claimed(root.section, 0)
     onClicked: root.activated()

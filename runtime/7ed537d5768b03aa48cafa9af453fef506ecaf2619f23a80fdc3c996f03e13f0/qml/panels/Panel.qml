@@ -165,9 +165,11 @@ Panel {
     && !!audioService.stores.settings && audioService.stores.settings.compactDevices === true
   property bool outputDevicesExpanded: false
   property bool inputDevicesExpanded: false
-  readonly property bool outputDevicesCollapsed: compactDevices && !outputDevicesExpanded
+  readonly property bool outputDevicesCollapsed: compactDevices
+    && (!outputDevicesExpanded || displayAudioSinks.length <= 1)
     && displayAudioSinks.length > 0
-  readonly property bool inputDevicesCollapsed: compactDevices && !inputDevicesExpanded
+  readonly property bool inputDevicesCollapsed: compactDevices
+    && (!inputDevicesExpanded || displayAudioSources.length <= 1)
     && displayAudioSources.length > 0
   readonly property var activeOutputRowNode: activeDisplayNode(displayAudioSinks, sink, preferredOutputName)
   readonly property var activeInputRowNode: activeDisplayNode(displayAudioSources, source, preferredInputName)
@@ -178,6 +180,8 @@ Panel {
     inputDevicesExpanded = false
     clampCursor()
   }
+  onDisplayAudioSinksChanged: if (outputDevicesExpanded && displayAudioSinks.length <= 1) outputDevicesExpanded = false
+  onDisplayAudioSourcesChanged: if (inputDevicesExpanded && displayAudioSources.length <= 1) inputDevicesExpanded = false
   onOutputDevicesCollapsedChanged: clampCursor()
   onInputDevicesCollapsedChanged: clampCursor()
 
@@ -200,14 +204,16 @@ Panel {
   function toggleDeviceList(section) {
     var expanding = section === "output" ? !outputDevicesExpanded : !inputDevicesExpanded
     var list = section === "output" ? displayAudioSinks : displayAudioSources
+    if (expanding && list.length <= 1) return false
     var active = section === "output" ? activeOutputRowNode : activeInputRowNode
     if (section === "output") outputDevicesExpanded = expanding
     else if (section === "input") inputDevicesExpanded = expanding
-    else return
+    else return false
     cursorActive = true
     focusSection = section
     // Opening lands on the current device so Enter alone keeps it.
     selectedIndex = expanding ? Math.max(0, list.indexOf(active)) : 0
+    return true
   }
 
   readonly property var audioStreams: {
@@ -486,8 +492,10 @@ Panel {
 
   function sectionCount(section) {
     if (section === "scenes") return audioScenes.length
-    if (section === "output") return outputDevicesCollapsed ? 1 : displayAudioSinks.length
-    if (section === "input") return inputDevicesCollapsed ? 1 : displayAudioSources.length
+    if (section === "output") return outputDevicesCollapsed
+      ? (displayAudioSinks.length > 1 ? 1 : 0) : displayAudioSinks.length
+    if (section === "input") return inputDevicesCollapsed
+      ? (displayAudioSources.length > 1 ? 1 : 0) : displayAudioSources.length
     if (section === "streams") return displayAudioStreams.length
     if (section === "recording") return displayRecordingStreams.length
     return 0
@@ -496,7 +504,7 @@ Panel {
   function sectionVisible(section) {
     if (section === "scenes") return audioScenes.length > 0
     if (section === "output") return true
-    if (section === "input") return displayAudioSources.length > 0 || hasInput
+    if (section === "input") return sectionCount("input") > 0 || hasInput
     if (section === "streams") return displayAudioStreams.length > 0
     if (section === "recording") return displayRecordingStreams.length > 0
     return false
@@ -1276,10 +1284,12 @@ Panel {
       onActivateRequested: if (root.cursorActive) root.activateCursor()
       onCloseRequested: {
         // In the compact layout Escape first folds an open device list.
-        if (root.compactDevices && (root.outputDevicesExpanded || root.inputDevicesExpanded)) {
-          var section = root.outputDevicesExpanded && root.focusSection === "output" ? "output"
-            : root.inputDevicesExpanded && root.focusSection === "input" ? "input"
-            : (root.outputDevicesExpanded ? "output" : "input")
+        var outputOpen = root.outputDevicesExpanded && root.displayAudioSinks.length > 1
+        var inputOpen = root.inputDevicesExpanded && root.displayAudioSources.length > 1
+        if (root.compactDevices && (outputOpen || inputOpen)) {
+          var section = outputOpen && root.focusSection === "output" ? "output"
+            : inputOpen && root.focusSection === "input" ? "input"
+            : (outputOpen ? "output" : "input")
           root.toggleDeviceList(section)
           return
         }
@@ -1589,7 +1599,8 @@ Panel {
               glyph: Model.sinkGlyph(root.activeOutputRowNode)
               label: root.activeOutputRowNode ? root.nodeLabel(root.activeOutputRowNode) : "No output"
               deviceCount: root.displayAudioSinks.length
-              hasCursor: root.cursorActive && root.focusSection === "output" && root.selectedIndex === 0
+              hasCursor: root.cursorActive && root.focusSection === "output"
+                && root.selectedIndex === 0 && outputPicker.expandable
               onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(outputPicker)
               foreground: root.bar.foreground
               fill: root.hoverFill
@@ -1746,7 +1757,8 @@ Panel {
               glyph: Model.sourceGlyph(root.activeInputRowNode)
               label: root.activeInputRowNode ? root.nodeLabel(root.activeInputRowNode) : "No input"
               deviceCount: root.displayAudioSources.length
-              hasCursor: root.cursorActive && root.focusSection === "input" && root.selectedIndex === 0
+              hasCursor: root.cursorActive && root.focusSection === "input"
+                && root.selectedIndex === 0 && inputPicker.expandable
               onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(inputPicker)
               foreground: root.bar.foreground
               fill: root.hoverFill

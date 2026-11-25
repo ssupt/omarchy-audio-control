@@ -21,6 +21,7 @@ function panel() {
     displayAudioSinks: [output], displayAudioSources: [input],
     displayAudioStreams: [stream], displayRecordingStreams: [],
     preferredOutputName: '', preferredInputName: '',
+    compactDevices: false,
     outputDevicesExpanded: false, inputDevicesExpanded: false, cursorActive: false,
     outputVolumeMaximum: 1, focusSection: 'output', selectedIndex: -1,
     nodeGeneration: 'g',
@@ -51,6 +52,8 @@ function panel() {
     ['var', 'masterState'],
     ['bool', 'activeRecordingMuted'],
     ['bool', 'anyAudible'],
+    ['bool', 'outputDevicesCollapsed'],
+    ['bool', 'inputDevicesCollapsed'],
     ['var', 'activeOutputRowNode'],
     ['var', 'activeInputRowNode']
   ]) {
@@ -433,6 +436,26 @@ for (const action of ['toggleOutputMute', 'toggleInputMute', 'adjustVolume']) {
   // When no live default is reported, fall back to the saved preference.
   p.sink = null
   assert.equal(p.activeOutputRowNode, headphones)
+
+  // Compact pickers must not expand when only a single device is selectable.
+  p.compactDevices = true
+  p.outputDevicesExpanded = false
+  p.inputDevicesExpanded = false
+  p.displayAudioSinks = [speakers]
+  p.displayAudioSources = [internalMic]
+  assert.equal(p.outputDevicesCollapsed, true)
+  assert.equal(p.inputDevicesCollapsed, true)
+  assert.equal(p.sectionCount('output'), 0)
+  assert.equal(p.sectionCount('input'), 0)
+  assert.equal(p.toggleDeviceList('output'), false)
+  assert.equal(p.outputDevicesExpanded, false)
+  assert.equal(p.toggleDeviceList('input'), false)
+  assert.equal(p.inputDevicesExpanded, false)
+  // Even if expanded before a second device unplugged, collapsing stays enforced at 1 device.
+  p.outputDevicesExpanded = true
+  p.inputDevicesExpanded = true
+  assert.equal(p.outputDevicesCollapsed, true)
+  assert.equal(p.inputDevicesCollapsed, true)
 }
 
 {
